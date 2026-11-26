@@ -198,12 +198,14 @@ constexpr std::size_t dense_rows_bytes(matrix_view_type_ view, std::size_t rows_
  *  ties - binary vectors above all - make the top-1 slot and ID-matching unfair judges of a healthy
  *  graph, and a distance criterion needs no assigned-IDs plumbing, so it survives reloads &
  *  thread-sliced builds unchanged.
- *  Sampling is evenly spaced; callers keep the dot-kernel gate, where "distance" is a
- *  similarity and self-matching is undefined. Requires @p rows_count ≥ @p samples_count.
+ *  Sampling is evenly spaced over @c recall_samples_k rows, or over all of fewer @p rows_count;
+ *  callers keep the dot-kernel gate, where "distance" is a similarity and self-matching has no
+ *  meaning at all.
  *  The searches walk a fresh context for the index @p make_index builds. */
 template <typename index_type_, typename make_index_type_, typename vectors_view_type_>
 std::size_t dense_count_self_hits(index_type_& index, make_index_type_ const& make_index, vectors_view_type_ vectors,
-                                  std::size_t rows_count, std::size_t samples_count) {
+                                  std::size_t rows_count) {
+    std::size_t const samples_count = min_of(recall_samples_k, rows_count);
     std::size_t hits = 0;
     typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
     for (std::size_t sample = 0; sample != samples_count; ++sample) {
@@ -224,9 +226,10 @@ std::size_t dense_count_self_hits(index_type_& index, make_index_type_ const& ma
 /** The judged form of @ref dense_count_self_hits: the share found must clear the floor. */
 template <typename index_type_, typename make_index_type_, typename vectors_view_type_>
 void dense_expect_self_recall(index_type_& index, make_index_type_ const& make_index, vectors_view_type_ vectors,
-                              std::size_t rows_count, std::size_t samples_count) {
-    std::size_t const hits = dense_count_self_hits(index, make_index, vectors, rows_count, samples_count);
-    expect_true(hits * 100 >= samples_count * dense_minimal_recall_percent_k);
+                              std::size_t rows_count) {
+    std::size_t const samples_count = min_of(recall_samples_k, rows_count);
+    std::size_t const hits = dense_count_self_hits(index, make_index, vectors, rows_count);
+    expect_true(hits + recall_margin_k * samples_count >= samples_count * dense_minimal_recall_percent_k / 100.0);
 }
 
 /** The ranking in @p context ascends by distance - the candidates' invariant after any walk. */
@@ -682,7 +685,7 @@ void dense_expect_growth_and_recall(make_index_type_ const& make_index, allocati
     if constexpr (requires { context.restarts; }) expect_equal(result.restarts, context.restarts);
 
     if constexpr (kernel_ != nk_kernel_dot_k)
-        dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k, 32);
+        dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k);
     // A single query keeps its whole expansion, past any inline staging.
     typename index_type_::search_config_t wide {};
     wide.expansion_factor = 200;
@@ -793,7 +796,7 @@ void dense_expect_predicated_search(make_index_type_ const& make_index, allocati
         auto matches = quad_predicate([modulus](node_id_t node_id) noexcept {
             return node_id % modulus == 0 ? admission_t::admit_k : admission_t::reject_k;
         });
-        for (std::size_t sample = 0; sample != 8; ++sample) {
+        for (std::size_t sample = 0; sample != recall_samples_k; ++sample) {
             std::size_t sampled_row = ((sample * 641 + modulus) % dense_growth_nodes_k) / modulus * modulus;
             if (sample % 2) sampled_row += 1; // An excluded neighbor of a matching row.
             typename index_type_::traversal_context_t sampled_context {{}};
@@ -818,7 +821,7 @@ void dense_expect_predicated_search(make_index_type_ const& make_index, allocati
         }
     }
     if constexpr (kernel_ != nk_kernel_dot_k)
-        expect_true(hits * 100 >= recall_samples * dense_minimal_recall_percent_k);
+        expect_true(hits + recall_margin_k * recall_samples >= recall_samples * dense_minimal_recall_percent_k / 100.0);
     expect_errors("predicated distances", comparison_family_t::approximate_k, comparison_verdict_t::assert_k,
                   distance_errors, 0);
 
@@ -1406,7 +1409,7 @@ void dense_expect_save_load_round_trip(make_index_type_ const& make_index, alloc
         dense_expect_pooled_save(restored, shape, saved_vectors, saved_neighbors);
 
     if constexpr (kernel_ != nk_kernel_dot_k)
-        dense_expect_self_recall(restored, make_index, vectors.view(), dense_growth_nodes_k, 32);
+        dense_expect_self_recall(restored, make_index, vectors.view(), dense_growth_nodes_k);
 }
 
 /** @ref dense_expect_save_load_round_trip, then the ledger it left must balance. */
@@ -1737,8 +1740,7 @@ void dense_expect_refine_settles(make_index_type_ const& make_index, allocation_
     expect_equal(index.size(), dense_growth_nodes_k);
 
     std::size_t const hits_before = kernel_ != nk_kernel_dot_k
-                                        ? dense_count_self_hits(index, make_index, vectors.view(), dense_growth_nodes_k,
-                                                                32)
+                                        ? dense_count_self_hits(index, make_index, vectors.view(), dense_growth_nodes_k)
                                         : 0;
     // A round re-stitches every entry from its links and neighborhood-mates alone.
     auto const [first_refinement, first_status] = index.refine({}, context);
@@ -1758,7 +1760,9 @@ void dense_expect_refine_settles(make_index_type_ const& make_index, allocation_
 
     // A round is a build task, so what it must never do is cost the graph its answers.
     if constexpr (kernel_ != nk_kernel_dot_k)
-        expect_true(dense_count_self_hits(index, make_index, vectors.view(), dense_growth_nodes_k, 32) >= hits_before);
+        expect_true(dense_count_self_hits(index, make_index, vectors.view(), dense_growth_nodes_k) +
+                        recall_margin_k * recall_samples_k >=
+                    hits_before);
 }
 
 /** @ref dense_expect_refine_settles, then the ledger it left must balance. */
@@ -2094,9 +2098,8 @@ template <typename index_type_, typename make_index_type_, typename vectors_view
 std::size_t dense_recall_at_ten(index_type_& index, make_index_type_ const& make_index, vectors_view_type_ queries) {
     using search_config_t = typename index_type_::search_config_t;
     using candidates_count_t = typename index_type_::candidates_count_t;
-    constexpr std::size_t wanted_k = 10;
     typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
-    search_config_t const scan {.expansion_factor = static_cast<candidates_count_t>(wanted_k),
+    search_config_t const scan {.expansion_factor = static_cast<candidates_count_t>(recall_wanted_k),
                                 .traversal = traversal_t::scan_k};
     std::size_t found = 0;
     for (std::size_t query = 0; query != queries.extent(0); ++query) {
@@ -2105,7 +2108,7 @@ std::size_t dense_recall_at_ten(index_type_& index, make_index_type_ const& make
         f64_t const tenth = context.results[context.results.size() - 1].distance;
         auto const [walked, status] = index.search(query_vector, {}, context);
         if (failed(status)) continue;
-        for (std::size_t rank = 0; rank != min_of(wanted_k, walked.count); ++rank)
+        for (std::size_t rank = 0; rank != min_of(recall_wanted_k, walked.count); ++rank)
             found += context.results[rank].distance <= tenth + 1e-3 * max_of(std::fabs(tenth), 1.0);
     }
     return found;
@@ -2124,14 +2127,14 @@ template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_ty
 void dense_expect_cut(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     using node_id_t = typename index_type_::node_id_t;
-    constexpr std::size_t rows_k = dense_growth_nodes_k, samples_k = 32,
-                          noise_percent_k = static_cast<std::size_t>(rewrite_recall_margin_k * 100);
+    constexpr std::size_t rows_k = dense_growth_nodes_k;
     constexpr nk_kernel_kind_t other_kernel_k = kernel_ == nk_kernel_euclidean_k ? nk_kernel_angular_k
                                                                                  : nk_kernel_euclidean_k;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
     nk::matrix<scalar_t> const vectors = make_vectors<scalar_t>(rows_k, dimensions, stream_key(seed, "cut"));
-    nk::matrix<scalar_t> const queries = make_vectors<scalar_t>(samples_k, dimensions, stream_key(seed, "cut", 1));
+    nk::matrix<scalar_t> const queries = make_vectors<scalar_t>(recall_samples_k, dimensions,
+                                                                stream_key(seed, "cut", 1));
     std::size_t const row_bytes = dense_rows_bytes(vectors.view(), 1);
     std::vector<typename index_type_::key_t> const keys = dense_keys<index_type_>(rows_k);
     // Equal vectors under fresh contexts build equal graphs.
@@ -2149,7 +2152,7 @@ void dense_expect_cut(make_index_type_ const& make_index, allocation_ledger_t& l
         return targets;
     };
     auto recall_close = [&](std::size_t found, std::size_t baseline) {
-        return expect_true(found * 100 + noise_percent_k * samples_k * 10 >= baseline * 100);
+        return expect_true(found + recall_margin_k * recall_samples_k * recall_wanted_k >= baseline);
     };
     // The one source a mono-index reshard moves out of.
     auto source_of = [](index_type_& source) { return std::array<index_type_*, 1> {&source}; };
@@ -2892,7 +2895,7 @@ void dense_expect_concurrent_build(make_index_type_ const& make_index, allocatio
 
     if constexpr (kernel_ != nk_kernel_dot_k)
         for (std::size_t thread = 0; thread != writer_threads_count; ++thread)
-            dense_expect_self_recall(index, make_index, threads.slices[thread].view(), dense_thread_nodes_k, 4);
+            dense_expect_self_recall(index, make_index, threads.slices[thread].view(), dense_thread_nodes_k);
 }
 
 /** @ref dense_expect_concurrent_build, then the ledger it left must balance. */
@@ -3447,7 +3450,7 @@ void test_dense_indexes_gather(u64_t seed, placement_types_&... placement) {
     if constexpr (kernel_ != nk_kernel_dot_k) {
         dense_indexes_row_driver<indexes_type_> rows_driver {target, driver};
         expect_true(succeeded(rows_driver.status));
-        std::size_t const samples_count = 64;
+        std::size_t const samples_count = min_of(recall_samples_k, half);
         nk::vector<key_t> found_keys = make_vector<key_t>(8);
         nk::vector<typename indexes_type_::distance_t> found_distances =
             make_vector<typename indexes_type_::distance_t>(8);
@@ -3466,7 +3469,8 @@ void test_dense_indexes_gather(u64_t seed, placement_types_&... placement) {
                         break;
                     }
             }
-            expect_true(hits * 100 >= samples_count * dense_minimal_recall_percent_k);
+            expect_true(hits + recall_margin_k * samples_count >=
+                        samples_count * dense_minimal_recall_percent_k / 100.0);
         }
     }
 }
@@ -3613,8 +3617,7 @@ void test_dense_indexes_cut(u64_t seed, placement_types_&... placement) {
     using distance_t = typename indexes_type_::distance_t;
     using oracle_kit_t =
         typename quads_ladder<scalar_t, dense_oracle_capability<typename indexes_type_::index_t>()>::kit_t;
-    constexpr std::size_t samples_k = 32, wanted_k = 10,
-                          noise_percent_k = static_cast<std::size_t>(rewrite_recall_margin_k * 100);
+    constexpr std::size_t wanted_k = 10;
     constexpr nk_kernel_kind_t other_kernel_k = kernel_ == nk_kernel_euclidean_k ? nk_kernel_angular_k
                                                                                  : nk_kernel_euclidean_k;
     std::size_t const rows = dense_growth_nodes_k;
@@ -3624,12 +3627,12 @@ void test_dense_indexes_cut(u64_t seed, placement_types_&... placement) {
     if (failed(driver.status)) return void(expect_true(false));
     auto& executor = driver.executor;
     nk::matrix<scalar_t> const vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_cut"));
-    nk::matrix<scalar_t> const queries = make_vectors<scalar_t>(samples_k, dimensions,
+    nk::matrix<scalar_t> const queries = make_vectors<scalar_t>(recall_samples_k, dimensions,
                                                                 stream_key(seed, "indexes_cut", 1));
     nk::vector<key_t> keys = make_vector<key_t>(rows);
     for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
-    nk::matrix<distance_t> oracle = make_matrix<distance_t>(samples_k, rows);
-    for (std::size_t query = 0; query != samples_k; ++query) {
+    nk::matrix<distance_t> oracle = make_matrix<distance_t>(recall_samples_k, rows);
+    for (std::size_t query = 0; query != recall_samples_k; ++query) {
         auto const query_vector = queries.view().row(query).as_vector();
         auto const query_norms = norms<oracle_kit_t>(query_vector);
         for (std::size_t row = 0; row != rows; ++row) {
@@ -3651,7 +3654,7 @@ void test_dense_indexes_cut(u64_t seed, placement_types_&... placement) {
         nk::vector<distance_t> held_distances = make_vector<distance_t>(held.size());
         std::span<distance_t> const exact = to_writable_span(held_distances);
         std::size_t found = 0;
-        for (std::size_t query = 0; query != samples_k && held.size() >= wanted_k; ++query) {
+        for (std::size_t query = 0; query != recall_samples_k && held.size() >= wanted_k; ++query) {
             for (std::size_t held_row = 0; held_row != held.size(); ++held_row)
                 exact[held_row] = oracle(query, held[held_row]);
             std::sort(exact.begin(), exact.end());
@@ -3666,7 +3669,7 @@ void test_dense_indexes_cut(u64_t seed, placement_types_&... placement) {
         return found;
     };
     auto recall_close = [&](std::size_t found, std::size_t baseline) {
-        return expect_true(found * 100 + noise_percent_k * samples_k * wanted_k >= baseline * 100);
+        return expect_true(found + recall_margin_k * recall_samples_k * wanted_k >= baseline);
     };
     auto make_targets = [&](std::vector<std::unique_ptr<indexes_type_>>& owned, std::size_t count) {
         std::vector<indexes_type_*> targets;
@@ -4326,7 +4329,7 @@ void test_dense_indexes_concurrent_add(u64_t seed, placement_types_&... placemen
         dense_indexes_row_driver<indexes_type_> rows_driver {indexes, drivers[0]};
         expect_true(succeeded(rows_driver.status));
         std::size_t hits = 0;
-        std::size_t const samples_count = 8;
+        std::size_t const samples_count = min_of(recall_samples_k, rows_per_executor);
         nk::vector<key_t> found_keys = make_vector<key_t>(8);
         nk::vector<typename indexes_type_::distance_t> found_distances =
             make_vector<typename indexes_type_::distance_t>(8);
@@ -4343,7 +4346,7 @@ void test_dense_indexes_concurrent_add(u64_t seed, placement_types_&... placemen
                     break;
                 }
         }
-        expect_true(hits * 100 >= samples_count * dense_minimal_recall_percent_k);
+        expect_true(hits + recall_margin_k * samples_count >= samples_count * dense_minimal_recall_percent_k / 100.0);
     }
 }
 
@@ -4581,7 +4584,7 @@ void dense_expect_save_race(make_index_type_ const& make_index, allocation_ledge
             status_code_t::success_k);
         expect_equal(restored.size(), recorded.nodes);
         if constexpr (kernel_ != nk_kernel_dot_k)
-            dense_expect_self_recall(restored, make_index, recorded.vectors.view(), recorded.nodes, 16);
+            dense_expect_self_recall(restored, make_index, recorded.vectors.view(), recorded.nodes);
     }
 }
 
@@ -4863,7 +4866,7 @@ void dense_expect_allocation_budget(make_index_type_ const& make_index, allocati
     expect_equal(restored.load(source, to_span(keys), nodes_count, local), status_code_t::success_k);
     expect_equal(restored.size(), nodes_count);
     if constexpr (kernel_ != nk_kernel_dot_k)
-        dense_expect_self_recall(restored, make_index, vectors.view(), nodes_count, 16);
+        dense_expect_self_recall(restored, make_index, vectors.view(), nodes_count);
 }
 
 /** @ref dense_expect_allocation_budget, then the ledger it left must balance. */

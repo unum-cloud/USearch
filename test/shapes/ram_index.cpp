@@ -189,6 +189,11 @@ struct shapes_fixture {
     using metric_t = shapes_metric<kit_t>;
     static constexpr nk_kernel_kind_t kernel_k = kernel_;
 
+    /** Procrustes solves a rotation per distance, so its scenarios grow half the nodes - measured:
+     *  half keeps its @c test_basic_scenarios at the 173 s it took over 24 samples. */
+    static constexpr std::size_t growth_nodes_k = basic_growth_nodes_k /
+                                                  (kernel_ == nk_kernel_wassersteinprocrustes_packed_k ? 2 : 1);
+
     static std::unique_ptr<index_t> make_index(allocation_ledger_t& ledger) {
         return std::unique_ptr<index_t>(new (std::nothrow) index_t(counting_allocator_t {ledger}));
     }
@@ -435,9 +440,10 @@ struct chamfer_entries_t {
  *  the same metric over every cloud scores. */
 void test_shapes_sharded(u64_t seed) {
     using distance_t = chamfer_fixture_t::distance_t;
-    constexpr std::size_t entries_k = basic_recall_samples_k * basic_connectivity_k * basic_connectivity_k;
-    chamfer_entries_t const entries {entries_k + basic_recall_samples_k, stream_key(seed, "plural")};
-    std::vector<chamfer_shard_index_t::value_t> const packs = entries.values(entries_k + basic_recall_samples_k);
+    // One neighborhood of entries per sampled query, more than a walk reaches.
+    constexpr std::size_t entries_k = recall_samples_k * basic_connectivity_k;
+    chamfer_entries_t const entries {entries_k + recall_samples_k, stream_key(seed, "plural")};
+    std::vector<chamfer_shard_index_t::value_t> const packs = entries.values(entries_k + recall_samples_k);
     chamfer_fixture_t::metric_t metric = chamfer_fixture_t::make_metric(), oracle = chamfer_fixture_t::make_metric();
     auto query_of = [&](std::size_t sample) { return entries.pack(entries_k + sample); };
     auto best_of = [&](std::size_t sample) {
@@ -472,7 +478,7 @@ void test_shapes_sharded_cut(u64_t seed) {
 
 /** Clouds sampled from two shards, as @c test_basic_sharded_sample checks. */
 void test_shapes_sample(u64_t seed) {
-    constexpr std::size_t entries_k = basic_recall_samples_k * basic_connectivity_k;
+    constexpr std::size_t entries_k = basic_growth_nodes_k;
     chamfer_entries_t const entries {entries_k, stream_key(seed, "plural_sample")};
     chamfer_fixture_t::metric_t metric = chamfer_fixture_t::make_metric();
     return test_basic_sharded_sample<chamfer_indexes_t>(
@@ -482,7 +488,7 @@ void test_shapes_sample(u64_t seed) {
 
 /** Clouds walked by a cursor over two shards, as @c test_basic_sharded_cursor checks. */
 void test_shapes_cursor(u64_t seed) {
-    constexpr std::size_t entries_k = basic_recall_samples_k * basic_connectivity_k;
+    constexpr std::size_t entries_k = basic_growth_nodes_k;
     chamfer_entries_t const entries {entries_k, stream_key(seed, "plural_cursor")};
     chamfer_fixture_t::metric_t metric = chamfer_fixture_t::make_metric();
     return test_basic_sharded_cursor<chamfer_indexes_t>(seed, metric, std::span<util::uuid128_t const> {entries.keys},

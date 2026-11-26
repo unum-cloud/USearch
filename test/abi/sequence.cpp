@@ -34,15 +34,15 @@ using us::sequence::pack_codes;
 using us::sequence::packed_code_bits;
 using us::sequence::packed_codes_bytes;
 
-/** Sequences a cell builds, the queries held out past them, the sequences a second source holds,
- *  and the nucleotides per template. */
+/** Sequences a cell builds, the sequences a second source holds, and the nucleotides per template;
+ *  the queries held out past them number @c recall_samples_k. */
 struct sequence_sizes_t {
-    std::size_t sequences = 0, queries = 0, packed_sequences = 0, length = 0;
+    std::size_t sequences = 0, packed_sequences = 0, length = 0;
 };
 
 /** The sizes of the bit-parallel metrics' cells, and the smaller ones of Needleman-Wunsch, whose
  *  every distance fills a whole alignment matrix. */
-static constexpr sequence_sizes_t sequence_sizes_k {1024, 128, 256, 100}, aligned_sizes_k {256, 64, 64, 32};
+static constexpr sequence_sizes_t sequence_sizes_k {1024, 256, 100}, aligned_sizes_k {256, 64, 32};
 
 /** The breadth every walk takes. */
 static constexpr std::size_t sequence_expansion_k = 128;
@@ -156,22 +156,22 @@ static void test_sequence_metric(sweep_cell_t const& cell, sequence_geometry_t g
     sequence_sizes_t const sizes = aligned ? aligned_sizes_k : sequence_sizes_k;
     nucleotides_layout_t const layout = aligned ? nucleotides_layout_t::packed_k : nucleotides_layout_t::bytes_k;
     sequence_tape_t const sequences = generate_sequences(
-        generate_nucleotides(sizes.sequences + sizes.queries, sizes.length, seed), layout);
+        generate_nucleotides(sizes.sequences + recall_samples_k, sizes.length, seed), layout);
     sequence_tape_t const second_source = generate_sequences(
         generate_nucleotides(sizes.packed_sequences, sizes.length, ~seed), layout);
     usearch_tape_view_t const queries = sequence_verbs_t::slice(sequences.view(), sizes.sequences);
 
     if (!check_built(cell, index, sequences.view(), sizes.sequences)) return;
     expect_gets(index, sizes.sequences);
-    expect_walk_recall(index, queries, sizes.queries, sequence_expansion_k, 0.8);
-    expect_refined(index, queries, sizes.queries, sequence_expansion_k, usearch_status_success_k);
+    expect_walk_recall(index, queries, recall_samples_k, sequence_expansion_k, 0.8);
+    expect_refined(index, queries, recall_samples_k, sequence_expansion_k, usearch_status_success_k);
     expect_health(index, sizes.sequences);
     expect_cursor(index, sizes.sequences);
     expect_sample(index, sizes.sequences);
-    expect_buffer_round_trip(index, queries, sizes.queries, sequence_expansion_k, 0.8, usearch_status_unsupported_k);
+    expect_buffer_round_trip(index, queries, recall_samples_k, sequence_expansion_k, 0.8, usearch_status_unsupported_k);
     scratch_directory_t const scratch;
     std::string const stem = scratch.path("checkpoint");
-    expect_persistence(cell, index, sequences.view(), queries, sizes.queries, sequence_expansion_k, 0.8, stem,
+    expect_persistence(cell, index, sequences.view(), queries, recall_samples_k, sequence_expansion_k, 0.8, stem,
                        saved_bytes_t::identical_k, 0.0);
     if (cell.residency == usearch_residency_nvme_k) return;
     expect_refine_plan(index, sequences.view(), sizes.sequences, usearch_status_success_k);

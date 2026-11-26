@@ -36,15 +36,16 @@
 
 namespace unum::usearch::test::abi {
 
-/** Shapes a cell builds, the queries held out past them, the shapes a second source holds, the
- *  points per template cloud, the fewest an entry keeps, and the graph degree, zero deriving it. */
+/** Shapes a cell builds, the shapes a second source holds, the points per template cloud, the
+ *  fewest an entry keeps, and the graph degree, zero deriving it; the queries held out past them
+ *  number @c recall_samples_k. */
 struct shapes_sizes_t {
-    std::size_t shapes = 0, queries = 0, packed_shapes = 0, points = 0, fewest_points = 0, connectivity = 0;
+    std::size_t shapes = 0, packed_shapes = 0, points = 0, fewest_points = 0, connectivity = 0;
 };
 
 /** The sizes of the point-set metrics' cells, and the smaller ones of the alignments, whose every
  *  distance iterates a transport plan, so a refinement pass costs minutes at the derived degree. */
-static constexpr shapes_sizes_t shapes_sizes_k {512, 64, 128, 24, 16, 0}, alignment_sizes_k {64, 16, 16, 8, 6, 8};
+static constexpr shapes_sizes_t shapes_sizes_k {512, 128, 24, 16, 0}, alignment_sizes_k {64, 16, 8, 6, 8};
 
 /** The breadth every walk takes. */
 static constexpr std::size_t shapes_expansion_k = 128;
@@ -182,24 +183,24 @@ static case_result_t test_shapes_metric(sweep_cell_t const& cell, usearch_shapes
     geometry.connectivity = sizes.connectivity;
     handle<shapes_verbs_t> index = open_index<shapes_verbs_t>(session, geometry, cell.shards);
     if (!expect_true(bool(index))) return {};
-    shapes_tape_t const shapes = generate_shapes(sizes.shapes + sizes.queries, sizes, seed);
+    shapes_tape_t const shapes = generate_shapes(sizes.shapes + recall_samples_k, sizes, seed);
     shapes_tape_t const second_source = generate_shapes(sizes.packed_shapes, sizes, ~seed);
     usearch_tape_view_t const queries = shapes_verbs_t::slice(shapes.view(), sizes.shapes);
 
     if (!check_built(cell, index, shapes.view(), sizes.shapes)) return {};
-    expect_walk_recall(index, queries, sizes.queries, shapes_expansion_k, 0.8);
+    expect_walk_recall(index, queries, recall_samples_k, shapes_expansion_k, 0.8);
     // An NVMe cell builds in RAM and views its checkpoint only once saved, so it walks hinted.
-    expect_hints(index, queries, sizes.queries, shapes_expansion_k,
+    expect_hints(index, queries, recall_samples_k, shapes_expansion_k,
                  index.residency == usearch_residency_ram_k ? usearch_status_success_k : usearch_status_unsupported_k);
-    expect_refined(index, queries, sizes.queries, shapes_expansion_k, usearch_status_success_k);
+    expect_refined(index, queries, recall_samples_k, shapes_expansion_k, usearch_status_success_k);
     expect_health(index, sizes.shapes);
     expect_cursor(index, sizes.shapes);
     expect_sample(index, sizes.shapes);
-    expect_buffer_round_trip(index, queries, sizes.queries, shapes_expansion_k, 0.8, usearch_status_unsupported_k);
+    expect_buffer_round_trip(index, queries, recall_samples_k, shapes_expansion_k, 0.8, usearch_status_unsupported_k);
     scratch_directory_t const scratch;
     std::string const stem = scratch.path("checkpoint");
     if (cell.residency == usearch_residency_ram_k) expect_poses_round_trip(index, stem + "-poses");
-    expect_persistence(cell, index, shapes.view(), queries, sizes.queries, shapes_expansion_k, 0.8, stem,
+    expect_persistence(cell, index, shapes.view(), queries, recall_samples_k, shapes_expansion_k, 0.8, stem,
                        saved_bytes_t::differing_k, shapes_score_band(shapes, unit_roundoff_of(geometry.quantization)));
     if (cell.residency == usearch_residency_nvme_k) return {};
     expect_refine_plan(index, shapes.view(), sizes.shapes, usearch_status_success_k);

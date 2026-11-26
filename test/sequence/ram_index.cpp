@@ -573,7 +573,7 @@ void test_sequence_sharded(u64_t seed) {
     {
         allocation_ledger_t ledger;
         for (sequence_value_t const& value :
-             generate_values(entries_k + basic_recall_samples_k, stream_key(seed, "plural"), levenshtein_alphabet_k,
+             generate_values(entries_k + recall_samples_k, stream_key(seed, "plural"), levenshtein_alphabet_k,
                              levenshtein_symbols_k, counting_allocator_t {ledger}))
             texts.emplace_back(std::string_view {value});
     }
@@ -605,7 +605,7 @@ void test_sequence_sample(u64_t seed) {
     using index_t =
         sequence::ram_index<util::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref, forkunion_allocator_t>;
     using value_t = index_t::value_t;
-    constexpr std::size_t entries_k = basic_recall_samples_k * basic_connectivity_k;
+    constexpr std::size_t entries_k = basic_growth_nodes_k;
     std::vector<std::string> texts;
     {
         allocation_ledger_t ledger;

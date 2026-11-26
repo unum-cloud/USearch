@@ -503,8 +503,6 @@ void test_dense_vram_indexes_reshard(u64_t seed, typename indexes_type_::executo
                                     blocking_files_queue<fu::standard_yield_t>>;
     using ram_t = typename nvme_reference<nvme_t>::ram_t;
     using node_id_t = typename ram_t::index_t::node_id_t;
-    constexpr std::size_t samples_k = 32;
-    constexpr std::size_t noise_percent_k = static_cast<std::size_t>(rewrite_recall_margin_k * 100);
     std::size_t const rows = 2 * dense_thread_nodes_k;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
 
@@ -512,7 +510,7 @@ void test_dense_vram_indexes_reshard(u64_t seed, typename indexes_type_::executo
     dense_indexes_executor<ram_t> host;
     if (failed(driver.status) || failed(host.status)) return void(expect_true(false));
     nk::matrix<scalar_t> const vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_reshard"));
-    nk::matrix<scalar_t> const queries = make_vectors<scalar_t>(samples_k, dimensions,
+    nk::matrix<scalar_t> const queries = make_vectors<scalar_t>(recall_samples_k, dimensions,
                                                                 stream_key(seed, "indexes_reshard", 1));
     nk::vector<key_t> keys = make_vector<key_t>(rows);
     for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
@@ -581,7 +579,7 @@ void test_dense_vram_indexes_reshard(u64_t seed, typename indexes_type_::executo
     dense_indexes_build(built, host.executor, vectors, keys);
     std::size_t const baseline = dense_recall_at_ten(built.shard(0), 0, queries.view());
     std::size_t const merged = dense_recall_at_ten(target.shard(0), 0, queries.view());
-    expect_true(merged * 100 + noise_percent_k * samples_k * 10 >= baseline * 100);
+    expect_true(merged + recall_margin_k * recall_samples_k * recall_wanted_k >= baseline);
 }
 
 /** A two-shard index splits into two targets of two shards each: the sizes add up, every key
@@ -596,9 +594,7 @@ void test_dense_vram_indexes_cut(u64_t seed, typename indexes_type_::executor_t&
                                     blocking_files_queue<fu::standard_yield_t>>;
     using ram_t = typename nvme_reference<nvme_t>::ram_t;
     using reference_t = typename ram_t::index_t;
-    constexpr std::size_t samples_k = 32;
     constexpr std::size_t wanted_k = 10;
-    constexpr std::size_t noise_percent_k = static_cast<std::size_t>(rewrite_recall_margin_k * 100);
     std::size_t const rows = 2 * dense_thread_nodes_k;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
 
@@ -606,7 +602,7 @@ void test_dense_vram_indexes_cut(u64_t seed, typename indexes_type_::executor_t&
     dense_indexes_executor<ram_t> host;
     if (failed(driver.status) || failed(host.status)) return void(expect_true(false));
     nk::matrix<scalar_t> const vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_split"));
-    nk::matrix<scalar_t> const queries = make_vectors<scalar_t>(samples_k, dimensions,
+    nk::matrix<scalar_t> const queries = make_vectors<scalar_t>(recall_samples_k, dimensions,
                                                                 stream_key(seed, "indexes_split", 1));
     nk::vector<key_t> keys = make_vector<key_t>(rows);
     for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
@@ -628,8 +624,8 @@ void test_dense_vram_indexes_cut(u64_t seed, typename indexes_type_::executor_t&
     typename reference_t::search_config_t const scan {
         .expansion_factor = static_cast<typename reference_t::candidates_count_t>(wanted_k),
         .traversal = traversal_t::scan_k};
-    nk::vector<f64_t> tenths = make_vector<f64_t>(samples_k);
-    for (std::size_t query = 0; query != samples_k; ++query)
+    nk::vector<f64_t> tenths = make_vector<f64_t>(recall_samples_k);
+    for (std::size_t query = 0; query != recall_samples_k; ++query)
         if (succeeded(reference.search(queries.view().row(query).as_vector(), scan, context).status) &&
             !context.results.empty())
             tenths[query] = context.results[context.results.size() - 1].distance;
@@ -640,7 +636,7 @@ void test_dense_vram_indexes_cut(u64_t seed, typename indexes_type_::executor_t&
         nk::vector<distance_t> merged_distances = make_vector<distance_t>(parts.size() * wanted_k);
         nk::vector<key_t> found_keys = make_vector<key_t>(wanted_k);
         nk::vector<distance_t> found_distances = make_vector<distance_t>(wanted_k);
-        for (std::size_t query = 0; query != samples_k; ++query) {
+        for (std::size_t query = 0; query != recall_samples_k; ++query) {
             std::size_t merged_count = 0;
             for (indexes_type_* part : parts) {
                 auto const [result, status] = part->search(queries.view().row(query).as_vector(),
@@ -696,7 +692,7 @@ void test_dense_vram_indexes_cut(u64_t seed, typename indexes_type_::executor_t&
     expect_equal(miscounted, 0u);
 
     std::size_t const cut_recall = recall({&first, &second});
-    expect_true(cut_recall * 100 + noise_percent_k * samples_k * wanted_k >= source_recall * 100);
+    expect_true(cut_recall + recall_margin_k * recall_samples_k * wanted_k >= source_recall);
 }
 
 /** A reshard of several sources into targets naming one of them, or one naming a shard capacity, is

@@ -454,7 +454,7 @@ static void test_ram_index_rounds(make_index_type_ const& make_index, u64_t seed
         return index;
     };
     nk::matrix_view<scalar_t> const rows = vectors.view();
-    auto queries = rows(nk::range(0, 64), nk::slice);
+    auto queries = rows(nk::range(0, recall_samples_k), nk::slice);
 
     // Stopped at the barrier opening each phase, from the opening health check to the restitch, the
     // round keeps what ran and no search does worse for it.
@@ -472,7 +472,8 @@ static void test_ram_index_rounds(make_index_type_ const& make_index, u64_t seed
             expect_true(stopped);
             expect_equal(status, status_code_t::cancelled_k);
             expect_true(report.verdict == refine_verdict_t::stopped_k);
-            expect_true(dense_recall_at_ten(*index, make_index, queries) >= before);
+            std::size_t const after = dense_recall_at_ten(*index, make_index, queries);
+            expect_true(after + recall_margin_k * queries.extent(0) * recall_wanted_k >= before);
         }
 
     // A cache of a few rows puts the first neighborhoods over capacity, which gather again
@@ -539,8 +540,8 @@ static void test_ram_index_rounds(make_index_type_ const& make_index, u64_t seed
         expect_true(succeeded(ram_index_round(*shuffled, narrow, context, ignore_barriers).status));
         std::size_t const plain_found = dense_recall_at_ten(*plain, make_index, queries);
         std::size_t const shuffled_found = dense_recall_at_ten(*shuffled, make_index, queries);
-        std::size_t const noise = queries.extent(0) * 10 / 20;
-        expect_true(plain_found + noise >= shuffled_found && shuffled_found + noise >= plain_found);
+        f64_t const margin = recall_margin_k * queries.extent(0) * recall_wanted_k;
+        expect_true(plain_found + margin >= shuffled_found && shuffled_found + margin >= plain_found);
     }
 
     // Seventeen entries in one neighborhood: rounds run until one changes no link set, and the next

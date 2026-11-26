@@ -182,26 +182,26 @@ struct handle_matches_t {
 };
 
 /**
- *  @brief One collection of @p count observations of @p kind and @p queries_count held-out queries,
- *      on the GPU and in RAM alike, searched under @p relation within @p radius_metres, over
- *      @p hills when given.
+ *  @brief One collection of @p count observations of @p kind and @c recall_samples_k held-out
+ *      queries, on the GPU and in RAM alike, searched under @p relation within @p radius_metres,
+ *      over @p hills when given.
  *
  *  Every match the GPU reports must be admitted, hold the pair's exact chord in metres and ascend,
  *  and the GPU's recall at ten must reach the RAM index's at the same breadth, give or take a
  *  twentieth. A walk as wide as the collection must return the exact matches themselves.
  */
 static void test_geospatial_vram_collection(u64_t seed, std::int32_t ordinal, observations_kind_t kind,
-                                            std::size_t count, std::size_t queries_count,
-                                            usearch_geospatial_relation_t relation, f64_t radius_metres,
-                                            std::size_t expansion, hills_t const* hills = nullptr) {
+                                            std::size_t count, usearch_geospatial_relation_t relation,
+                                            f64_t radius_metres, std::size_t expansion,
+                                            hills_t const* hills = nullptr) {
     constexpr std::size_t wanted_k = 10, batches_k = 3;
     checks_held_t const held;
     nk::vector<usearch_geospatial_observation_t> observations = generate_observations(kind, count, seed);
-    nk::vector<usearch_geospatial_observation_t> queries = generate_observations(kind, queries_count, ~seed);
+    nk::vector<usearch_geospatial_observation_t> queries = generate_observations(kind, recall_samples_k, ~seed);
     // Over hills, every other camera stands on the ground and the rest hover over every hill.
     for (std::size_t offset = 1; hills && offset < count; offset += 2)
         observations[offset].altitude_metres = 60 + offset % 31;
-    for (std::size_t offset = 1; hills && offset < queries_count; offset += 2)
+    for (std::size_t offset = 1; hills && offset < recall_samples_k; offset += 2)
         queries[offset].altitude_metres = 60 + offset % 31;
     usearch_geospatial_terrain_t const terrain = hills ? hills->terrain() : usearch_geospatial_terrain_t {};
     nk::vector<usearch_key_t> keys = make_vector<usearch_key_t>(count);
@@ -211,9 +211,9 @@ static void test_geospatial_vram_collection(u64_t seed, std::int32_t ordinal, ob
     // The exact admitted chords of every query, ascending.
     nk::vector<earth_observation_t> stored = make_vector<earth_observation_t>(count);
     for (std::size_t entry = 0; entry != count; ++entry) stored[entry] = encoded(observations[entry], hills);
-    nk::matrix<f64_t> exact = make_matrix<f64_t>(queries_count, count);
-    nk::vector<std::size_t> exact_counts = make_vector<std::size_t>(queries_count);
-    for (std::size_t query = 0; query != queries_count; ++query) {
+    nk::matrix<f64_t> exact = make_matrix<f64_t>(recall_samples_k, count);
+    nk::vector<std::size_t> exact_counts = make_vector<std::size_t>(recall_samples_k);
+    for (std::size_t query = 0; query != recall_samples_k; ++query) {
         earth_observation_t const probe = encoded(queries[query], hills);
         for (std::size_t entry = 0; entry != count; ++entry)
             if (related(static_cast<relation_t>(relation), radius_metres, probe, stored[entry], hills))
@@ -254,7 +254,7 @@ static void test_geospatial_vram_collection(u64_t seed, std::int32_t ordinal, ob
         search.index = index;
         search.executor = executor;
         search.outcome = &outcome;
-        search.count = queries_count;
+        search.count = recall_samples_k;
         search.queries = queries.data();
         search.relation = relation;
         search.tolerance = tolerance;
@@ -264,19 +264,19 @@ static void test_geospatial_vram_collection(u64_t seed, std::int32_t ordinal, ob
         search.expansion_factor = expansion;
         if (held()) usearch_geospatial_search(&search);
         if (!expect_true(!outcome.message)) return matched;
-        matched.keys = make_matrix<usearch_key_t>(queries_count, matches.columns);
-        matched.metres = make_matrix<usearch_distance_t>(queries_count, matches.columns);
-        matched.counts = make_vector<std::size_t>(queries_count);
+        matched.keys = make_matrix<usearch_key_t>(recall_samples_k, matches.columns);
+        matched.metres = make_matrix<usearch_distance_t>(recall_samples_k, matches.columns);
+        matched.counts = make_vector<std::size_t>(recall_samples_k);
         std::memcpy(matched.keys.data(), matches.keys, matched.keys.size() * sizeof(usearch_key_t));
         std::memcpy(matched.metres.data(), matches.scores, matched.metres.size() * sizeof(usearch_distance_t));
-        std::memcpy(matched.counts.data(), matches.counts, queries_count * sizeof(std::size_t));
+        std::memcpy(matched.counts.data(), matches.counts, recall_samples_k * sizeof(std::size_t));
         return matched;
     };
 
     // Matches within the tenth exact chord, of ten or of every admitted entry when fewer exist.
     auto const recall = [&](handle_matches_t const& matched) {
         std::size_t hits = 0, possible = 0;
-        for (std::size_t query = 0; query != queries_count && !matched.counts.empty(); ++query) {
+        for (std::size_t query = 0; query != recall_samples_k && !matched.counts.empty(); ++query) {
             std::size_t const expected = min_of(wanted_k, exact_counts[query]);
             if (!expected) continue;
             f64_t const threshold = exact(query, expected - 1) * (1 + 1e-9) + 1e-6;
@@ -316,7 +316,7 @@ static void test_geospatial_vram_collection(u64_t seed, std::int32_t ordinal, ob
     expect_true(!outcome.message);
     handle_matches_t const vram_matches = !held() ? handle_matches_t {} : build_and_search(vram_index, executor);
 
-    for (std::size_t query = 0; query != queries_count && held(); ++query) {
+    for (std::size_t query = 0; query != recall_samples_k && held(); ++query) {
         earth_observation_t const probe = encoded(queries[query], hills);
         expect_equal(vram_matches.counts[query], min_of(wanted_k, exact_counts[query]));
         for (std::size_t rank = 0; rank != vram_matches.counts[query]; ++rank) {
@@ -334,10 +334,10 @@ static void test_geospatial_vram_collection(u64_t seed, std::int32_t ordinal, ob
         }
     }
     f64_t const ram_recall = recall(ram_matches), vram_recall = recall(vram_matches);
-    if (vram_recall + 0.05 < ram_recall)
+    if (vram_recall + recall_margin_k < ram_recall)
         fmt::print(stderr, "  recall at ten over {} observations: {:.3f} on the GPU, {:.3f} in RAM\n", count,
                    vram_recall, ram_recall);
-    expect_true(vram_recall + 0.05 >= ram_recall);
+    expect_true(vram_recall + recall_margin_k >= ram_recall);
 
     // One round on the GPU keeps every entry under the octant rule and concludes a verdict.
     usearch_refine_report_t report {};
@@ -451,19 +451,19 @@ void run_geospatial_vram_cases<cell_executor_t>(gpu_device_t const& device) {
         run_test_case(fmt::format("{}({}, {})", call, vendor, arguments).c_str(), check);
     };
     run("test_geospatial_vram_collection", "observations_kind_t::global_k, usearch_geospatial_relation_near_k", [&] {
-        test_geospatial_vram_collection(stream_key(seed, "global"), ordinal, observations_kind_t::global_k, 4096, 128,
+        test_geospatial_vram_collection(stream_key(seed, "global"), ordinal, observations_kind_t::global_k, 4096,
                                         usearch_geospatial_relation_near_k, 0, 64);
     });
     run("test_geospatial_vram_collection", "observations_kind_t::city_k, usearch_geospatial_relation_near_k", [&] {
-        test_geospatial_vram_collection(stream_key(seed, "city"), ordinal, observations_kind_t::city_k, 4096, 128,
+        test_geospatial_vram_collection(stream_key(seed, "city"), ordinal, observations_kind_t::city_k, 4096,
                                         usearch_geospatial_relation_near_k, 0, 64);
     });
     run("test_geospatial_vram_collection", "observations_kind_t::cameras_k, usearch_geospatial_relation_sees_k", [&] {
-        test_geospatial_vram_collection(stream_key(seed, "sees"), ordinal, observations_kind_t::cameras_k, 4096, 128,
+        test_geospatial_vram_collection(stream_key(seed, "sees"), ordinal, observations_kind_t::cameras_k, 4096,
                                         usearch_geospatial_relation_sees_k, 300, 256);
     });
     run("test_geospatial_vram_collection", "observations_kind_t::cameras_k, usearch_geospatial_relation_seen_k", [&] {
-        test_geospatial_vram_collection(stream_key(seed, "seen"), ordinal, observations_kind_t::cameras_k, 4096, 128,
+        test_geospatial_vram_collection(stream_key(seed, "seen"), ordinal, observations_kind_t::cameras_k, 4096,
                                         usearch_geospatial_relation_seen_k, 300, 256);
     });
     run("test_geospatial_vram_within", "usearch_geospatial_relation_near_k",
@@ -472,17 +472,17 @@ void run_geospatial_vram_cases<cell_executor_t>(gpu_device_t const& device) {
     run("test_geospatial_vram_collection",
         "observations_kind_t::cameras_k, usearch_geospatial_relation_visible_k, &hills", [&] {
             test_geospatial_vram_collection(stream_key(seed, "visible"), ordinal, observations_kind_t::cameras_k, 256,
-                                            128, usearch_geospatial_relation_visible_k, 0, 256, &hills);
+                                            usearch_geospatial_relation_visible_k, 0, 256, &hills);
         });
     run("test_geospatial_vram_collection", "observations_kind_t::cameras_k, usearch_geospatial_relation_sees_k, &hills",
         [&] {
             test_geospatial_vram_collection(stream_key(seed, "sees hills"), ordinal, observations_kind_t::cameras_k,
-                                            256, 128, usearch_geospatial_relation_sees_k, 300, 256, &hills);
+                                            256, usearch_geospatial_relation_sees_k, 300, 256, &hills);
         });
     run("test_geospatial_vram_collection", "observations_kind_t::cameras_k, usearch_geospatial_relation_seen_k, &hills",
         [&] {
             test_geospatial_vram_collection(stream_key(seed, "seen hills"), ordinal, observations_kind_t::cameras_k,
-                                            256, 128, usearch_geospatial_relation_seen_k, 300, 256, &hills);
+                                            256, usearch_geospatial_relation_seen_k, 300, 256, &hills);
         });
 }
 

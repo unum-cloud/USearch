@@ -13,8 +13,8 @@
  *  Reshard, refine and build view each target back and judge it against a fresh RAM build of the
  *  same entries. Recall is the share of every query's results whose exact distance is within its
  *  exact k-th nearest, so ties never count against a ranking. A rewrite passes when its target,
- *  searched with the default walk, recalls within @ref rewrite_recall_margin_k of a fresh RAM build
- *  of the same entries searched alike.
+ *  searched with the default walk, recalls within @ref recall_margin_k of a fresh RAM build of
+ *  the same entries searched alike.
  */
 #pragma once
 
@@ -1275,8 +1275,8 @@ void test_nvme_index_search(u64_t seed) {
                   0);
 }
 
-/** Queries every recall is measured over, and results each one keeps. */
-constexpr std::size_t rewrite_queries_k = 64, rewrite_wanted_k = 10;
+/** Results every rewrite query keeps. */
+constexpr std::size_t rewrite_wanted_k = 10;
 
 /** Entries the reshard and refine scenarios rewrite. */
 constexpr std::size_t rewrite_entries_k = 4 * dense_thread_nodes_k;
@@ -1306,14 +1306,14 @@ struct rewrite_fixture {
                     u64_t seed)
         : scenario(scenario), kernel(kernel),
           vectors(make_vectors<scalar_t>(rows, dimensions, stream_key(seed, scenario))),
-          queries(make_vectors<scalar_t>(rewrite_queries_k, dimensions, stream_key(seed, scenario, 1))),
-          keys(make_vector<key_t>(rows)), thresholds(make_vector<f32_t>(rewrite_queries_k)) {
+          queries(make_vectors<scalar_t>(recall_samples_k, dimensions, stream_key(seed, scenario, 1))),
+          keys(make_vector<key_t>(rows)), thresholds(make_vector<f32_t>(recall_samples_k)) {
         for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
         expect_equal(builder.status, status_code_t::success_k);
         expect_equal(driver.status, status_code_t::success_k);
         nk::vector<f32_t> exact_distances = make_vector<f32_t>(rows);
         std::span<f32_t> const distances = to_writable_span(exact_distances);
-        for (std::size_t query = 0; query != rewrite_queries_k; ++query) {
+        for (std::size_t query = 0; query != recall_samples_k; ++query) {
             for (std::size_t row = 0; row != rows; ++row) distances[row] = exact_(query, row);
             std::nth_element(distances.begin(), distances.begin() + (rewrite_wanted_k - 1), distances.end());
             thresholds[query] = distances[rewrite_wanted_k - 1];
@@ -1359,16 +1359,16 @@ struct rewrite_fixture {
      *  @p traversals, one per thread. */
     template <typename indexes_type_, typename executor_type_, typename... traversals_types_>
     f64_t recall(indexes_type_& indexes, executor_type_& executor, traversals_types_... traversals) {
-        nvme_rankings<nvme_t> ranked {rewrite_queries_k, rewrite_wanted_k};
+        nvme_rankings<nvme_t> ranked {recall_samples_k, rewrite_wanted_k};
         expect_equal(ranked.search(indexes, queries.view(), executor, 0, traversals...).status,
                      status_code_t::success_k);
         std::size_t hits = 0;
-        for (std::size_t query = 0; query != rewrite_queries_k; ++query)
+        for (std::size_t query = 0; query != recall_samples_k; ++query)
             for (key_t const key : ranked.keys_of(query)) {
                 f32_t const exact = exact_(query, dense_key_number(key) - 1);
                 hits += exact <= thresholds[query] + 1e-5f * (1 + std::fabs(thresholds[query]));
             }
-        return static_cast<f64_t>(hits) / static_cast<f64_t>(rewrite_queries_k * rewrite_wanted_k);
+        return static_cast<f64_t>(hits) / static_cast<f64_t>(recall_samples_k * rewrite_wanted_k);
     }
 
     /** The recall of a fresh RAM build of every entry into @p shards shards, so its searches walk
@@ -1407,7 +1407,7 @@ struct rewrite_fixture {
     /** Recalls within the margin of @p fresh and holds every node in the root's component. */
     void expect_recall(nvme_t& viewed, char const* label, f64_t fresh) {
         f64_t const rewritten = recall(viewed, driver.executor);
-        if (rewritten + rewrite_recall_margin_k < fresh) {
+        if (rewritten + recall_margin_k < fresh) {
             fmt::println(stderr, "  {} {}: recall {:.3f} trails {:.3f} of a fresh RAM build past the margin", scenario,
                          label, rewritten, fresh);
             expect_true(false);
@@ -1430,7 +1430,7 @@ struct rewrite_fixture {
                     ++hits;
                     break;
                 }
-        if (hits * 100 < count * dense_minimal_recall_percent_k) {
+        if (hits + recall_margin_k * count < count * dense_minimal_recall_percent_k / 100.0) {
             fmt::println(stderr, "  {} {}: {} of {} rows find themselves", scenario, label, hits, count);
             expect_true(false);
         }
@@ -1512,7 +1512,7 @@ void test_nvme_rewrites_reshard_tasks(u64_t seed) {
     expect_equal(status, status_code_t::success_k);
     if (failed(status)) return;
 
-    nvme_rankings<nvme_type_> interleaved {rewrite_queries_k, rewrite_wanted_k};
+    nvme_rankings<nvme_type_> interleaved {recall_samples_k, rewrite_wanted_k};
     std::size_t phases = 0, tasks = 0;
     do {
         ++phases;
@@ -1537,8 +1537,8 @@ void test_nvme_rewrites_reshard_tasks(u64_t seed) {
     fixture.expect_recall(viewed, "of three parts");
     // The second source's monolith is the largest part and stays resident;
     // the first source's two parts are appended.
-    fixture.expect_self_recall(viewed, 0, rewrite_queries_k, "appended rows");
-    fixture.expect_self_recall(viewed, first_rows, rewrite_queries_k, "resident rows");
+    fixture.expect_self_recall(viewed, 0, recall_samples_k, "appended rows");
+    fixture.expect_self_recall(viewed, first_rows, recall_samples_k, "resident rows");
 }
 
 /** Four parts reshard into two under a capacity of two parts' entries, each appended part linking
@@ -1774,8 +1774,8 @@ void test_nvme_rewrites_build(u64_t seed) {
     fixture.expect_recall(
         viewed, "in blocks",
         fixture.recall(group, fixture.builder.executor, to_writable_span(fixture.builder.traversals)));
-    fixture.expect_self_recall(viewed, 0, rewrite_queries_k, "first block");
-    fixture.expect_self_recall(viewed, rows_count - rewrite_queries_k, rewrite_queries_k, "last block");
+    fixture.expect_self_recall(viewed, 0, recall_samples_k, "first block");
+    fixture.expect_self_recall(viewed, rows_count - recall_samples_k, recall_samples_k, "last block");
 }
 
 /** A reshard dropped after its first restitch task leaves no manifest, no part and no restitch
@@ -1887,7 +1887,7 @@ void test_nvme_load_refine(u64_t seed) {
         expect_true(replaced_part_exists(0) && replaced_part_exists(1));
         expect_true(nvme_file_bytes(saved) != manifest_before);
         f64_t const after = fixture.recall(loaded, fixture.driver.executor);
-        if (after + rewrite_recall_margin_k < before) {
+        if (after + recall_margin_k < before) {
             fmt::println(stderr, "  {}: recall {:.3f} after the refine trails {:.3f} before it past the margin",
                          fixture.scenario, after, before);
             expect_true(false);

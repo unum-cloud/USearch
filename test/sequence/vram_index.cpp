@@ -285,7 +285,8 @@ enum class recall_reference_t {
 
 /**
  *  @brief One collection of @p count strings of about @p length bytes, held out @p queries_count
- *      queries, built on the GPU with @p node_id_type_ IDs and in RAM alike.
+ *      queries, built on the GPU with @p node_id_type_ IDs and in RAM alike; a recall is judged
+ *      over @c recall_samples_k of them, and fewer only match the exact distances.
  *
  *  Every match the GPU reports must hold the pair's exact distance, ascending, and under
  *  @p reference the GPU's recall at ten must reach the RAM index's at the same breadth, give or
@@ -413,10 +414,10 @@ static void test_sequence_vram_collection(u64_t seed, cell_vendor_t::executor_t&
     }
     f64_t const ram_recall = static_cast<f64_t>(ram_matched) / (queries_count * wanted_k);
     f64_t const vram_recall = static_cast<f64_t>(vram_matched) / (queries_count * wanted_k);
-    if (vram_recall + 0.05 < ram_recall)
+    if (vram_recall + recall_margin_k < ram_recall)
         fmt::print(stderr, "  recall at ten on {} strings of {} bytes: {:.3f} on the GPU, {:.3f} in RAM\n", count,
                    length, vram_recall, ram_recall);
-    expect_true(vram_recall + 0.05 >= ram_recall);
+    expect_true(vram_recall + recall_margin_k >= ram_recall);
     expect_errors("vram sequence distances", comparison_family_t::approximate_k, comparison_verdict_t::assert_k,
                   distance_errors, 0);
 }
@@ -483,18 +484,18 @@ static void expect_sequence_vram_reloaded(indexes_type_& saved, std::size_t shar
 static void test_sequence_vram_sharded(u64_t seed, cell_vendor_t::executor_t& executor) {
     using index_t = sequence_vram_shards_t::index_t;
     using indexes_t = cell_vendor_t::indexes_t<index_t, sequence_vram_shards_t>;
-    constexpr std::size_t entries_k = 5000, shard_capacity_k = 1000, queries_k = 64, wanted_k = 10, expansion_k = 64;
+    constexpr std::size_t entries_k = 5000, shard_capacity_k = 1000, wanted_k = 10, expansion_k = 64;
 
-    std::vector<std::string> const strings = generate_nucleotides(entries_k + queries_k, 100, seed);
+    std::vector<std::string> const strings = generate_nucleotides(entries_k + recall_samples_k, 100, seed);
     std::string tape;
     std::vector<std::size_t> offsets {0};
     for (std::string const& symbols : strings) tape += symbols, offsets.push_back(tape.size());
     byte_t const* const tape_bytes = reinterpret_cast<byte_t const*>(tape.data());
     tape_view<byte_t const> const sequences {tape_bytes, {offsets.data(), entries_k + 1}};
-    tape_view<byte_t const> const queries {tape_bytes, {offsets.data() + entries_k, queries_k + 1}};
-    nk::matrix<sz_size_t> exact = make_matrix<sz_size_t>(queries_k, entries_k);
+    tape_view<byte_t const> const queries {tape_bytes, {offsets.data() + entries_k, recall_samples_k + 1}};
+    nk::matrix<sz_size_t> exact = make_matrix<sz_size_t>(recall_samples_k, entries_k);
     auto serial_metric = make_sequence_metric<usearch_sequence_metric_levenshtein_bytes_k, sz_cap_serial_k>(entries_k);
-    for (std::size_t query = 0; query != queries_k; ++query) {
+    for (std::size_t query = 0; query != recall_samples_k; ++query) {
         serial_metric.reset(std::string_view {strings[entries_k + query]});
         for (std::size_t entry = 0; entry != entries_k; ++entry) serial_metric.push(std::string_view {strings[entry]});
         nk::vector_span<sz_size_t> const distances = exact.span().row(query).as_vector();
@@ -521,9 +522,9 @@ static void test_sequence_vram_sharded(u64_t seed, cell_vendor_t::executor_t& ex
     expect_equal(health.audited_nodes, entries_k);
     expect_equal(health.reachable_nodes, entries_k);
 
-    nk::matrix<util::uuid128_t> found_keys = make_matrix<util::uuid128_t>(queries_k, wanted_k);
-    nk::matrix<f32_t> found_distances = make_matrix<f32_t>(queries_k, wanted_k);
-    nk::vector<std::size_t> counts = make_vector<std::size_t>(queries_k);
+    nk::matrix<util::uuid128_t> found_keys = make_matrix<util::uuid128_t>(recall_samples_k, wanted_k);
+    nk::matrix<f32_t> found_distances = make_matrix<f32_t>(recall_samples_k, wanted_k);
+    nk::vector<std::size_t> counts = make_vector<std::size_t>(recall_samples_k);
     typename index_t::search_config_t const search_config {expansion_k, wanted_k};
     expect_equal(indexes
                      .search(queries, found_keys.span(), found_distances.span(), to_writable_span(counts),
@@ -531,7 +532,7 @@ static void test_sequence_vram_sharded(u64_t seed, cell_vendor_t::executor_t& ex
                      .status,
                  status_code_t::success_k);
     std::size_t sharded_matched = 0;
-    for (std::size_t query = 0; query != queries_k; ++query) {
+    for (std::size_t query = 0; query != recall_samples_k; ++query) {
         std::vector<sz_size_t> found;
         for (std::size_t rank = 0; rank != counts[query]; ++rank)
             found.push_back(static_cast<sz_size_t>(found_distances(query, rank)));
@@ -548,17 +549,17 @@ static void test_sequence_vram_sharded(u64_t seed, cell_vendor_t::executor_t& ex
     expect_equal(single.insert(to_span(keys), sequences, context, insert_config).status, status_code_t::success_k);
     for (util::uuid128_t const& key : keys) miscounted += single.count(key) != 1;
     expect_equal(miscounted, std::size_t {0});
-    nk::matrix<u32_t> ids = make_matrix<u32_t>(queries_k, wanted_k);
+    nk::matrix<u32_t> ids = make_matrix<u32_t>(recall_samples_k, wanted_k);
     expect_equal(single.search(queries, ids.span(), found_distances.span(), search_config, context).status,
                  status_code_t::success_k);
     std::size_t single_matched = 0;
-    for (std::size_t query = 0; query != queries_k; ++query) {
+    for (std::size_t query = 0; query != recall_samples_k; ++query) {
         std::vector<sz_size_t> found;
         for (std::size_t rank = 0; rank != wanted_k && ids(query, rank) != (std::numeric_limits<u32_t>::max)(); ++rank)
             found.push_back(static_cast<sz_size_t>(found_distances(query, rank)));
         single_matched += matched_count(found, exact.view().row(query).as_vector(), wanted_k);
     }
-    expect_true(sharded_matched + rewrite_recall_margin_k * queries_k * wanted_k >= single_matched);
+    expect_true(sharded_matched + recall_margin_k * recall_samples_k * wanted_k >= single_matched);
     expect_sequence_vram_reloaded(indexes, shard_capacity_k, executor);
 }
 
@@ -802,18 +803,24 @@ void run_sequence_vram_cases<cell_vendor_t::executor_t>(gpu_device_t const& devi
     constexpr usearch_sequence_metric_t runes_k = usearch_sequence_metric_levenshtein_utf8_k;
     constexpr usearch_sequence_metric_t overlap_k = usearch_sequence_metric_overlap_k;
     constexpr usearch_sequence_metric_t aligned_k = usearch_sequence_metric_needleman_wunsch_k;
-    run("test_sequence_vram_collection<bytes_k>", "2048, 100, 128",
-        [&] { test_sequence_vram_collection<bytes_k>(stream_key(seed, "short"), executor, 2048, 100, 128); });
-    run("test_sequence_vram_collection<bytes_k>", "512, 200, 64",
-        [&] { test_sequence_vram_collection<bytes_k>(stream_key(seed, "long"), executor, 512, 200, 64); });
-    run("test_sequence_vram_collection<bytes_k>", "256, 1100, 32",
-        [&] { test_sequence_vram_collection<bytes_k>(stream_key(seed, "block"), executor, 256, 1100, 32); });
-    run("test_sequence_vram_collection<runes_k>", "512, 200, 64",
-        [&] { test_sequence_vram_collection<runes_k>(stream_key(seed, "runes"), executor, 512, 200, 64); });
-    run("test_sequence_vram_collection<overlap_k>", "512, 200, 64",
-        [&] { test_sequence_vram_collection<overlap_k>(stream_key(seed, "overlap"), executor, 512, 200, 64); });
-    run("test_sequence_vram_collection<aligned_k>", "512, 200, 64",
-        [&] { test_sequence_vram_collection<aligned_k>(stream_key(seed, "aligned"), executor, 512, 200, 64); });
+    run("test_sequence_vram_collection<bytes_k>", "2048, 100, recall_samples_k", [&] {
+        test_sequence_vram_collection<bytes_k>(stream_key(seed, "short"), executor, 2048, 100, recall_samples_k);
+    });
+    run("test_sequence_vram_collection<bytes_k>", "512, 200, recall_samples_k", [&] {
+        test_sequence_vram_collection<bytes_k>(stream_key(seed, "long"), executor, 512, 200, recall_samples_k);
+    });
+    run("test_sequence_vram_collection<bytes_k>", "256, 1100, recall_samples_k", [&] {
+        test_sequence_vram_collection<bytes_k>(stream_key(seed, "block"), executor, 256, 1100, recall_samples_k);
+    });
+    run("test_sequence_vram_collection<runes_k>", "512, 200, recall_samples_k", [&] {
+        test_sequence_vram_collection<runes_k>(stream_key(seed, "runes"), executor, 512, 200, recall_samples_k);
+    });
+    run("test_sequence_vram_collection<overlap_k>", "512, 200, recall_samples_k", [&] {
+        test_sequence_vram_collection<overlap_k>(stream_key(seed, "overlap"), executor, 512, 200, recall_samples_k);
+    });
+    run("test_sequence_vram_collection<aligned_k>", "512, 200, recall_samples_k", [&] {
+        test_sequence_vram_collection<aligned_k>(stream_key(seed, "aligned"), executor, 512, 200, recall_samples_k);
+    });
     // Strided alignments past one tile only need to match the exact costs; a host index over them
     // would spend its minutes on diversity pruning.
     run("test_sequence_vram_collection<aligned_k>", "256, 1100, 8", [&] {
@@ -850,18 +857,24 @@ void run_sequence_vram_cases<metal_executor_t>(gpu_device_t const& device) {
     constexpr usearch_sequence_metric_t runes_k = usearch_sequence_metric_levenshtein_utf8_k;
     constexpr usearch_sequence_metric_t overlap_k = usearch_sequence_metric_overlap_k;
     constexpr usearch_sequence_metric_t aligned_k = usearch_sequence_metric_needleman_wunsch_k;
-    run("test_sequence_vram_collection<bytes_k>", "2048, 100, 128",
-        [&] { test_sequence_vram_collection<bytes_k>(stream_key(seed, "short"), executor, 2048, 100, 128); });
-    run("test_sequence_vram_collection<bytes_k>", "512, 200, 64",
-        [&] { test_sequence_vram_collection<bytes_k>(stream_key(seed, "long"), executor, 512, 200, 64); });
-    run("test_sequence_vram_collection<bytes_k>", "256, 1100, 32",
-        [&] { test_sequence_vram_collection<bytes_k>(stream_key(seed, "block"), executor, 256, 1100, 32); });
-    run("test_sequence_vram_collection<runes_k>", "512, 200, 64",
-        [&] { test_sequence_vram_collection<runes_k>(stream_key(seed, "runes"), executor, 512, 200, 64); });
-    run("test_sequence_vram_collection<overlap_k>", "512, 200, 64",
-        [&] { test_sequence_vram_collection<overlap_k>(stream_key(seed, "overlap"), executor, 512, 200, 64); });
-    run("test_sequence_vram_collection<aligned_k>", "512, 200, 64",
-        [&] { test_sequence_vram_collection<aligned_k>(stream_key(seed, "aligned"), executor, 512, 200, 64); });
+    run("test_sequence_vram_collection<bytes_k>", "2048, 100, recall_samples_k", [&] {
+        test_sequence_vram_collection<bytes_k>(stream_key(seed, "short"), executor, 2048, 100, recall_samples_k);
+    });
+    run("test_sequence_vram_collection<bytes_k>", "512, 200, recall_samples_k", [&] {
+        test_sequence_vram_collection<bytes_k>(stream_key(seed, "long"), executor, 512, 200, recall_samples_k);
+    });
+    run("test_sequence_vram_collection<bytes_k>", "256, 1100, recall_samples_k", [&] {
+        test_sequence_vram_collection<bytes_k>(stream_key(seed, "block"), executor, 256, 1100, recall_samples_k);
+    });
+    run("test_sequence_vram_collection<runes_k>", "512, 200, recall_samples_k", [&] {
+        test_sequence_vram_collection<runes_k>(stream_key(seed, "runes"), executor, 512, 200, recall_samples_k);
+    });
+    run("test_sequence_vram_collection<overlap_k>", "512, 200, recall_samples_k", [&] {
+        test_sequence_vram_collection<overlap_k>(stream_key(seed, "overlap"), executor, 512, 200, recall_samples_k);
+    });
+    run("test_sequence_vram_collection<aligned_k>", "512, 200, recall_samples_k", [&] {
+        test_sequence_vram_collection<aligned_k>(stream_key(seed, "aligned"), executor, 512, 200, recall_samples_k);
+    });
     // Strided alignments past one tile only need to match the exact costs; a host index over them
     // would spend its minutes on diversity pruning.
     run("test_sequence_vram_collection<aligned_k>", "256, 1100, 8", [&] {

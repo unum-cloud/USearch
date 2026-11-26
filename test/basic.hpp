@@ -55,8 +55,13 @@ using namespace unum::usearch::basic;
 /** Nodes in the single-threaded growth & oracle-recall scenarios. */
 constexpr std::size_t basic_growth_nodes_k = 256;
 
-/** Queries sampled against the exact oracle. */
-constexpr std::size_t basic_recall_samples_k = 24;
+/** The nodes those scenarios grow for @p fixture_type_: its own @c growth_nodes_k where its metric
+ *  costs too much per distance for @ref basic_growth_nodes_k, otherwise that. */
+template <typename fixture_type_>
+constexpr std::size_t basic_fixture_nodes = [] {
+    if constexpr (requires { fixture_type_::growth_nodes_k; }) return std::size_t {fixture_type_::growth_nodes_k};
+    else return basic_growth_nodes_k;
+}();
 
 /** Share of sampled queries whose best distance must match the oracle's. */
 constexpr std::size_t basic_minimal_recall_percent_k = 90;
@@ -490,17 +495,17 @@ void test_basic_growth_and_recall(u64_t seed) {
         index_t& index = *index_ptr;
         auto metric = fixture_type_::make_metric();
         context_t context {stream_key(seed, "growth"), counting_allocator_t {ledger}};
-        auto values = fixture_type_::make_values(basic_growth_nodes_k + basic_recall_samples_k,
+        auto values = fixture_type_::make_values(basic_fixture_nodes<fixture_type_> + recall_samples_k,
                                                  stream_key(seed, "growth"), counting_allocator_t {ledger});
         std::vector<typename index_t::value_t> queries;
-        for (std::size_t sample = 0; sample != basic_recall_samples_k; ++sample)
-            queries.push_back(std::move(values[basic_growth_nodes_k + sample]));
-        values.resize(basic_growth_nodes_k);
+        for (std::size_t sample = 0; sample != recall_samples_k; ++sample)
+            queries.push_back(std::move(values[basic_fixture_nodes<fixture_type_> + sample]));
+        values.resize(basic_fixture_nodes<fixture_type_>);
 
-        expect_true(bool(index.reserve(basic_growth_nodes_k)));
+        expect_true(bool(index.reserve(basic_fixture_nodes<fixture_type_>)));
         std::vector<typename index_t::node_id_t> assigned_ids;
         basic_build<fixture_type_>(index, metric, values, assigned_ids, context, keep_diverse_t {basic_connectivity_k});
-        expect_equal(index.size(), basic_growth_nodes_k);
+        expect_equal(index.size(), basic_fixture_nodes<fixture_type_>);
 
         // A single-threaded build dispenses a contiguous ID window in submission order.
         for (std::size_t ordinal = 0; ordinal != assigned_ids.size(); ++ordinal)
@@ -518,20 +523,20 @@ void test_basic_growth_and_recall(u64_t seed) {
             basic_audit_search<fixture_type_>(index, query, context, found_best);
             found_best_count += found_best;
         }
-        if (found_best_count * 100 < basic_minimal_recall_percent_k * basic_recall_samples_k)
+        if (found_best_count * 100 < basic_minimal_recall_percent_k * recall_samples_k)
             fmt::print(stderr, "  recall diagnostics: {} of {} queries found the true best\n", found_best_count,
-                       basic_recall_samples_k);
-        expect_true(found_best_count * 100 >= basic_minimal_recall_percent_k * basic_recall_samples_k);
+                       recall_samples_k);
+        expect_true(found_best_count * 100 >= basic_minimal_recall_percent_k * recall_samples_k);
 
         // An explicit breadth, and candidates covering the whole graph, whose best is the true best
         // by construction.
         for (auto const config : {typename index_t::search_config_t {32}, //
-                                  typename index_t::search_config_t {basic_growth_nodes_k}}) {
+                                  typename index_t::search_config_t {basic_fixture_nodes<fixture_type_>}}) {
             auto const [result, status] = index.search(queries[0], config, metric, context);
             expect_equal(status, status_code_t::success_k);
             basic_expect_ascending(context);
         }
-        typename index_t::search_config_t const exhaustive_config {basic_growth_nodes_k};
+        typename index_t::search_config_t const exhaustive_config {basic_fixture_nodes<fixture_type_>};
         for (std::size_t sample = 0; sample != 4; ++sample) {
             expect_equal(index.search(queries[sample], exhaustive_config, metric, context).status,
                          status_code_t::success_k);
@@ -588,12 +593,12 @@ void test_basic_selectors(u64_t seed) {
             context_t context {stream_key(seed, "selectors"), counting_allocator_t {ledger}};
             // Queries split off the same draw as the stored values: a separate generator
             // call would plant different clusters, leaving every query off-distribution.
-            auto values = fixture_type_::make_values(basic_growth_nodes_k / 2 + basic_recall_samples_k,
+            auto values = fixture_type_::make_values(basic_fixture_nodes<fixture_type_> / 2 + recall_samples_k,
                                                      stream_key(seed, "selectors"), counting_allocator_t {ledger});
             std::vector<typename index_t::value_t> queries;
-            for (std::size_t sample = 0; sample != basic_recall_samples_k; ++sample)
-                queries.push_back(std::move(values[basic_growth_nodes_k / 2 + sample]));
-            values.resize(basic_growth_nodes_k / 2);
+            for (std::size_t sample = 0; sample != recall_samples_k; ++sample)
+                queries.push_back(std::move(values[basic_fixture_nodes<fixture_type_> / 2 + sample]));
+            values.resize(basic_fixture_nodes<fixture_type_> / 2);
 
             expect_true(bool(index.reserve(values.size())));
             std::vector<typename index_t::node_id_t> assigned_ids;
@@ -878,10 +883,10 @@ void test_basic_allocation_budget(u64_t seed) {
         context_t context {stream_key(seed, "budget"), counting_allocator_t {ledger}};
 
         ledger.byte_budget = ledger.live_bytes + 64;
-        expect_equal(index.reserve(basic_growth_nodes_k).status, status_code_t::out_of_memory_k);
+        expect_equal(index.reserve(basic_fixture_nodes<fixture_type_>).status, status_code_t::out_of_memory_k);
         expect_equal(index.capacity(), 0u);
         ledger.byte_budget = (std::numeric_limits<std::ptrdiff_t>::max)();
-        expect_equal(index.reserve(basic_growth_nodes_k).status, status_code_t::success_k);
+        expect_equal(index.reserve(basic_fixture_nodes<fixture_type_>).status, status_code_t::success_k);
 
         // A budget swept up from the live bytes refuses an insert's allocations one by one: the key
         // multimap's, then the node chunk's, which a task far below its size refuses at least once.
@@ -1699,12 +1704,12 @@ void test_basic_refine(u64_t seed) {
         auto metric = fixture_type_::make_metric();
         auto const codec = fixture_type_::make_codec();
         context_t context {stream_key(seed, "refine"), counting_allocator_t {ledger}};
-        auto values = fixture_type_::make_values(basic_growth_nodes_k + basic_recall_samples_k,
+        auto values = fixture_type_::make_values(basic_fixture_nodes<fixture_type_> + recall_samples_k,
                                                  stream_key(seed, "refine"), counting_allocator_t {ledger});
         std::vector<typename index_t::value_t> queries;
-        for (std::size_t sample = 0; sample != basic_recall_samples_k; ++sample)
-            queries.push_back(std::move(values[basic_growth_nodes_k + sample]));
-        values.resize(basic_growth_nodes_k);
+        for (std::size_t sample = 0; sample != recall_samples_k; ++sample)
+            queries.push_back(std::move(values[basic_fixture_nodes<fixture_type_> + sample]));
+        values.resize(basic_fixture_nodes<fixture_type_>);
         std::vector<node_id_t> assigned_ids;
         keep_diverse_t const selector {basic_connectivity_k};
         basic_build<fixture_type_>(index, metric, values, assigned_ids, context, selector, {2});
@@ -1712,7 +1717,7 @@ void test_basic_refine(u64_t seed) {
         std::size_t const weak_recall = basic_recall_count<fixture_type_>(index, metric, queries, probes, ledger);
 
         auto extra = fixture_type_::make_values(1, stream_key(seed, "refine", 2), counting_allocator_t {ledger});
-        key_t const extra_key = fixture_type_::make_key(basic_growth_nodes_k);
+        key_t const extra_key = fixture_type_::make_key(basic_fixture_nodes<fixture_type_>);
         {
             auto [plan, plan_status] = index.plan_refine({}, selector, codec, context);
             expect_equal(plan_status, status_code_t::success_k);
@@ -1723,20 +1728,20 @@ void test_basic_refine(u64_t seed) {
             basic_drive(plan, metric, context, selector);
             auto const [refined, finish_status] = plan.finish();
             expect_equal(finish_status, status_code_t::success_k);
-            expect_equal(refined.reselected_nodes, basic_growth_nodes_k);
+            expect_equal(refined.reselected_nodes, basic_fixture_nodes<fixture_type_>);
             expect_true(refined.changed_nodes <= refined.reselected_nodes && refined.changed_nodes > 0);
             expect_true(refined.neighborhoods > 0 && refined.verdict == refine_verdict_t::improved_k);
             expect_equal(refined.traversal_stats.visited_members, 0u);
-            expect_equal(refined.reachability.audited_nodes, basic_growth_nodes_k);
-            expect_equal(refined.reachability.reachable_nodes, basic_growth_nodes_k);
+            expect_equal(refined.reachability.audited_nodes, basic_fixture_nodes<fixture_type_>);
+            expect_equal(refined.reachability.reachable_nodes, basic_fixture_nodes<fixture_type_>);
             expect_true(refined.reachability.depth_from_root != 0);
             expect_true(refined.traversal_stats.computed_distances > 0);
         }
         std::size_t const refined_recall = basic_recall_count<fixture_type_>(index, metric, queries, probes, ledger);
-        if (refined_recall < weak_recall)
+        if (refined_recall + recall_margin_k * recall_samples_k < weak_recall)
             fmt::print(stderr, "  refine diagnostics: {} of {} queries found the true best, {} before\n",
-                       refined_recall, basic_recall_samples_k, weak_recall);
-        expect_true(refined_recall >= weak_recall);
+                       refined_recall, recall_samples_k, weak_recall);
+        expect_true(refined_recall + recall_margin_k * recall_samples_k >= weak_recall);
 
         // An unfinished plan heals nothing, and its death reopens the claims.
         {
@@ -1747,11 +1752,11 @@ void test_basic_refine(u64_t seed) {
                      status_code_t::success_k);
         auto const [grown, grown_status] = index.refine({}, selector, codec, metric, context);
         expect_equal(grown_status, status_code_t::success_k);
-        expect_equal(grown.reachability.audited_nodes, basic_growth_nodes_k + 1);
+        expect_equal(grown.reachability.audited_nodes, basic_fixture_nodes<fixture_type_> + 1);
         expect_true(grown.changed_nodes <= grown.reselected_nodes);
     }
     {
-        constexpr std::size_t entries_k = basic_growth_nodes_k, cycled_k = entries_k - 3;
+        constexpr std::size_t entries_k = basic_fixture_nodes<fixture_type_>, cycled_k = entries_k - 3;
         std::vector<std::vector<std::size_t>> links(entries_k);
         for (std::size_t entry = 0; entry != cycled_k; ++entry) {
             std::size_t const next = (entry + 1) % cycled_k, jump = (entry * 7 + 3) % cycled_k;
@@ -1802,7 +1807,7 @@ void test_basic_gather(u64_t seed) {
     using index_t = typename fixture_type_::index_t;
     using context_t = typename index_t::traversal_context_t;
     using node_id_t = typename index_t::node_id_t;
-    constexpr std::size_t parts_k = 4, entries_k = basic_growth_nodes_k / parts_k;
+    constexpr std::size_t parts_k = 4, entries_k = basic_fixture_nodes<fixture_type_> / parts_k;
     allocation_ledger_t ledger;
     {
         auto metric = fixture_type_::make_metric();
@@ -1823,7 +1828,7 @@ void test_basic_gather(u64_t seed) {
                                        part * entries_k);
         }
         // The walks over the four parts apart set the budget the union is judged at.
-        auto const queries = fixture_type_::make_values(basic_recall_samples_k, stream_key(seed, "gather", parts_k),
+        auto const queries = fixture_type_::make_values(recall_samples_k, stream_key(seed, "gather", parts_k),
                                                         counting_allocator_t {ledger});
         u64_t const probes = stream_key(seed, "gather", parts_k + 1);
         std::size_t parts_spent = 0;
@@ -1868,7 +1873,7 @@ void test_basic_gather(u64_t seed) {
                 return basic_recall_count<fixture_type_>(target, metric, queries, probes, ledger, expansion, &spent);
             },
             basic_connectivity_k, parts_spent, target.size());
-        expect_true(found * 100 >= basic_relaxed_recall_percent_k * basic_recall_samples_k);
+        expect_true(found * 100 >= basic_relaxed_recall_percent_k * recall_samples_k);
     }
     expect_equal(ledger.live_bytes, 0);
 }
@@ -1883,7 +1888,6 @@ std::size_t basic_recall_at_ten(index_type_& index, metric_type_& metric,
                                 std::size_t* spent = nullptr) {
     using distance_t = typename index_type_::distance_t;
     using node_id_t = typename index_type_::node_id_t;
-    constexpr std::size_t wanted_k = 10;
     typename index_type_::traversal_context_t probe {stream, counting_allocator_t {ledger}};
     std::vector<distance_t> exact(index.size());
     std::size_t found = 0;
@@ -1894,7 +1898,7 @@ std::size_t basic_recall_at_ten(index_type_& index, metric_type_& metric,
         for (std::size_t node = 0; node != exact.size(); ++node)
             exact[node] = fixture_type_::oracle(query, index.published_value_of(static_cast<node_id_t>(node)));
         std::sort(exact.begin(), exact.end());
-        std::size_t const ranked = min_of(wanted_k, exact.size());
+        std::size_t const ranked = min_of(recall_wanted_k, exact.size());
         if (!ranked) continue;
         f64_t const tenth = static_cast<f64_t>(exact[ranked - 1]);
         for (std::size_t rank = 0; rank != min_of(ranked, probe.results.size()); ++rank)
@@ -1983,8 +1987,7 @@ void test_basic_cut(u64_t seed) {
     using index_t = typename fixture_type_::index_t;
     using context_t = typename index_t::traversal_context_t;
     using node_id_t = typename index_t::node_id_t;
-    constexpr std::size_t entries_k = basic_growth_nodes_k,
-                          noise_percent_k = static_cast<std::size_t>(rewrite_recall_margin_k * 100);
+    constexpr std::size_t entries_k = basic_fixture_nodes<fixture_type_>;
     allocation_ledger_t ledger;
     {
         auto metric = fixture_type_::make_metric();
@@ -1993,10 +1996,10 @@ void test_basic_cut(u64_t seed) {
         keep_diverse_t const selector {basic_connectivity_k};
         auto const originals = fixture_type_::make_values(entries_k, stream_key(seed, "cut"),
                                                           counting_allocator_t {ledger});
-        auto const queries = fixture_type_::make_values(basic_recall_samples_k, stream_key(seed, "cut", 1),
+        auto const queries = fixture_type_::make_values(recall_samples_k, stream_key(seed, "cut", 1),
                                                         counting_allocator_t {ledger});
         u64_t const probes = stream_key(seed, "cut", 2);
-        std::size_t const recall_total = basic_recall_samples_k * 10;
+        std::size_t const recall_total = recall_samples_k * recall_wanted_k;
         // Equal streams under fresh contexts build equal graphs, one batch at a time.
         auto build = [&](index_t& index) {
             context_t building {stream_key(seed, "cut", 3), counting_allocator_t {ledger}};
@@ -2013,10 +2016,10 @@ void test_basic_cut(u64_t seed) {
             return targets;
         };
         auto report_recall = [&](char const* stage, std::size_t found, std::size_t baseline) {
-            if (found * 100 + noise_percent_k * recall_total < baseline * 100)
+            if (found + recall_margin_k * recall_total < baseline)
                 fmt::print(stderr, "  cut diagnostics: {} found {} of {} at ten, the source {}\n", stage, found,
                            recall_total, baseline);
-            return expect_true(found * 100 + noise_percent_k * recall_total >= baseline * 100);
+            return expect_true(found + recall_margin_k * recall_total >= baseline);
         };
 
         std::unique_ptr<index_t> const source = fixture_type_::make_index(ledger);
@@ -2171,8 +2174,7 @@ void test_basic_sharded_cut(u64_t seed, metric_type_& metric, codec_type_ const&
     using node_id_t = typename indexes_type_::node_id_t;
     using distance_t = typename indexes_type_::distance_t;
     using value_t = typename indexes_type_::value_t;
-    constexpr std::size_t shards_k = 2, wanted_k = 10,
-                          noise_percent_k = static_cast<std::size_t>(rewrite_recall_margin_k * 100);
+    constexpr std::size_t shards_k = 2, wanted_k = 10;
     std::size_t const entries = keys.size();
     forkunion_allocator_t const allocator {no_memory_domain_k};
     keep_diverse_t const selector {basic_connectivity_k};
@@ -2191,7 +2193,7 @@ void test_basic_sharded_cut(u64_t seed, metric_type_& metric, codec_type_ const&
     // the walks as wide as asked and the distances they spent counted; wide enough that one miss
     // stays inside the noise.
     std::vector<value_t> const queries = make_values();
-    std::size_t const samples = min_of(entries, 4 * basic_recall_samples_k);
+    std::size_t const samples = min_of(entries, recall_samples_k);
     auto self_found = [&](std::span<indexes_type_* const> searched, std::size_t expansion, std::size_t& spent) {
         typename indexes_type_::search_config_t config {};
         config.expansion_factor = expansion;
@@ -2263,7 +2265,7 @@ void test_basic_sharded_cut(u64_t seed, metric_type_& metric, codec_type_ const&
         expect_equal(health.reachable_nodes, target->size());
     }
     std::size_t const cut_found = matched_found(targets);
-    expect_true(cut_found * 100 + noise_percent_k * samples >= source_found * 100);
+    expect_true(cut_found + recall_margin_k * samples >= source_found);
 
     // A reshard recutting the first target into one shard moves its other shard into it, whose
     // round links the moved entries in.
@@ -2294,7 +2296,7 @@ void test_basic_sharded_cut(u64_t seed, metric_type_& metric, codec_type_ const&
     expect_equal(resharded_health_status, status_code_t::success_k);
     expect_equal(resharded_health.reachable_nodes, first_entries);
     std::size_t const resharded_found = matched_found(targets);
-    expect_true(resharded_found * 100 + noise_percent_k * samples >= source_found * 100);
+    expect_true(resharded_found + recall_margin_k * samples >= source_found);
 }
 
 /**
@@ -2356,7 +2358,7 @@ void test_basic_sharded(u64_t seed, metric_type_& metric, codec_type_ const& cod
     std::array<distance_t, wanted_k> found_distances;
     dummy_predicate_t unfiltered;
     std::size_t sharded_best = 0, single_best = 0;
-    for (std::size_t sample = 0; sample != basic_recall_samples_k; ++sample) {
+    for (std::size_t sample = 0; sample != recall_samples_k; ++sample) {
         query_t const query = query_of(sample);
         distance_t const best = best_of(sample);
         auto const [found, status] = indexes.search_if(query, watermarks, found_keys, found_distances, {}, unfiltered,
@@ -2366,8 +2368,9 @@ void test_basic_sharded(u64_t seed, metric_type_& metric, codec_type_ const& cod
         expect_equal(single.search(query, {}, metric, context).status, status_code_t::success_k);
         single_best += !context.results.empty() && context.results[0].distance == best;
     }
-    expect_true(sharded_best * 100 >= basic_minimal_recall_percent_k * basic_recall_samples_k);
-    expect_true(sharded_best + basic_recall_samples_k / 10 >= single_best);
+    expect_true(sharded_best + recall_margin_k * recall_samples_k >=
+                basic_minimal_recall_percent_k * recall_samples_k / 100.0);
+    expect_true(sharded_best + recall_margin_k * recall_samples_k >= single_best);
     for (std::size_t sample = 0; sample != placed_shards_k * 2; ++sample) {
         auto const [found, status] = indexes.scan(query_of(sample), watermarks, found_keys, found_distances, unfiltered,
                                                   metric, context);

@@ -484,7 +484,7 @@ struct positions_nvme_fixture_t {
 static void test_positions_sample(u64_t seed) {
     using index_t =
         geospatial::ram_index<util::uuid128_t, flaky_waiter_t, fu::standard_atomic_ref, forkunion_allocator_t>;
-    constexpr std::size_t entries_k = basic_recall_samples_k * basic_connectivity_k;
+    constexpr std::size_t entries_k = basic_growth_nodes_k;
     allocation_ledger_t ledger;
     std::vector<util::uuid128_t> keys(entries_k);
     for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = positions_fixture_t::make_key(entry);

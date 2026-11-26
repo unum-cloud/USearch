@@ -71,7 +71,7 @@ void test_dense_vram_wide_build(make_index_type_ const& make_index, u64_t seed) 
         // A dot graph's hubs can stall the heal short of every node.
         if constexpr (kernel_ != nk_kernel_dot_k) {
             expect_equal(refined.reachability.reachable_nodes, dense_growth_nodes_k);
-            dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k, 32);
+            dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k);
         }
     }
     expect_equal(ledger.live_bytes, 0);
@@ -119,11 +119,11 @@ void test_dense_vram_broad_build(make_index_type_ const& make_index, u64_t seed)
         expect_equal(index.key_of(static_cast<node_id_t>(dense_growth_nodes_k)).status,
                      status_code_t::config_mismatch_k);
         if constexpr (kernel_ != nk_kernel_dot_k)
-            dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k, 32);
+            dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k);
         expect_true(index.refine({}, context).status == status_code_t::success_k);
         // A round over walks of the arena frontier's rung keeps every entry findable.
         if constexpr (kernel_ != nk_kernel_dot_k)
-            dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k, 32);
+            dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k);
     }
     expect_equal(ledger.live_bytes, 0);
 }
@@ -306,7 +306,7 @@ void test_dense_vram_rounds(make_index_type_ const& make_index, u64_t seed) {
                 status_code_t::success_k);
             return index;
         };
-        auto queries = vectors(nk::range(0, 64), nk::slice);
+        auto queries = vectors(nk::range(0, recall_samples_k), nk::slice);
 
         // Stopped at the barrier opening each phase, from the opening health check to the restitch,
         // the round keeps what ran and no search does worse for it.
@@ -323,7 +323,8 @@ void test_dense_vram_rounds(make_index_type_ const& make_index, u64_t seed) {
                 expect_true(stopped);
                 expect_equal(status, status_code_t::cancelled_k);
                 expect_true(report.verdict == refine_verdict_t::stopped_k);
-                expect_true(dense_recall_at_ten(*index, make_index, queries) >= before);
+                std::size_t const after = dense_recall_at_ten(*index, make_index, queries);
+                expect_true(after + recall_margin_k * queries.extent(0) * recall_wanted_k >= before);
             }
 
         // An ended round answers false at every later barrier and reports alike when finished

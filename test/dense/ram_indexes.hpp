@@ -425,7 +425,6 @@ static void test_ram_indexes_recut(u64_t seed) {
     using scalar_t = typename indexes_type_::index_t::scalar_t;
     using key_t = typename indexes_type_::key_t;
     using distance_t = typename indexes_type_::distance_t;
-    constexpr std::size_t samples_k = 64, noise_percent_k = static_cast<std::size_t>(rewrite_recall_margin_k * 100);
     std::size_t const rows = dense_growth_nodes_k;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     dense_indexes_executor<indexes_type_> driver;
@@ -448,8 +447,8 @@ static void test_ram_indexes_recut(u64_t seed) {
             expect_true(succeeded(walker.status));
             nk::vector<key_t> found_keys = make_vector<key_t>(8);
             nk::vector<distance_t> found_distances = make_vector<distance_t>(8);
-            for (std::size_t sample = 0; sample != samples_k; ++sample) {
-                std::size_t const row = sample * (rows / samples_k);
+            for (std::size_t sample = 0; sample != recall_samples_k; ++sample) {
+                std::size_t const row = sample * (rows / recall_samples_k);
                 auto const [result, status] = indexes.search(vectors.view().row(row).as_vector(),
                                                              to_writable_span(found_keys),
                                                              to_writable_span(found_distances), {}, walker.handle());
@@ -499,7 +498,7 @@ static void test_ram_indexes_recut(u64_t seed) {
     expect_equal(indexes.shards_count(), 4u);
     expect_equal(filled_shards(indexes), 2u);
     dense_indexes_expect_restored(indexes, vectors, keys, dimensions, executor, seed);
-    expect_true(self_hits(indexes) * 100 + noise_percent_k * samples_k >= hits_before * 100);
+    expect_true(self_hits(indexes) + recall_margin_k * recall_samples_k >= hits_before);
 
     // A source of another geometry refuses the plan before anything closes, so every index stays
     // open.
@@ -524,7 +523,7 @@ static void test_ram_indexes_recut(u64_t seed) {
     expect_true(moved.source_shards == 4 && moved.target_shards == 1 && moved.moved_entries == rows);
     expect_equal(indexes.size(), 0u);
     dense_indexes_expect_restored(single, vectors, keys, dimensions, executor, seed);
-    expect_true(self_hits(single) * 100 + noise_percent_k * samples_k >= hits_before * 100);
+    expect_true(self_hits(single) + recall_margin_k * recall_samples_k >= hits_before);
 }
 
 /** Every verb is safe beside a clear: searches racing one return their own rows or

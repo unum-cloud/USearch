@@ -38,8 +38,8 @@ namespace unum::usearch::test::abi {
 /** Rows each cell builds, rows a second source adds, and the columns of each. */
 static constexpr std::size_t dense_rows_k = 1024, dense_packed_rows_k = 256, dense_dimensions_k = 64;
 
-/** The breadth every walk takes, and the queries a recall judges. */
-static constexpr std::size_t dense_expansion_k = 128, dense_queries_k = 128;
+/** The breadth every walk takes. */
+static constexpr std::size_t dense_expansion_k = 128;
 
 /** Every row of @p vectors as the C interface takes them, @c f32 converted on the way in. */
 static usearch_rows_view_t rows_of(nk::matrix<nk::f32_t> const& vectors) noexcept {
@@ -122,13 +122,13 @@ static void expect_predicate(handle<dense_verbs_t>& index, usearch_rows_view_t r
     usearch_matches_view_t matches {};
     usearch_dense_search_t search {};
     search.index = index.get(), search.executor = index.executor(), search.outcome = &outcome;
-    search.count = dense_queries_k, search.queries = rows, search.matches = &matches;
+    search.count = recall_samples_k, search.queries = rows, search.matches = &matches;
     search.arena = index.arena(), search.wanted = cell_wanted_k, search.expansion_factor = dense_expansion_k;
     search.predicate = {admit_listed, &admitted, usearch_predicate_cost_cheap_k};
     usearch_dense_search(&search);
     if (index.residency == usearch_residency_vram_k) return void(expect_status(outcome, usearch_status_unsupported_k));
     if (!expect_success(outcome)) return;
-    copied_matches_t const found = copy_matches(matches, dense_queries_k);
+    copied_matches_t const found = copy_matches(matches, recall_samples_k);
     std::size_t outside = 0;
     for (util::uuid128_t const& key : found.keys)
         outside += !std::binary_search(admitted.begin(), admitted.end(), std::bit_cast<usearch_key_t>(key),
@@ -207,12 +207,12 @@ static void test_scratch_limit(util::u64_t seed) {
     init.index = &index, init.outcome = &outcome, init.metric = usearch_dense_metric_angular_k;
     init.quantization = usearch_scalar_bf16_k, init.dimensions = dense_dimensions_k;
     usearch_dense_init_ram(&init);
-    nk::matrix<nk::f32_t> const vectors = dense_rows(usearch_scalar_bf16_k, dense_queries_k, seed);
-    std::vector<usearch_key_t> keys(dense_queries_k);
-    for (std::size_t offset = 0; offset != dense_queries_k; ++offset) keys[offset] = key_of_offset(seed, offset);
+    nk::matrix<nk::f32_t> const vectors = dense_rows(usearch_scalar_bf16_k, recall_samples_k, seed);
+    std::vector<usearch_key_t> keys(recall_samples_k);
+    for (std::size_t offset = 0; offset != recall_samples_k; ++offset) keys[offset] = key_of_offset(seed, offset);
     usearch_dense_insert_t insert {};
     insert.index = index, insert.executor = executor, insert.outcome = &outcome;
-    insert.count = dense_queries_k, insert.keys = {keys.data(), sizeof(usearch_key_t)};
+    insert.count = recall_samples_k, insert.keys = {keys.data(), sizeof(usearch_key_t)};
     insert.vectors = rows_of(vectors);
     if (expect_success(outcome)) usearch_dense_insert(&insert);
     expect_status(outcome, usearch_status_out_of_memory_k);
@@ -239,19 +239,19 @@ static void test_dense_behaviors(sweep_cell_t const& cell, util::u64_t seed) {
     if (!check_built(cell, index, rows, dense_rows_k)) return;
     expect_gets(index, dense_rows_k);
     expect_self_recall(index, rows, dense_rows_k);
-    expect_walk_recall(index, rows, dense_queries_k, dense_expansion_k, 0.9);
-    if (cell.residency == usearch_residency_ram_k) expect_repeatable_walks(index, rows, dense_queries_k);
+    expect_walk_recall(index, rows, recall_samples_k, dense_expansion_k, 0.9);
+    if (cell.residency == usearch_residency_ram_k) expect_repeatable_walks(index, rows, recall_samples_k);
     expect_predicate(index, rows, dense_rows_k);
-    expect_hints(index, rows, dense_queries_k, dense_expansion_k,
+    expect_hints(index, rows, recall_samples_k, dense_expansion_k,
                  cell.residency == usearch_residency_vram_k ? usearch_status_unsupported_k : usearch_status_success_k);
-    expect_refined(index, rows, dense_queries_k, dense_expansion_k, usearch_status_success_k);
+    expect_refined(index, rows, recall_samples_k, dense_expansion_k, usearch_status_success_k);
     expect_health(index, dense_rows_k);
     expect_cursor(index, dense_rows_k);
     expect_sample(index, dense_rows_k);
-    expect_buffer_round_trip(index, rows, dense_queries_k, dense_expansion_k, 0.9, usearch_status_success_k);
+    expect_buffer_round_trip(index, rows, recall_samples_k, dense_expansion_k, 0.9, usearch_status_success_k);
     scratch_directory_t const scratch;
     std::string const stem = scratch.path("checkpoint");
-    expect_persistence(cell, index, rows, rows, dense_queries_k, dense_expansion_k, 0.9, stem,
+    expect_persistence(cell, index, rows, rows, recall_samples_k, dense_expansion_k, 0.9, stem,
                        saved_bytes_t::identical_k, 0.0);
     if (cell.residency == usearch_residency_nvme_k) return;
     expect_refine_plan(index, rows, dense_rows_k, usearch_status_success_k);

@@ -198,7 +198,7 @@ using cell_vendor_t = apple_cells_t;
 #endif
 
 /**
- *  @brief One collection of @p count clouds of @p kind and @p queries_count held-out queries of
+ *  @brief One collection of @p count clouds of @p kind and @c recall_samples_k held-out queries of
  *      @p scalar_type_, built on the GPU in the face @p vram_index_type_, and in RAM under the kits
  *      of @p kernel alike.
  *
@@ -207,7 +207,7 @@ using cell_vendor_t = apple_cells_t;
  */
 template <typename scalar_type_, typename vram_index_type_>
 static void test_shapes_vram_collection(u64_t seed, cell_vendor_t::executor_t& executor, nk_kernel_kind_t kernel,
-                                        cloud_kind_t kind, std::size_t count, std::size_t queries_count) {
+                                        cloud_kind_t kind, std::size_t count) {
     using vram_index_t = vram_index_type_;
     checks_held_t const held;
     using kit_t = typename shapes_ladder<scalar_type_, nk_cap_cpus_k>::kit_t;
@@ -217,7 +217,7 @@ static void test_shapes_vram_collection(u64_t seed, cell_vendor_t::executor_t& e
     using distance_t = typename kit_t::distance_t;
     constexpr std::size_t wanted_k = 10, expansion_k = 64, batches_k = 3;
 
-    std::size_t const clouds_count = count + queries_count;
+    std::size_t const clouds_count = count + recall_samples_k;
     nk::matrix<f64_t> clouds = make_matrix<f64_t>(clouds_count, shapes_max_points_k * 3);
     nk::matrix<scalar_type_> stored = make_matrix<scalar_type_>(clouds_count, shapes_max_points_k * 3);
     nk::vector<std::size_t> points = make_vector<std::size_t>(clouds_count);
@@ -241,10 +241,10 @@ static void test_shapes_vram_collection(u64_t seed, cell_vendor_t::executor_t& e
 
     // The serial distances of every query to every stored cloud, over the packs the GPU stores, and
     // the `wanted_k`-th of each query's, which bounds a match.
-    nk::matrix<distance_t> exact = make_matrix<distance_t>(queries_count, count);
+    nk::matrix<distance_t> exact = make_matrix<distance_t>(recall_samples_k, count);
     nk::vector<distance_t> ranked = make_vector<distance_t>(count);
-    nk::vector<f64_t> reaches = make_vector<f64_t>(queries_count);
-    for (std::size_t query = 0; query != queries_count; ++query) {
+    nk::vector<f64_t> reaches = make_vector<f64_t>(recall_samples_k);
+    for (std::size_t query = 0; query != recall_samples_k; ++query) {
         for (std::size_t entry = 0; entry != count; ++entry) {
             void const* const query_pack = tape.data() + offsets[count + query];
             void const* const entry_pack = tape.data() + offsets[entry];
@@ -280,7 +280,7 @@ static void test_shapes_vram_collection(u64_t seed, cell_vendor_t::executor_t& e
     }
     std::size_t ram_matched = 0;
     nk::vector<f64_t> found = make_vector<f64_t>(wanted_k);
-    for (std::size_t query = 0; query != queries_count; ++query) {
+    for (std::size_t query = 0; query != recall_samples_k; ++query) {
         std::array const cloud {stored_cloud(count + query)};
         auto const [value, pack_status] = value_t::make(cloud, value_allocator, 0);
         if (!expect_true(succeeded(pack_status))) return;
@@ -313,9 +313,9 @@ static void test_shapes_vram_collection(u64_t seed, cell_vendor_t::executor_t& e
     }
     expect_equal(vram_index.size(), count);
 
-    nk::matrix<u32_t> ids = make_matrix<u32_t>(queries_count, wanted_k);
-    nk::matrix<f32_t> distances = make_matrix<f32_t>(queries_count, wanted_k);
-    std::span<std::size_t const> const query_offsets {offsets.data() + count, queries_count + 1};
+    nk::matrix<u32_t> ids = make_matrix<u32_t>(recall_samples_k, wanted_k);
+    nk::matrix<f32_t> distances = make_matrix<f32_t>(recall_samples_k, wanted_k);
+    std::span<std::size_t const> const query_offsets {offsets.data() + count, recall_samples_k + 1};
     typename vram_index_t::search_config_t const search_config {expansion_k, wanted_k};
     expect_equal(executor.reserve(vram_index.traversal_memory_usage(
                      tape_view<byte_t const> {tape.data(), query_offsets}, search_config)),
@@ -328,7 +328,7 @@ static void test_shapes_vram_collection(u64_t seed, cell_vendor_t::executor_t& e
             status_code_t::success_k);
     std::size_t vram_matched = 0;
     error_stats_t distance_errors;
-    for (std::size_t query = 0; query != queries_count && held(); ++query) {
+    for (std::size_t query = 0; query != recall_samples_k && held(); ++query) {
         std::size_t found_count = 0;
         for (std::size_t rank = 0; rank != wanted_k; ++rank) {
             u32_t const id = ids(query, rank);
@@ -342,12 +342,12 @@ static void test_shapes_vram_collection(u64_t seed, cell_vendor_t::executor_t& e
         expect_equal(found_count, wanted_k);
         vram_matched += matched_count(to_span(found).first(found_count), reaches[query], wanted_k);
     }
-    f64_t const ram_recall = static_cast<f64_t>(ram_matched) / (queries_count * wanted_k);
-    f64_t const vram_recall = static_cast<f64_t>(vram_matched) / (queries_count * wanted_k);
-    if (vram_recall + 0.05 < ram_recall)
+    f64_t const ram_recall = static_cast<f64_t>(ram_matched) / (recall_samples_k * wanted_k);
+    f64_t const vram_recall = static_cast<f64_t>(vram_matched) / (recall_samples_k * wanted_k);
+    if (vram_recall + recall_margin_k < ram_recall)
         fmt::print(stderr, "  recall at ten on {} clouds: {:.3f} on the GPU, {:.3f} in RAM\n", count, vram_recall,
                    ram_recall);
-    expect_true(vram_recall + 0.05 >= ram_recall);
+    expect_true(vram_recall + recall_margin_k >= ram_recall);
     expect_errors("vram shapes distances", comparison_family_t::approximate_k, comparison_verdict_t::assert_k,
                   distance_errors, 0);
 }
@@ -382,25 +382,23 @@ static void run_shapes_vram_class_cases(cell_vendor_t::executor_t& executor, cha
         char const* kind_constant;
         nk_kernel_kind_t kernel;
         cloud_kind_t kind;
-        std::size_t count, queries_count;
+        std::size_t count;
     };
-    cell_t const cells[] = {
-        {"random", "cloud_kind_t::random_k", chamfer_k, cloud_kind_t::random_k, 1024, 64},
-        {"coincident", "cloud_kind_t::coincident_k", hausdorff_k, cloud_kind_t::coincident_k, 256, 16},
-        {"collinear", "cloud_kind_t::collinear_k", chamfer_k, cloud_kind_t::collinear_k, 1024, 64},
-        {"molecular", "cloud_kind_t::molecular_k", hausdorff_k, cloud_kind_t::molecular_k, 1024, 64}};
+    cell_t const cells[] = {{"random", "cloud_kind_t::random_k", chamfer_k, cloud_kind_t::random_k, 1024},
+                            {"coincident", "cloud_kind_t::coincident_k", hausdorff_k, cloud_kind_t::coincident_k, 256},
+                            {"collinear", "cloud_kind_t::collinear_k", chamfer_k, cloud_kind_t::collinear_k, 1024},
+                            {"molecular", "cloud_kind_t::molecular_k", hausdorff_k, cloud_kind_t::molecular_k, 1024}};
     u64_t const seed = test_run.settings.seed;
     for (cell_t const& cell : cells)
         run_test_case(
             fmt::format("test_shapes_vram_collection<nk::f16_t>({}, {})", gpu_class, cell.kind_constant).c_str(),
             test_shapes_vram_collection<nk::f16_t, shapes_face_t<nk::f16_t, gpu_class_, capabilities_>>,
-            stream_key(seed, cell.name), executor, cell.kernel, cell.kind, cell.count, cell.queries_count);
+            stream_key(seed, cell.name), executor, cell.kernel, cell.kind, cell.count);
     if constexpr (gpu_class_ == gpu_class_t::nvidia_ampere_k || gpu_class_ == gpu_class_t::amd_cdna3_k)
         run_test_case(
             fmt::format("test_shapes_vram_collection<nk::f32_t>({}, cloud_kind_t::molecular_k)", gpu_class).c_str(),
             test_shapes_vram_collection<nk::f32_t, shapes_face_t<nk::f32_t, gpu_class_, capabilities_>>,
-            stream_key(seed, "f32"), executor, chamfer_k, cloud_kind_t::molecular_k, std::size_t {1024},
-            std::size_t {64});
+            stream_key(seed, "f32"), executor, chamfer_k, cloud_kind_t::molecular_k, std::size_t {1024});
 }
 
 /** Every class the device runs, as the dispatch ladder would admit it: the floor on any NVIDIA
@@ -454,20 +452,19 @@ void run_shapes_vram_cases<metal_executor_t>(gpu_device_t const& device) {
         char const* kind_constant;
         nk_kernel_kind_t kernel;
         cloud_kind_t kind;
-        std::size_t count, queries_count;
+        std::size_t count;
     };
-    cell_t const cells[] = {
-        {"random", "cloud_kind_t::random_k", chamfer_k, cloud_kind_t::random_k, 1024, 64},
-        {"coincident", "cloud_kind_t::coincident_k", hausdorff_k, cloud_kind_t::coincident_k, 256, 16},
-        {"collinear", "cloud_kind_t::collinear_k", chamfer_k, cloud_kind_t::collinear_k, 1024, 64},
-        {"molecular", "cloud_kind_t::molecular_k", hausdorff_k, cloud_kind_t::molecular_k, 1024, 64}};
+    cell_t const cells[] = {{"random", "cloud_kind_t::random_k", chamfer_k, cloud_kind_t::random_k, 1024},
+                            {"coincident", "cloud_kind_t::coincident_k", hausdorff_k, cloud_kind_t::coincident_k, 256},
+                            {"collinear", "cloud_kind_t::collinear_k", chamfer_k, cloud_kind_t::collinear_k, 1024},
+                            {"molecular", "cloud_kind_t::molecular_k", hausdorff_k, cloud_kind_t::molecular_k, 1024}};
     u64_t const seed = test_run.settings.seed;
     for (cell_t const& cell : cells)
         run_test_case(
             fmt::format("test_shapes_vram_collection<nk::f16_t>(gpu_vendor_t::apple_k, {})", cell.kind_constant)
                 .c_str(),
             test_shapes_vram_collection<nk::f16_t, vram_apple_index<nk::f16_t, u32_t>>, stream_key(seed, cell.name),
-            executor, cell.kernel, cell.kind, cell.count, cell.queries_count);
+            executor, cell.kernel, cell.kind, cell.count);
     // The C interface names devices by their place in the listing, which `device` belongs to.
     std::int32_t const devices[] = {static_cast<std::int32_t>(&device - test::gpu_devices().data())};
     run_test_case("usearch_shapes_init_vram", [&] {
