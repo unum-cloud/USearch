@@ -292,7 +292,7 @@ template <typename checkpoint_type_>
 util::status_t shapes_ram_variant<scalar_type_, cpu_class_>::save(checkpoint_type_ checkpoint, executor_t& executor,
                                                                   progress_ticks_t& ticks) noexcept {
     return with_shapes_provenance(geometry, [&](util::save_config_t const& config) noexcept {
-        return index.save(checkpoint, codec_t {}, executor, config, token_of(geometry.metric), ticks);
+        return basic::save(index, checkpoint, codec_t {}, executor, config, token_of(geometry.metric), ticks);
     });
 }
 
@@ -300,7 +300,8 @@ template <nk::a_shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 util::expected<std::size_t> shapes_ram_variant<scalar_type_, cpu_class_>::storage_requirements() const noexcept {
     std::size_t required = 0;
     util::status_t const sized = with_shapes_provenance(geometry, [&](util::save_config_t const& config) noexcept {
-        auto const [bytes, bytes_status] = index.storage_requirements(codec_t {}, config, token_of(geometry.metric));
+        auto const [bytes, bytes_status] = basic::storage_requirements(index, codec_t {}, config,
+                                                                       token_of(geometry.metric));
         required = bytes;
         return bytes_status;
     });
@@ -311,7 +312,8 @@ template <nk::a_shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 template <typename checkpoint_type_>
 util::status_t shapes_ram_variant<scalar_type_, cpu_class_>::load(checkpoint_type_ checkpoint, executor_t& executor,
                                                                   progress_ticks_t& ticks) noexcept {
-    if (util::status_t const loaded = index.load(checkpoint, codec_t {}, executor, util::load_config_t {}, ticks);
+    if (util::status_t const loaded = basic::load(index, checkpoint, codec_t {}, executor, util::load_config_t {},
+                                                  ticks);
         failed(loaded))
         return loaded;
     for (shard_t const& one : index.live_shards())

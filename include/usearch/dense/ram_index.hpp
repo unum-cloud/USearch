@@ -1047,7 +1047,7 @@ struct ram_index {
     template <typename, typename, typename, typename, typename, typename, typename, template <typename> class, typename,
               typename>
     friend struct ram_indexes;
-    template <typename, template <typename> class, typename>
+    template <typename, template <typename> class shards_atomic_ref_template_, typename, typename>
     friend struct utilities::shard_set;
 
     /** The distance kit @c src/ picked; its task is the row pitch the chunks round to. */

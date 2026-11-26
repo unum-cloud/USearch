@@ -26,43 +26,44 @@
 #include <functional>   // `std::hash` - the shard set's key hash
 #include <memory>       // `std::unique_ptr` - an index holds atomics and never moves
 #include <mutex>        // `std::unique_lock` - the windows' hold on the gate
-#include <new>          // `std::nothrow` - a shard built on a memory domain
+#include <new>          // `std::nothrow` - a shard built on its allocator
 #include <shared_mutex> // `std::shared_lock` - the mutators' hold on the gate
 #include <span>         // `std::span` - the caller's watermarks, keys & distances
-#include <string_view>  // `std::string_view` - the checkpoint paths
 #include <type_traits>  // `std::is_same_v` - the unpredicated walk
 #include <utility>      // `std::move`, `std::exchange`
 
-#include <forkunion/forkunion.h> // `fu_memory_domain_id_t`
-
 #include "usearch/utilities/types.hpp"       // `shared_mutex` - the gate
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the plans' shard plans
-#include "usearch/utilities/ram_device.hpp"  // `forkunion_allocator_t` - the shard table's placement
 #include "usearch/utilities/ram_shards.hpp"  // `shard_set` - the shard table
 #include "usearch/utilities/ram_walks.hpp"   // `cursor_walk` - the cursor's walk
 #include "usearch/utilities/sample.hpp"      // `sample_plan` - the SAMPLE verb's roots, paths & regions
 #include "usearch/basic/ram_index.hpp"
-#include "usearch/basic/shard_checkpoints.hpp" // `save_shards`, `load_shards` - the checkpoints of every live shard
 
 namespace unum::usearch::basic {
 
 template <typename indexes_type_>
 struct ram_indexes_cursor;
 
+template <typename indexes_type_>
+struct ram_checkpoint_residency;
+
 /**
  *  @brief Basic RAM shards viewed as one: insertions routed over the shard generations, searches
  *      merged across them, lookups fanned out.
  *
- *  @tparam index_type_ The shard, a @c basic::ram_index whose allocator a memory domain builds. Its
- *      waiter and atomic reference serve the shard table too, so the defaults hold: the standard
- *      reference posts what ForkUnion's spell natively through @c atomic_add. Its node IDs are 32
- *      bits wide, as the shard table locates every node in 8 bytes; a lone @c basic::ram_index
- *      takes either width.
+ *  @tparam index_type_ The shard, a @c basic::ram_index with 32-bit node IDs, whose allocator
+ *      places it and the shard table alike.
+ *
+ *  The shard's waiter and atomic reference serve the shard table too, so the defaults hold: the
+ *  standard reference posts what ForkUnion's spell natively through @c atomic_add. Node IDs are
+ *  32 bits wide, as the shard table locates every node in 8 bytes; a lone @c basic::ram_index
+ *  takes either width.
  */
 template <typename index_type_>
     requires std::same_as<typename index_type_::node_id_t, u32_t>
 struct ram_indexes {
     friend struct ram_indexes_cursor<ram_indexes>;
+    friend struct ram_checkpoint_residency<ram_indexes>;
 
     /** A reader's walk over every live shard's published entries: as stored in placement order,
      *  or breadth-first from the entries it opens on, each with the keys it links to. */
@@ -96,7 +97,7 @@ struct ram_indexes {
     using atomic_ref = typename index_t::template atomic_ref<word_type_>;
 
     /** The shards and the rotation that routes new entries; the keys stay in their records. */
-    using shards_t = shard_set<index_t, index_t::template atomic_ref, wait_t>;
+    using shards_t = shard_set<index_t, index_t::template atomic_ref, wait_t, allocator_t>;
     using shard_t = typename shards_t::shard_t;
     using batch_split_t = typename shards_t::batch_split_t;
 
@@ -213,7 +214,7 @@ struct ram_indexes {
 
     /** Every index names the host allocator its shard table sits on and the line its shards
      *  prefetch by; nothing is placed by default. */
-    explicit ram_indexes(forkunion_allocator_t allocator, std::size_t line_bytes = default_alignment_k) noexcept
+    explicit ram_indexes(allocator_t allocator, std::size_t line_bytes = default_alignment_k) noexcept
         : shards_(allocator), line_bytes_(line_bytes) {}
     ram_indexes(ram_indexes const&) = delete;
     ram_indexes& operator=(ram_indexes const&) = delete;
@@ -226,14 +227,14 @@ struct ram_indexes {
     void bound_shards(std::size_t nodes) noexcept { shards_.bound_shards(nodes); }
 
     /**
-     *  Appends one empty shard placed on @p memory_domain; refused once storage exists.
+     *  @brief Appends one empty shard on @p allocator; refused once storage exists.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k The index already holds storage, or has a shard generation in
      *    flight.
      */
-    status_t emplace(fu_memory_domain_id_t memory_domain) noexcept {
-        std::unique_ptr<index_t> shard = build_(allocator_t {memory_domain});
+    status_t emplace(allocator_t const& allocator) noexcept {
+        std::unique_ptr<index_t> shard = build_(allocator);
         if (!shard) return status_code_t::out_of_memory_k;
         return shards_.emplace(std::move(shard));
     }
@@ -327,201 +328,6 @@ struct ram_indexes {
 
 #pragma endregion Placement and Measures
 
-#pragma region Checkpoints
-
-    /** What a checkpoint does on these shards' memory domains, for @ref save_shards and
-     *  @c load_shards: every shard's own plans on the calling thread, its keys in its records,
-     *  which those plans write and read, and a load's parts past the placed shards on shard
-     *  generations built like them. */
-    struct checkpoint_residency_t {
-        ram_indexes* owner = nullptr;
-
-        /**
-         *  The counts a save of shard @p shard needs, as the shard's own @c columns_extents takes
-         *  them.
-         *
-         *  @par Statuses:
-         *  - @c contended_k A mutator or an open plan holds the shard, or a dispensed batch has yet
-         *    to publish.
-         */
-        template <typename codec_type_>
-        static expected<columns_extents_t> columns_extents(shards_t const& shards, std::size_t shard,
-                                                           codec_type_ const& codec) noexcept {
-            return shards[shard].index->columns_extents(codec);
-        }
-
-        /**
-         *  Opens the save plan of shard @p shard into @p columns, the shard's own @c plan_save.
-         *
-         *  @par Statuses:
-         *  - @c contended_k A mutator or an open plan holds the shard, or a dispensed batch has yet
-         *    to publish.
-         *  - @c overflow_k The key or a prefix-sum column is shorter than its count, or the
-         *    neighbor IDs or value bytes are shorter than the sums need.
-         *  - @c config_mismatch_k The key or a prefix-sum column is longer than its count.
-         */
-        template <typename codec_type_>
-        static expected<typename index_t::save_plan_t> open_shard_save(shards_t& shards, std::size_t shard,
-                                                                       typename index_t::columns_t columns,
-                                                                       codec_type_ const& codec) noexcept {
-            return shards[shard].index->plan_save(columns, codec);
-        }
-
-        /**
-         *  Opens the load plan of shard @p shard from @p columns, the shard's own @c plan_load.
-         *
-         *  @par Statuses:
-         *  - @c contended_k A mutator or an open plan holds the shard.
-         *  - @c config_mismatch_k The shard already publishes nodes.
-         *  - @c malformed_k A prefix-sum column is not one longer than the keys, does not rise from
-         *    zero to its element column's length, or a neighbor ID names no node.
-         *  - @c overflow_k The nodes pass the shard's node IDs, or a node's capacity wraps.
-         */
-        static expected<typename index_t::load_plan_t> open_shard_load(
-            shards_t& shards, std::size_t shard, typename index_t::columns_view_t columns) noexcept {
-            return shards[shard].index->plan_load(columns);
-        }
-
-        /**
-         *  Covers @p entries in shard @p shard under the set's shard bound.
-         *
-         *  @par Statuses:
-         *  - @c overflow_k @p entries passes the shard's node IDs.
-         */
-        static expected<std::size_t> reserve(shards_t& shards, std::size_t shard, std::size_t entries) noexcept {
-            return shards[shard].index->reserve({entries, shards.shard_capacity()});
-        }
-
-        /**
-         *  Leaves part @p part the live shard it names, a placed one, or opens shard generations on
-         *  the placed shards' memory domains until it exists.
-         *
-         *  @par Statuses:
-         *  - @c contended_k The set is sealed while a shard generation must open.
-         */
-        status_t open_shard_for_part(shards_t& shards, std::size_t part) noexcept {
-            while (shards.size() <= shards.retired_shards() + part)
-                if (status_t const opened = shards.open_shard_generation_(
-                        shards.open_shard_generation(),
-                        [this](shard_t const& like) noexcept { return owner->build_shard_(like); });
-                    failed(opened))
-                    return opened;
-            return status_code_t::success_k;
-        }
-    };
-
-    /** Writes the live shards under @p path through @c save_shards: a lone live shard's monolith,
-     *  or one part per live shard beside the manifest @p path names. Takes the gate alone, so a
-     *  call in flight refuses it with @c contended_k. A refusal of @p codec passes through.
-     *
-     *  @par Statuses:
-     *  - @c contended_k A call holds the gate, a mutator or an open plan holds a shard, or the
-     *    pool of @p executor runs another dispatch.
-     *  - @c uninitialized_k No shard is live, or the pool of @p executor has no workers.
-     *  - @c config_mismatch_k @p config does not validate, an element has no interchange dtype, a
-     *    value disagrees with its shape, or a segment is misaligned.
-     *  - @c invalid_argument_k A part or manifest path does not parse.
-     *  - @c overflow_k A device ends before a part or the manifest, or a column is shorter than
-     *    the layout needs.
-     *  - @c malformed_k A written part's header does not parse back.
-     */
-    template <typename codec_type_, typename executor_type_, typename progress_type_ = dummy_progress_t>
-    status_t save(std::string_view path, codec_type_ const& codec, executor_type_& executor,
-                  save_config_t const& config, std::string_view metric, progress_type_&& progress = {}) noexcept {
-        unique_lock_t const held {gate_, std::try_to_lock};
-        if (!held) return status_code_t::contended_k;
-        return save_shards(shards_, checkpoint_residency_t {this}, path, codec, executor, config, metric,
-                           std::forward<progress_type_>(progress));
-    }
-
-    /** Reads the monolith or manifest at @p path into the placed, empty shards, part @c p into live
-     *  shard @c p, opened past the placed ones over their memory domains in turn. Takes the gate
-     *  alone, as @ref save does. A refusal of @p codec passes through.
-     *
-     *  @par Statuses:
-     *  - @c contended_k A call holds the gate, the set is sealed while a shard generation must
-     *    open, a mutator or plan holds a shard, or the pool of @p executor runs another dispatch.
-     *  - @c uninitialized_k No shard is placed, or the pool of @p executor has no workers.
-     *  - @c config_mismatch_k The shards hold entries, a column's dtype, shape or key width
-     *    differs from what the shards and @p codec take, or a segment is misaligned.
-     *  - @c invalid_argument_k The checkpoint or a part path does not parse.
-     *  - @c malformed_k The checkpoint lists no part, or a part, its header, columns or sums do
-     *    not parse.
-     *  - @c overflow_k The nodes pass a shard's node IDs or key multimap.
-     */
-    template <typename codec_type_, typename executor_type_, typename progress_type_ = dummy_progress_t>
-    status_t load(std::string_view path, codec_type_ const& codec, executor_type_& executor,
-                  load_config_t const& config, progress_type_&& progress = {}) noexcept {
-        unique_lock_t const held {gate_, std::try_to_lock};
-        if (!held) return status_code_t::contended_k;
-        return load_shards(shards_, checkpoint_residency_t {this}, path, codec, executor, config,
-                           std::forward<progress_type_>(progress));
-    }
-
-    /**
-     *  @brief Bytes a buffer @ref save under @p config writes: a lone live shard's monolith, or the
-     *      manifest and every live shard's part it lists.
-     *
-     *  Sizing goes through @c shard_storage_requirements and opens no shard, so the residency it
-     *  takes needs no owner.
-     *
-     *  @par Statuses:
-     *  - @c uninitialized_k No shard is live.
-     *  - @c contended_k A mutator or an open plan holds a shard.
-     *  - @c config_mismatch_k @p config does not validate, or an element has no interchange dtype.
-     */
-    template <typename codec_type_>
-    expected<std::size_t> storage_requirements(codec_type_ const& codec, save_config_t const& config,
-                                               std::string_view metric) const noexcept {
-        return shard_storage_requirements(shards_, checkpoint_residency_t {}, codec, config, metric);
-    }
-
-    /**
-     *  @brief Writes the live shards into @p buffer through @c save_shards, sized by
-     *      @ref storage_requirements, taking the gate as the path form does.
-     *
-     *  @par Statuses:
-     *  - @c contended_k A call holds the gate, a mutator or an open plan holds a shard, or the
-     *    pool of @p executor runs another dispatch.
-     *  - @c uninitialized_k No shard is live, or the pool of @p executor has no workers.
-     *  - @c config_mismatch_k @p config does not validate, an element has no interchange dtype, a
-     *    value disagrees with its shape, or a segment is misaligned.
-     *  - @c overflow_k @p buffer is shorter than the checkpoint.
-     */
-    template <typename codec_type_, typename executor_type_, typename progress_type_ = dummy_progress_t>
-    status_t save(bytes_span_t buffer, codec_type_ const& codec, executor_type_& executor, save_config_t const& config,
-                  std::string_view metric, progress_type_&& progress = {}) noexcept {
-        unique_lock_t const held {gate_, std::try_to_lock};
-        if (!held) return status_code_t::contended_k;
-        return save_shards(shards_, checkpoint_residency_t {this}, buffer, codec, executor, config, metric,
-                           std::forward<progress_type_>(progress));
-    }
-
-    /**
-     *  @brief Reads the monolith or manifest-led checkpoint in @p buffer into the placed, empty
-     *      shards through @c load_shards, as the path form does.
-     *
-     *  @par Statuses:
-     *  - @c contended_k A call holds the gate, the set is sealed while a shard generation must
-     *    open, a mutator or plan holds a shard, or the pool of @p executor runs another dispatch.
-     *  - @c uninitialized_k No shard is placed, or the pool of @p executor has no workers.
-     *  - @c config_mismatch_k The shards hold entries, a column's dtype, shape or key width
-     *    differs from what the shards and @p codec take, or a segment is misaligned.
-     *  - @c malformed_k The buffer lists no part, or a part, its header, columns or sums do not
-     *    parse.
-     *  - @c overflow_k The nodes pass a shard's node IDs or key multimap.
-     */
-    template <typename codec_type_, typename executor_type_, typename progress_type_ = dummy_progress_t>
-    status_t load(bytes_view_t buffer, codec_type_ const& codec, executor_type_& executor, load_config_t const& config,
-                  progress_type_&& progress = {}) noexcept {
-        unique_lock_t const held {gate_, std::try_to_lock};
-        if (!held) return status_code_t::contended_k;
-        return load_shards(shards_, checkpoint_residency_t {this}, buffer, codec, executor, config,
-                           std::forward<progress_type_>(progress));
-    }
-
-#pragma endregion Checkpoints
-
 #pragma region Insertion
 
     /**
@@ -537,10 +343,10 @@ struct ram_indexes {
      */
     struct [[nodiscard]] insert_plan_t {
 
-        insert_plan_t() noexcept : insert_plan_t(forkunion_allocator_t {}) {}
+        insert_plan_t() noexcept : insert_plan_t(allocator_t {}) {}
 
         /** An empty plan over @p allocator; only @ref plan_insert ever fills it. */
-        explicit insert_plan_t(forkunion_allocator_t allocator) noexcept : shard_plans_(allocator) {}
+        explicit insert_plan_t(allocator_t allocator) noexcept : shard_plans_(allocator) {}
         insert_plan_t(insert_plan_t&& other) noexcept
             : shard_plans_(std::move(other.shard_plans_)), batch_split_(other.batch_split_),
               owner_(std::exchange(other.owner_, nullptr)) {}
@@ -626,7 +432,7 @@ struct ram_indexes {
 
         /** One plan per shard from the open shard generation's first, in placement order; an empty
          *  one where no entry goes. */
-        growing_buffer<shard_insert_plan_t, forkunion_allocator_t> shard_plans_;
+        growing_buffer<shard_insert_plan_t, allocator_t> shard_plans_;
 
         /** The batch split across the shard generation open at planning, which the shard plans
          *  start at, and the fresh ones it opened. */
@@ -668,7 +474,7 @@ struct ram_indexes {
         // Every shard claims before any dispenses, so a refusal gives back the claims before it as
         // they die, and no shard is left holding IDs that would never publish.
         std::size_t const shards = batch_split.shards_spanned();
-        growing_buffer<shard_capacity_claim_t, forkunion_allocator_t> claims {shards_.allocator()};
+        growing_buffer<shard_capacity_claim_t, allocator_t> claims {shards_.allocator()};
         if (failed(claims.reserve_exactly(shards)) || failed(plan.shard_plans_.reserve_exactly(shards)))
             return {{}, status_code_t::out_of_memory_k};
         for (std::size_t shard = 0; shard != shards; ++shard) {
@@ -920,10 +726,10 @@ struct ram_indexes {
          *  one. */
         std::size_t taken = 0;
 
-        refine_plan_t() noexcept : refine_plan_t(forkunion_allocator_t {}) {}
+        refine_plan_t() noexcept : refine_plan_t(allocator_t {}) {}
 
         /** An unbound plan over @p allocator; only @ref plan_refine fills it. */
-        explicit refine_plan_t(forkunion_allocator_t allocator) noexcept : shard_plans_(allocator) {}
+        explicit refine_plan_t(allocator_t allocator) noexcept : shard_plans_(allocator) {}
         refine_plan_t(refine_plan_t&& other) noexcept
             : taken(other.taken), shard_plans_(std::move(other.shard_plans_)),
               owner_(std::exchange(other.owner_, nullptr)) {}
@@ -1036,7 +842,7 @@ struct ram_indexes {
         }
 
         /** One plan per shard of this index, unbound where it runs no round. */
-        growing_buffer<shard_refine_plan_t, forkunion_allocator_t> shard_plans_;
+        growing_buffer<shard_refine_plan_t, allocator_t> shard_plans_;
 
         /** The index refined, sealed while the plan lives; null in an unbound plan. */
         ram_indexes* owner_ = nullptr;
@@ -1063,10 +869,10 @@ struct ram_indexes {
          *  one. */
         std::size_t taken = 0;
 
-        reshard_plan_t() noexcept : reshard_plan_t(forkunion_allocator_t {}) {}
+        reshard_plan_t() noexcept : reshard_plan_t(allocator_t {}) {}
 
         /** An unbound plan over @p allocator; only @ref plan_reshard fills it. */
-        explicit reshard_plan_t(forkunion_allocator_t allocator) noexcept
+        explicit reshard_plan_t(allocator_t allocator) noexcept
             : shard_plans_(allocator), sources_(allocator), source_holds_(allocator), targets_(allocator),
               target_holds_(allocator) {}
         reshard_plan_t(reshard_plan_t&& other) noexcept
@@ -1267,21 +1073,21 @@ struct ram_indexes {
         }
 
         /** One plan per shard of this index, unbound where it runs no round. */
-        growing_buffer<shard_reshard_plan_t, forkunion_allocator_t> shard_plans_;
+        growing_buffer<shard_reshard_plan_t, allocator_t> shard_plans_;
 
         /** The sources other than this index, copied at planning: a pack's, or those a split
          *  gathers into this index first. */
-        growing_buffer<ram_indexes*, forkunion_allocator_t> sources_;
+        growing_buffer<ram_indexes*, allocator_t> sources_;
 
         /** Every source's unique side, held and closed in source order, each dropped once the
          *  source is emptied. */
-        growing_buffer<unique_lock_t, forkunion_allocator_t> source_holds_;
+        growing_buffer<unique_lock_t, allocator_t> source_holds_;
 
         /** This index for a pack, or every split target, copied at planning. */
-        growing_buffer<ram_indexes*, forkunion_allocator_t> targets_;
+        growing_buffer<ram_indexes*, allocator_t> targets_;
 
         /** Every split target's unique side, held and closed in target order. */
-        growing_buffer<unique_lock_t, forkunion_allocator_t> target_holds_;
+        growing_buffer<unique_lock_t, allocator_t> target_holds_;
 
         /** This index's unique side, held for the plan's life while the moves empty its shards. */
         unique_lock_t owner_hold_;
@@ -1461,7 +1267,7 @@ struct ram_indexes {
 
     /** Task @p position among every plan of @p plans in turn, or one past the last shard. */
     template <typename plan_type_>
-    static typename refine_plan_t::task_t task_of(growing_buffer<plan_type_, forkunion_allocator_t> const& plans,
+    static typename refine_plan_t::task_t task_of(growing_buffer<plan_type_, allocator_t> const& plans,
                                                   std::size_t position) noexcept {
         for (std::size_t shard = 0; shard != plans.size(); ++shard) {
             std::size_t const tasks = plans[shard].tasks().size();
@@ -1473,7 +1279,7 @@ struct ram_indexes {
 
     /** Tasks of the current phase over every plan of @p plans. */
     template <typename plan_type_>
-    static std::size_t tasks_count(growing_buffer<plan_type_, forkunion_allocator_t> const& plans) noexcept {
+    static std::size_t tasks_count(growing_buffer<plan_type_, allocator_t> const& plans) noexcept {
         std::size_t total = 0;
         for (plan_type_ const& plan : plans) total += plan.tasks().size();
         return total;
@@ -1481,7 +1287,7 @@ struct ram_indexes {
 
     /** The widest budget any plan of @p plans reserved its neighbor lists for. */
     template <typename plan_type_>
-    static std::size_t widest_connectivity(growing_buffer<plan_type_, forkunion_allocator_t> const& plans) noexcept {
+    static std::size_t widest_connectivity(growing_buffer<plan_type_, allocator_t> const& plans) noexcept {
         std::size_t widest = 0;
         for (plan_type_ const& plan : plans) widest = max_of(widest, plan.connectivity());
         return widest;
@@ -1489,7 +1295,7 @@ struct ram_indexes {
 
     /** Grows @p context to what any plan of @p plans touches. */
     template <typename plan_type_, typename context_allocator_type_>
-    static status_t reserve_contexts(growing_buffer<plan_type_, forkunion_allocator_t> const& plans,
+    static status_t reserve_contexts(growing_buffer<plan_type_, allocator_t> const& plans,
                                      traversal_context_over<context_allocator_type_>& context) noexcept {
         for (plan_type_ const& plan : plans)
             if (status_t const sized = plan.reserve(context); failed(sized)) return sized;
@@ -1499,7 +1305,7 @@ struct ram_indexes {
     /** The phase the first plan of @p plans still rounding is in, or the first plan's once every
      *  round ended. */
     template <typename plan_type_>
-    static phase_t phase_of(growing_buffer<plan_type_, forkunion_allocator_t> const& plans) noexcept {
+    static phase_t phase_of(growing_buffer<plan_type_, allocator_t> const& plans) noexcept {
         for (plan_type_ const& plan : plans)
             if (plan.rounding()) return plan.phase();
         return plans.empty() ? phase_t::none_k : plans[0].phase();
@@ -1508,7 +1314,7 @@ struct ram_indexes {
     /** Where the phase of the first plan of @p plans still rounding sits; zero once every round
      *  ended. */
     template <typename plan_type_>
-    static std::size_t ordinal_of(growing_buffer<plan_type_, forkunion_allocator_t> const& plans) noexcept {
+    static std::size_t ordinal_of(growing_buffer<plan_type_, allocator_t> const& plans) noexcept {
         for (plan_type_ const& plan : plans)
             if (plan.rounding()) return plan.ordinal();
         return 0;
@@ -1516,7 +1322,7 @@ struct ram_indexes {
 
     /** Opens every plan's next round once each one's ended, answering whether they opened. */
     template <typename plan_type_>
-    static bool next_rounds(growing_buffer<plan_type_, forkunion_allocator_t>& plans) noexcept {
+    static bool next_rounds(growing_buffer<plan_type_, allocator_t>& plans) noexcept {
         for (plan_type_ const& plan : plans)
             if (plan.rounding()) return false;
         for (plan_type_& plan : plans) plan.next_round();
@@ -1526,8 +1332,8 @@ struct ram_indexes {
     /** Invokes @p visit with every node of every shard of @p owner whose plan in @p plans ran a
      *  round; a retired shard, and one a repack emptied, have no plan of their own. */
     template <typename plan_type_, typename visit_type_>
-    static void visit_rounded_shards(growing_buffer<plan_type_, forkunion_allocator_t> const& plans,
-                                     ram_indexes const& owner, visit_type_& visit) noexcept {
+    static void visit_rounded_shards(growing_buffer<plan_type_, allocator_t> const& plans, ram_indexes const& owner,
+                                     visit_type_& visit) noexcept {
         for (std::size_t shard = 0; shard != plans.size(); ++shard) {
             if (plans[shard].finish().status == status_code_t::uninitialized_k) continue;
             index_t& one = *owner.shards_[shard].index;
@@ -1538,7 +1344,7 @@ struct ram_indexes {
     /** The rounds of @p plans over @p owner so far, summed, as both plans' @c finish report them;
      *  a plan bound to no index has no round of its own. */
     template <typename plan_type_>
-    static expected<refine_report_t> finish_rounds(growing_buffer<plan_type_, forkunion_allocator_t> const& plans,
+    static expected<refine_report_t> finish_rounds(growing_buffer<plan_type_, allocator_t> const& plans,
                                                    ram_indexes const* owner) noexcept {
         refine_report_t total;
         status_t status = owner ? status_code_t::success_k : status_code_t::uninitialized_k;
@@ -1586,9 +1392,9 @@ struct ram_indexes {
 
         // This index's own shards lead the moving ones when they repack, then every source's.
         std::size_t const moving = own + source_shards;
-        growing_buffer<shard_t const*, forkunion_allocator_t> moving_shards {shards_.allocator()};
-        growing_buffer<shard_move_t, forkunion_allocator_t> moves {shards_.allocator()};
-        growing_buffer<index_t*, forkunion_allocator_t> slots {shards_.allocator()};
+        growing_buffer<shard_t const*, allocator_t> moving_shards {shards_.allocator()};
+        growing_buffer<shard_move_t, allocator_t> moves {shards_.allocator()};
+        growing_buffer<index_t*, allocator_t> slots {shards_.allocator()};
         if (failed(moving_shards.reserve_exactly(moving)) || failed(moves.resize(moving)) ||
             failed(slots.reserve_exactly(moving)))
             return {{}, status_code_t::out_of_memory_k};
@@ -1670,8 +1476,8 @@ struct ram_indexes {
         plan.owner_ = this;
 
         // The gathered shards pack beside this index's own nodes, which stay where they are.
-        growing_buffer<shard_t const*, forkunion_allocator_t> moving_shards {shards_.allocator()};
-        growing_buffer<shard_move_t, forkunion_allocator_t> moves {shards_.allocator()};
+        growing_buffer<shard_t const*, allocator_t> moving_shards {shards_.allocator()};
+        growing_buffer<shard_move_t, allocator_t> moves {shards_.allocator()};
         if (failed(moving_shards.reserve_exactly(gathered_shards)) || failed(moves.resize(gathered_shards)))
             return {{}, status_code_t::out_of_memory_k};
         for (ram_indexes const* from : plan.sources_)
@@ -1696,8 +1502,8 @@ struct ram_indexes {
             plan.target_holds_.push_back_reserved(std::move(target_hold));
             if (into->live_shards_count() != shards || into->size()) return {{}, status_code_t::config_mismatch_k};
         }
-        growing_buffer<index_t*, forkunion_allocator_t> into_shards {shards_.allocator()};
-        growing_buffer<index_t*, forkunion_allocator_t> from_shards {shards_.allocator()};
+        growing_buffer<index_t*, allocator_t> into_shards {shards_.allocator()};
+        growing_buffer<index_t*, allocator_t> from_shards {shards_.allocator()};
         if (failed(plan.shard_plans_.reserve_exactly(shards)) || failed(into_shards.reserve_exactly(parts)) ||
             failed(from_shards.reserve_exactly(1 + gathered_shards)))
             return {{}, status_code_t::out_of_memory_k};
@@ -1803,17 +1609,18 @@ struct ram_indexes_cursor {
     using index_t = typename indexes_t::index_t;
     using key_t = typename indexes_t::key_t;
     using node_id_t = typename indexes_t::node_id_t;
-    using walk_t = cursor_walk<node_id_t>;
+    using allocator_t = typename indexes_t::allocator_t;
+    using walk_t = cursor_walk<node_id_t, allocator_t>;
     using shard_node_t = typename walk_t::shard_node_t;
-    using shard_cursor_t = ram_cursor<index_t, synchronization_t::concurrent_k, forkunion_allocator_t>;
+    using shard_cursor_t = ram_cursor<index_t, synchronization_t::concurrent_k, allocator_t>;
 
     /** Where a pull gathers its entries' links, in the caller's arena: the linked keys end to end,
      *  and the offset where each entry's run starts. */
-    using links_allocator_t = arena_allocator<byte_t, forkunion_allocator_t>;
+    using links_allocator_t = arena_allocator<byte_t, allocator_t>;
     using links_keys_t = growing_buffer<key_t, links_allocator_t>;
     using links_offsets_t = growing_buffer<std::size_t, links_allocator_t>;
 
-    explicit ram_indexes_cursor(forkunion_allocator_t allocator) noexcept
+    explicit ram_indexes_cursor(allocator_t allocator) noexcept
         : shard_cursors_(allocator), walk_(allocator), allocator_(allocator) {}
 
     /**
@@ -1899,12 +1706,12 @@ struct ram_indexes_cursor {
 
   private:
     /** One per live shard at open, in placement order, each over the snapshot it took then. */
-    growing_buffer<shard_cursor_t, forkunion_allocator_t> shard_cursors_;
+    growing_buffer<shard_cursor_t, allocator_t> shard_cursors_;
 
     /** The order of the walk and where it stands. */
     walk_t walk_;
 
-    forkunion_allocator_t allocator_;
+    [[no_unique_address]] allocator_t allocator_;
 
     /** The position of the first shard walked: the first live one at open, which a clear since
      *  retires in place. */

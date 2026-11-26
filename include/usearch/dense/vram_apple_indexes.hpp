@@ -148,7 +148,7 @@ struct vram_apple_indexes {
 
     /** The shards, the rotation that routes new rows, and the commit word a reader spanning the
      *  shards snapshots by. */
-    using shards_t = shard_set<index_t, fu::standard_atomic_ref, wait_type_>;
+    using shards_t = shard_set<index_t, fu::standard_atomic_ref, wait_type_, forkunion_allocator_t>;
     using shard_t = typename shards_t::shard_t;
 
     /** The streams and their scratch every bulk verb runs on, paired positionally with the
@@ -2668,7 +2668,7 @@ struct vram_apple_indexes_cursor {
     using index_t = typename indexes_t::index_t;
     using key_t = typename indexes_t::key_t;
     using node_id_t = typename index_t::node_id_t;
-    using walk_t = cursor_walk<node_id_t>;
+    using walk_t = cursor_walk<node_id_t, forkunion_allocator_t>;
     using shard_node_t = typename walk_t::shard_node_t;
 
     /** Where a pull gathers its entries' links, in the caller's arena: the linked keys end to end,
@@ -2690,7 +2690,8 @@ struct vram_apple_indexes_cursor {
          */
         status_t open(index_t const& shard) noexcept {
             refresh(shard);
-            return staged_rows_.resize_uninitialized(breadth_first_walk<node_id_t>::lanes_k * shard.connectivity());
+            return staged_rows_.resize_uninitialized(breadth_first_walk<node_id_t, forkunion_allocator_t>::lanes_k *
+                                                     shard.connectivity());
         }
 
         /** Nodes visible to this cursor; IDs strictly below are walked. */
@@ -2714,8 +2715,9 @@ struct vram_apple_indexes_cursor {
             if (node >= visible_count_) return status_code_t::malformed_k;
             std::size_t const row_ids = shard.connectivity();
             if (node < staged_first_ || node >= staged_first_ + staged_count_) {
-                node_id_t const first = static_cast<node_id_t>(node - node % breadth_first_walk<node_id_t>::lanes_k);
-                node_id_t const count = min_of<node_id_t>(breadth_first_walk<node_id_t>::lanes_k,
+                node_id_t const first = static_cast<node_id_t>(
+                    node - node % breadth_first_walk<node_id_t, forkunion_allocator_t>::lanes_k);
+                node_id_t const count = min_of<node_id_t>(breadth_first_walk<node_id_t, forkunion_allocator_t>::lanes_k,
                                                           visible_count_ - first);
                 staged_count_ = 0;
                 std::span<node_id_t> const block = to_writable_span(staged_rows_).first(count * row_ids);

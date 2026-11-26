@@ -123,7 +123,7 @@ struct ram_indexes {
 
     /** The shards, the rotation that routes new rows, and the commit word a reader spanning the
      *  shards snapshots by. */
-    using shards_t = shard_set<index_t, atomic_ref_template_, wait_type_>;
+    using shards_t = shard_set<index_t, atomic_ref_template_, wait_type_, forkunion_allocator_t>;
     using shard_t = typename shards_t::shard_t;
     using shard_generation_t = typename shards_t::shard_generation_t;
     using batch_split_t = typename shards_t::batch_split_t;
@@ -3514,7 +3514,7 @@ struct ram_indexes_cursor {
     using index_t = typename indexes_t::index_t;
     using key_t = typename indexes_t::key_t;
     using node_id_t = typename index_t::node_id_t;
-    using walk_t = cursor_walk<node_id_t>;
+    using walk_t = cursor_walk<node_id_t, forkunion_allocator_t>;
     using shard_node_t = typename walk_t::shard_node_t;
     using shard_cursor_t = ram_cursor<index_t, synchronization_t::concurrent_k, forkunion_allocator_t>;
 

@@ -897,8 +897,8 @@ template <typename checkpoint_type_>
 util::status_t geospatial_ram_variant<cpu_class_>::save(checkpoint_type_ checkpoint, executor_t& executor,
                                                         progress_ticks_t& ticks) noexcept {
     return with_geospatial_provenance(geometry, [&](util::save_config_t const& config) noexcept {
-        return index.save(checkpoint, us::geospatial::earth_observation_codec_t {}, executor, config,
-                          token_of(geometry), ticks);
+        return basic::save(index, checkpoint, us::geospatial::earth_observation_codec_t {}, executor, config,
+                           token_of(geometry), ticks);
     });
 }
 
@@ -906,8 +906,8 @@ template <cpu_class_t cpu_class_>
 util::expected<std::size_t> geospatial_ram_variant<cpu_class_>::storage_requirements() const noexcept {
     std::size_t required = 0;
     util::status_t const sized = with_geospatial_provenance(geometry, [&](util::save_config_t const& config) noexcept {
-        auto const [bytes, bytes_status] = index.storage_requirements(us::geospatial::earth_observation_codec_t {},
-                                                                      config, token_of(geometry));
+        auto const [bytes, bytes_status] = basic::storage_requirements(
+            index, us::geospatial::earth_observation_codec_t {}, config, token_of(geometry));
         required = bytes;
         return bytes_status;
     });
@@ -918,8 +918,8 @@ template <cpu_class_t cpu_class_>
 template <typename checkpoint_type_>
 util::status_t geospatial_ram_variant<cpu_class_>::load(checkpoint_type_ checkpoint, executor_t& executor,
                                                         progress_ticks_t& ticks) noexcept {
-    if (util::status_t const loaded = index.load(checkpoint, us::geospatial::earth_observation_codec_t {}, executor,
-                                                 util::load_config_t {}, ticks);
+    if (util::status_t const loaded = basic::load(index, checkpoint, us::geospatial::earth_observation_codec_t {},
+                                                  executor, util::load_config_t {}, ticks);
         failed(loaded))
         return loaded;
     for (shard_t const& one : index.live_shards())

@@ -1298,7 +1298,7 @@ struct vram_amd_index {
      *  maps every shard of a fold bin for the bin's other devices. */
     template <typename, nk_dtype_t, typename, typename, typename, typename>
     friend struct vram_amd_indexes;
-    template <typename, template <typename> class, typename>
+    template <typename, template <typename> class shards_atomic_ref_template_, typename, typename>
     friend struct utilities::shard_set;
     template <typename, typename, typename>
     friend struct utilities::vram_shard_fanout;

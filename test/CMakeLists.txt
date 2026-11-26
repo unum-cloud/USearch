@@ -1,5 +1,6 @@
 # The header-only suite: the basic graph index and the utilities under it. ForkUnion, NumKong and yyjson appear as the
-# tests' own tools - the ISA-specific atomic references, the tensors, the checkpoint files - never through the library.
+# tests' own tools - the ISA-specific atomic references, the SDK's compiled pools, the tensors, the checkpoint files -
+# never through the library.
 add_executable(
     usearch_test_header_only header_only.cpp utilities/ram_buffers.cpp utilities/ram_tables.cpp basic/sentences.cpp
                              basic/bioinformatics.cpp basic/meshes.cpp
@@ -7,7 +8,7 @@ add_executable(
 usearch_setup_target(usearch_test_header_only HOST)
 target_include_directories(usearch_test_header_only PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tools)
 target_link_libraries(
-    usearch_test_header_only PRIVATE fmt::fmt yyjson forkunion::header numkong::header stringzilla::header
+    usearch_test_header_only PRIVATE fmt::fmt yyjson forkunion::cpp forkunion::header numkong::header stringzilla::header
 )
 add_test(NAME usearch_test_header_only COMMAND usearch_test_header_only)
 
@@ -18,11 +19,13 @@ usearch_setup_target(usearch_test_header_only_witness HOST)
 target_link_libraries(usearch_test_header_only_witness PRIVATE forkunion::header numkong::header)
 add_test(NAME usearch_test_header_only_witness COMMAND usearch_test_header_only_witness)
 
-# The dependency-free core: `basic/ram_index.hpp` and its `utilities/` suppliers compile with no sibling on the include
-# path, so a stray include fails here instead of hiding behind the suites' links.
-add_library(usearch_test_header_core OBJECT header_core.cpp)
+# The dependency-free core: `basic/ram_index.hpp`, `basic/ram_indexes.hpp` and their `utilities/` suppliers build,
+# fill, search and recut with no sibling on the include path, so a stray include fails here instead of hiding behind the
+# suites' links.
+add_executable(usearch_test_header_core header_core.cpp)
 target_compile_features(usearch_test_header_core PRIVATE cxx_std_20)
 target_include_directories(usearch_test_header_core PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/c)
+add_test(NAME usearch_test_header_core COMMAND usearch_test_header_core)
 
 # The Linux kernel ABI mirrors match the kernel's own spelling, checked at compile time against the build's headers.
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")

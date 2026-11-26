@@ -88,7 +88,7 @@ struct vram_apple_indexes {
     using shard_score_t = shard_score_type_;
 
     /** The shards and the rotation that routes new entries; the keys stay in the shards. */
-    using shards_t = shard_set<index_t, fu::standard_atomic_ref, wait_type_>;
+    using shards_t = shard_set<index_t, fu::standard_atomic_ref, wait_type_, forkunion_allocator_t>;
     using shard_t = typename shards_t::shard_t;
 
     /** The streams every batch verb runs on, paired with the shards by device. */
@@ -1290,7 +1290,7 @@ struct vram_apple_indexes_cursor {
     using index_t = typename indexes_t::index_t;
     using key_t = typename indexes_t::key_t;
     using node_id_t = typename indexes_t::node_id_t;
-    using walk_t = breadth_first_walk<node_id_t>;
+    using walk_t = breadth_first_walk<node_id_t, forkunion_allocator_t>;
     using shard_node_t = typename walk_t::shard_node_t;
 
     /** Where a pull gathers its entries' links, in the caller's arena: the linked keys end to end,

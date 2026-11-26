@@ -624,7 +624,7 @@ struct ram_index {
     friend struct ram_indexes;
 
     /** The sharded index's shard table measures, closes and reopens the claims. */
-    template <typename, template <typename> class, typename>
+    template <typename, template <typename> class shards_atomic_ref_template_, typename, typename>
     friend struct utilities::shard_set;
 
     using neighbors_buffer_t = growing_buffer<node_id_t, allocator_t>;

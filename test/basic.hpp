@@ -43,6 +43,7 @@
 #include "harness.hpp"
 #include "usearch/basic/ram_index.hpp"
 #include "usearch/basic/ram_indexes.hpp"
+#include "usearch/basic/shard_checkpoints.hpp"
 #include "usearch/basic/nvme_indexes.hpp"
 #include "usearch/utilities/safegraphs_format.hpp"
 
@@ -2142,7 +2143,8 @@ bool basic_fill_shards(indexes_type_& indexes, std::size_t shards, std::span<typ
     using value_t = typename indexes_type_::value_t;
     bool placed = true;
     for (std::size_t shard = 0; shard != shards; ++shard)
-        placed = expect_equal(indexes.emplace(no_memory_domain_k), status_code_t::success_k) && placed;
+        placed = expect_equal(indexes.emplace(forkunion_allocator_t {no_memory_domain_k}), status_code_t::success_k) &&
+                 placed;
     std::vector<value_t> values = make_values();
     auto [plan, plan_status] = indexes.plan_insert(keys.size());
     if (!expect_equal(plan_status, status_code_t::success_k)) return false;
@@ -2178,7 +2180,7 @@ void test_basic_sharded_cut(u64_t seed, metric_type_& metric, codec_type_ const&
     expect_equal(index_t::reserve_traversal(context, basic_connectivity_k, {}), status_code_t::success_k);
     auto place = [&](indexes_type_& indexes) {
         for (std::size_t shard = 0; shard != shards_k; ++shard)
-            expect_equal(indexes.emplace(no_memory_domain_k), status_code_t::success_k);
+            expect_equal(indexes.emplace(forkunion_allocator_t {no_memory_domain_k}), status_code_t::success_k);
     };
 
     indexes_type_ source {allocator};
@@ -2328,7 +2330,7 @@ void test_basic_sharded(u64_t seed, metric_type_& metric, codec_type_ const& cod
     indexes_type_ indexes {allocator};
     indexes.bound_shards(shard_capacity);
     for (std::size_t shard = 0; shard != placed_shards_k; ++shard)
-        expect_equal(indexes.emplace(no_memory_domain_k), status_code_t::success_k);
+        expect_equal(indexes.emplace(forkunion_allocator_t {no_memory_domain_k}), status_code_t::success_k);
     expect_true(bool(indexes.reserve(entries)));
     std::vector<value_t> values = make_values();
     auto [plan, plan_status] = indexes.plan_insert(entries);
@@ -2376,7 +2378,7 @@ void test_basic_sharded(u64_t seed, metric_type_& metric, codec_type_ const& cod
     // The source's entries are the single index's values under keys of their own.
     std::size_t const source_entries = shard_capacity / 3;
     indexes_type_ source {allocator};
-    expect_equal(source.emplace(no_memory_domain_k), status_code_t::success_k);
+    expect_equal(source.emplace(forkunion_allocator_t {no_memory_domain_k}), status_code_t::success_k);
     std::vector<key_t> source_keys(source_entries);
     for (std::size_t entry = 0; entry != source_entries; ++entry)
         source_keys[entry] = uuid_of(stream_key(seed, "plural_source", entry));
@@ -4323,7 +4325,7 @@ struct basic_nvme_reference {
         }
         expect_equal(shard_index_t::reserve_traversal(context, basic_connectivity_k, {}), status_code_t::success_k);
         for (std::size_t shard = 0; shard != shards; ++shard)
-            expect_equal(built.emplace(no_memory_domain_k), status_code_t::success_k);
+            expect_equal(built.emplace(forkunion_allocator_t {no_memory_domain_k}), status_code_t::success_k);
         auto [plan, plan_status] = built.plan_insert(count);
         expect_equal(plan_status, status_code_t::success_k);
         if (failed(plan_status)) return;
@@ -4335,8 +4337,8 @@ struct basic_nvme_reference {
 
         path = scratch.path(fmt::format("{}.safegraphs", scenario));
         serial_executor_t serial;
-        expect_equal(built.save(path, fixture_t::ram_fixture_t::make_codec(), serial, save_config_t {},
-                                fixture_t::metric_token_k),
+        expect_equal(save(built, path, fixture_t::ram_fixture_t::make_codec(), serial, save_config_t {},
+                          fixture_t::metric_token_k),
                      status_code_t::success_k);
 
         expect_true(fu_topology_new(&topology) == fu_success_k);

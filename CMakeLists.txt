@@ -25,7 +25,9 @@ if (POLICY CMP0077)
 endif ()
 
 # Options
-option(USEARCH_INSTALL "Install CMake targets" OFF)
+option(USEARCH_INSTALL "Install the C ABI, the C++ SDK, both libraries and the dependency-free RAM tier"
+       ${PROJECT_IS_TOP_LEVEL}
+)
 
 option(USEARCH_WITH_JEMALLOC "Use JeMalloc for faster memory allocations" OFF)
 
@@ -127,10 +129,11 @@ endforeach ()
 # The compiled siblings land as archives inside our shared objects, so every one is position-independent.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# The header-only engine of `include/`: every header, the siblings it reaches into, and the type verdicts below, over
-# the C types of `usearch::abi`; the C++ SDK in `cpp/` reaches only its own interface target, `usearch::cpp`. The file
-# set names the basic graph index and the utilities it stands on, six headers on the standard library alone, no sibling
-# library in sight. Concepts are the main reason C++20 is the base language level, with `std::atomic_ref` and the
+# The header-only engine of `include/` over the C types of `usearch::abi`; the C++ SDK in `cpp/` reaches only its own
+# interface target, `usearch::cpp`. It links no sibling: the file set names the dependency-free RAM tier, the basic
+# graph index, its sharded index and the utilities they stand on, ten headers on the standard library alone, and it is
+# what installs. The rest of `include/` reaches the siblings, which `usearch_setup_target` hands every compiled unit.
+# Concepts are the main reason C++20 is the base language level, with `std::atomic_ref` and the
 # `<bit>` helpers close behind - and the interface target must say so, or external consumers get an unbuildable
 # contract.
 add_library(usearch_header INTERFACE)
@@ -152,7 +155,11 @@ target_sources(
               include/usearch/utilities/ram_buffers.hpp
               include/usearch/utilities/ram_sorts.hpp
               include/usearch/utilities/ram_tables.hpp
+              include/usearch/utilities/ram_shards.hpp
+              include/usearch/utilities/ram_walks.hpp
+              include/usearch/utilities/sample.hpp
               include/usearch/basic/ram_index.hpp
+              include/usearch/basic/ram_indexes.hpp
 )
 target_compile_features(usearch_header INTERFACE cxx_std_20)
 # A media list draws its identity from `BCryptGenRandom` on Windows.
@@ -225,15 +232,13 @@ function (usearch_setup_target target_)
     target_link_libraries(${target_} PRIVATE $<BUILD_INTERFACE:usearch_warnings> $<BUILD_INTERFACE:usearch_sanitizers>)
     target_link_libraries(${target_} PRIVATE $<$<PLATFORM_ID:Windows>:bcrypt>)
 
-    # One source of truth for header paths: whatever the interface target advertises, including what the dependencies
-    # carry, without inheriting its compile features onto pure-C targets.
+    # One source of truth for header paths: whatever the interface targets advertise, and the siblings the engine
+    # reaches beyond the dependency-free tier, without inheriting their compile features onto pure-C targets.
     target_include_directories(
         ${target_} PRIVATE $<TARGET_PROPERTY:usearch_abi,INTERFACE_INCLUDE_DIRECTORIES>
                            $<TARGET_PROPERTY:usearch_header,INTERFACE_INCLUDE_DIRECTORIES>
     )
-    target_include_directories(
-        ${target_} SYSTEM PRIVATE $<TARGET_PROPERTY:usearch_header,INTERFACE_SYSTEM_INCLUDE_DIRECTORIES>
-    )
+    target_include_directories(${target_} SYSTEM PRIVATE ${usearch_sibling_includes_})
     # Host-tuned units read the compiler; every other unit takes each sibling's compiled capabilities and instantiates
     # its kits per CPU class, never by a template's default capability, so the class units and the dispatch unit name
     # the same rungs.
@@ -360,51 +365,16 @@ if (USEARCH_BUILD_NODE)
 endif ()
 
 # `find_package(usearch)` names the C headers `usearch::abi`, the C++ SDK carrying them and the archive `usearch::cpp`,
-# and the libraries `usearch::static`, which the Rust crate links from, and `usearch::shared`, the preview SDK's. The
-# SDK links the archive, so it installs only beside the libraries.
+# the libraries `usearch::static`, which the Rust crate links from, and `usearch::shared`, the preview SDK's, and the
+# dependency-free RAM tier `usearch::header`. Only USearch's own targets export: the siblings are inside the archives,
+# and the engine headers needing them are vendored through `FetchContent`. The SDK links the archive, so it installs
+# only beside the libraries.
 if (USEARCH_BUILD_SHARED)
-    set(usearch_install_sdk_targets_ usearch_abi usearch_cpp usearch_static usearch_shared)
+    set(usearch_install_sdk_targets_ usearch_abi usearch_cpp usearch_header usearch_static usearch_shared)
 else ()
-    set(usearch_install_sdk_targets_ usearch_abi)
+    set(usearch_install_sdk_targets_ usearch_abi usearch_header)
 endif ()
 include(cmake/usearch_install.cmake)
-
-# The header-only engine is a component of its own, with `usearchHeaderTargets`, which records the siblings without
-# headers, as each owns its own, so `usearch::header` names nothing a consumer cannot resolve; it links `usearch::abi`
-# from `usearchTargets`. The export reads its set as it stands when called, so it trails every target that belongs to
-# it.
-if (USEARCH_INSTALL)
-    install(
-        DIRECTORY include/usearch
-        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-        COMPONENT header
-    )
-    install(
-        TARGETS usearch_header
-        EXPORT ${PROJECT_NAME}HeaderTargets
-        FILE_SET HEADERS
-        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-        COMPONENT header
-        INCLUDES
-        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-    )
-    install(
-        TARGETS ${usearch_sibling_targets_}
-        EXPORT ${PROJECT_NAME}HeaderTargets
-        COMPONENT header
-    )
-    export(
-        TARGETS usearch_header usearch_abi ${usearch_sibling_targets_}
-        NAMESPACE ${PROJECT_NAME}::
-        FILE "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}HeaderTargets.cmake"
-    )
-    install(
-        EXPORT ${PROJECT_NAME}HeaderTargets
-        NAMESPACE ${PROJECT_NAME}::
-        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}
-        COMPONENT header
-    )
-endif ()
 
 # The C library as SwiftPM links it: an XCFramework on Apple platforms and an SE-0482 artifact bundle elsewhere, packed
 # by NumKong's script beside the C headers and their module map. Each build adds its target to the artifact in

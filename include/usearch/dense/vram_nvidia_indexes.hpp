@@ -165,7 +165,7 @@ struct vram_nvidia_indexes {
 
     /** The shards, the rotation that routes new rows, and the commit word a reader spanning the
      *  shards snapshots by. */
-    using shards_t = shard_set<index_t, fu::standard_atomic_ref, wait_type_>;
+    using shards_t = shard_set<index_t, fu::standard_atomic_ref, wait_type_, forkunion_allocator_t>;
 
     /** One batched read's fan-out over every shard's device. */
     using fanout_t = utilities::vram_shard_fanout<shards_t, cuda_vendor_t, typename index_t::distance_t>;
@@ -3294,7 +3294,7 @@ struct vram_nvidia_indexes_cursor {
     using index_t = typename indexes_t::index_t;
     using key_t = typename indexes_t::key_t;
     using node_id_t = typename index_t::node_id_t;
-    using walk_t = breadth_first_walk<node_id_t>;
+    using walk_t = breadth_first_walk<node_id_t, forkunion_allocator_t>;
     using shard_node_t = typename walk_t::shard_node_t;
 
     /** Where a pull gathers its entries' links, in the caller's arena: the linked keys end to end,

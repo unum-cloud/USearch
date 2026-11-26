@@ -694,7 +694,7 @@ void test_sequence_sharded_clear_race(u64_t seed) {
     }
 
     indexes_t indexes {allocator};
-    expect_equal(indexes.emplace(no_memory_domain_k), status_code_t::success_k);
+    expect_equal(indexes.emplace(forkunion_allocator_t {no_memory_domain_k}), status_code_t::success_k);
     auto insert_batch = [&] {
         std::vector<value_t> values;
         values.reserve(entries_k);

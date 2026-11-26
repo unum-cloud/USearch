@@ -2305,7 +2305,7 @@ template <typename key_type_, typename node_id_type_>
 struct nvme_parts_cursor {
     using key_t = key_type_;
     using node_id_t = node_id_type_;
-    using walk_t = cursor_walk<node_id_t>;
+    using walk_t = cursor_walk<node_id_t, forkunion_allocator_t>;
     using shard_node_t = typename walk_t::shard_node_t;
 
     /** Where a pull gathers its entries' links, in the caller's arena: the linked keys end to end,

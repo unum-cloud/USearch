@@ -29,6 +29,7 @@
 #include "usearch/utilities/ram_sorts.hpp" // `partial_sort` - a key's entries in insertion order
 #include "usearch/utilities/safegraphs_format.hpp"
 #include "usearch/basic/ram_indexes.hpp"  // `basic::ram_indexes` - every RAM variant's shards
+#include "usearch/basic/shard_checkpoints.hpp" // `basic::save`, `basic::load` - every RAM variant's checkpoints
 #include "usearch/basic/nvme_indexes.hpp" // `basic::nvme_indexes` and SmashTable's row kits, through its directories
 #if USEARCH_ARCH_CUDA_
 #include "usearch/basic/vram_nvidia_indexes.hpp" // `basic::vram_nvidia_indexes` - every GPU variant's shards
@@ -1514,7 +1515,7 @@ struct specialized_variant {
         if constexpr (viewed_k) return util::status_code_t::read_only_k;
         else if constexpr (is_vram_index<variant_t>)
             return of(variant).index.emplace(static_cast<int>(residency.device));
-        else return of(variant).index.emplace(memory_domain);
+        else return of(variant).index.emplace(util::forkunion_allocator_t {memory_domain});
     }
     static util::status_t view(void* variant, std::string_view path, std::span<std::string_view const> paths,
                                executor_t* executor) noexcept {

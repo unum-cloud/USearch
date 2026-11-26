@@ -53,9 +53,12 @@ else ()
     target_link_options(usearch_python PRIVATE -Wl,--unresolved-symbols=ignore-all)
 endif ()
 
-# Named, or every dependency's own install rules land in the wheel beside the extension.
-install(
-    TARGETS usearch_python
-    DESTINATION usearch
-    COMPONENT usearch_python
-)
+# Named, or every dependency's own install rules land in the wheel beside the extension. A wheel build is the top-level
+# project, so `USEARCH_INSTALL` holds there, and a parent project or a build without installs leaves it out.
+if (USEARCH_INSTALL)
+    install(
+        TARGETS usearch_python
+        DESTINATION usearch
+        COMPONENT usearch_python
+    )
+endif ()

@@ -5,9 +5,10 @@
 # - `usearch_install_sdk_targets_`: the targets of the `sdk` component, exported as `usearchTargets`;
 # - `usearch_install_programs_`: the executables the `sdk` component ships beside its libraries, outside the export set.
 #
-# One export set holds `usearch::abi`, `usearch::cpp` and both libraries, because `usearch::cpp` links `usearch::abi`
-# and `usearch::static`. An empty list installs nothing, and a component no list covers installs from the root after
-# this file.
+# One export set holds `usearch::abi`, `usearch::cpp`, both libraries and any dependency-free header target, because
+# `usearch::cpp` links `usearch::abi` and `usearch::static`. A header target installs the file set it names, and every
+# target carries the include directory. An empty list installs nothing, and a component no list covers installs from
+# the root after this file.
 
 if (USEARCH_INSTALL)
     include(GNUInstallDirs)
@@ -21,6 +22,8 @@ if (USEARCH_INSTALL)
             LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
             ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            FILE_SET HEADERS DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+            INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
         )
         install(
             EXPORT usearchTargets

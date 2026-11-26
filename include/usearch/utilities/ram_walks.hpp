@@ -18,7 +18,6 @@
 
 #include "usearch/utilities/types.hpp"       // `shard_node`, `u1x64_t`, `divide_round_up`
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the bits and the frontier
-#include "usearch/utilities/ram_device.hpp"  // `forkunion_allocator_t` - where they live
 
 namespace unum::usearch::utilities {
 
@@ -38,27 +37,30 @@ enum class cursor_order_t : u32_t {
  *
  *  The bits span each shard's watermark as it stood at @ref open; a node at or past it is never
  *  visited, so the cursor driving the walk keeps its shard cursors' snapshots unrefreshed.
+ *
+ *  @tparam allocator_type_ Where the bits and the frontier live.
  */
-template <typename node_id_type_>
+template <typename node_id_type_, typename allocator_type_>
 struct breadth_first_walk {
     using node_id_t = node_id_type_;
+    using allocator_t = allocator_type_;
     using shard_node_t = shard_node<node_id_type_>;
 
     /** Lanes one word of visited bits holds. */
     inline static constexpr std::size_t lanes_k = std::numeric_limits<u1x64_t>::digits;
 
     /** One bit per node of every shard, the shards' runs back to back from @c visited_bases_. */
-    growing_buffer<u1x64_t, forkunion_allocator_t> visited_;
+    growing_buffer<u1x64_t, allocator_t> visited_;
 
     /** The first word of each shard's run in @c visited_, one more than the shards. */
-    growing_buffer<std::size_t, forkunion_allocator_t> visited_bases_;
+    growing_buffer<std::size_t, allocator_t> visited_bases_;
 
     /** The nodes visited and not yet expanded, in visiting order; @c expanded_ of them are behind
      *  the walk. */
-    growing_buffer<shard_node_t, forkunion_allocator_t> frontier_;
+    growing_buffer<shard_node_t, allocator_t> frontier_;
     std::size_t expanded_ = 0;
 
-    explicit breadth_first_walk(forkunion_allocator_t allocator) noexcept
+    explicit breadth_first_walk(allocator_t allocator) noexcept
         : visited_(allocator), visited_bases_(allocator), frontier_(allocator) {}
 
     /**
@@ -116,13 +118,16 @@ struct breadth_first_walk {
  *  The cursor names the shards and how to enter one; a stored walk enters each shard once, as it
  *  reaches the shard's first node, so a cursor over live shards refreshes a shard's watermark
  *  then, and the walk yields the nodes below the count entering answered.
+ *
+ *  @tparam allocator_type_ Where a breadth-first walk's bits and frontier live.
  */
-template <typename node_id_type_>
+template <typename node_id_type_, typename allocator_type_>
 struct cursor_walk {
     using node_id_t = node_id_type_;
+    using allocator_t = allocator_type_;
     using shard_node_t = shard_node<node_id_type_>;
 
-    explicit cursor_walk(forkunion_allocator_t allocator) noexcept : breadth_first_(allocator) {}
+    explicit cursor_walk(allocator_t allocator) noexcept : breadth_first_(allocator) {}
 
     /**
      *  @brief Turns the walk breadth-first over @p shards_count shards, shard @c s visiting the
@@ -165,7 +170,7 @@ struct cursor_walk {
 
   private:
     /** The nodes visited and the frontier of a breadth-first walk; untouched by a stored one. */
-    breadth_first_walk<node_id_t> breadth_first_;
+    breadth_first_walk<node_id_t, allocator_t> breadth_first_;
 
     /** As stored: the entry the next step takes, and the nodes its shard held when entered. */
     shard_node_t next_stored_ {};

@@ -19,14 +19,13 @@
 #include <atomic>      // `std::atomic_thread_fence` - the epoch's reader bracket
 #include <bit>         // `std::bit_width` - a shard's chunk
 #include <limits>      // `std::numeric_limits` - the chunk count & the opening bit
-#include <memory>      // `std::unique_ptr` - an index holds atomics and never moves
+#include <memory>      // `std::unique_ptr` - an index holds atomics and never moves, `std::allocator_traits`
 #include <new>         // placement `new` - a shard is built in its chunk
 #include <span>        // `std::span` - the watermarks a snapshot fills
 #include <type_traits> // `std::invoke_result_t`, `std::is_same_v` - the bracketed readers' answers
 #include <utility>     // `std::move`, `std::swap`, `std::exchange`
 
 #include "usearch/utilities/types.hpp"
-#include "usearch/utilities/ram_device.hpp" // `forkunion_allocator` - the shard table's placement
 
 namespace unum::usearch::utilities {
 
@@ -81,12 +80,19 @@ inline std::size_t rank_fewest_entries(std::size_t entries, placement_match_t ma
  *  @tparam index_type_ The shard type.
  *  @tparam atomic_ref_template_ The atomic reference owning the plain synchronization words.
  *  @tparam wait_type_ What a snapshot waits through while a commit is in flight.
+ *  @tparam allocator_type_ The host allocator behind the shard table and every checkpoint catalog,
+ *      rebound to each element it places.
  */
-template <typename index_type_, template <typename> class atomic_ref_template_, typename wait_type_>
+template <typename index_type_, template <typename> class atomic_ref_template_, typename wait_type_,
+          typename allocator_type_>
 struct shard_set {
 
     /** The shard type, built and shaped by the tower. */
     using index_t = index_type_;
+
+    /** The host allocator behind the shard table and every checkpoint catalog; the shards hold
+     *  their own. */
+    using allocator_t = allocator_type_;
 
     /** The caller-visible identity of every entry, which each shard files beside its own nodes. */
     using key_t = typename index_t::key_t;
@@ -189,7 +195,7 @@ struct shard_set {
     };
 
     /** An empty set of shards, its shard table and checkpoint catalogs on @p allocator. */
-    explicit shard_set(forkunion_allocator_t allocator) noexcept : allocator_(allocator) {}
+    explicit shard_set(allocator_t allocator) noexcept : allocator_(allocator) {}
     shard_set(shard_set&& other) noexcept : shard_set(other.allocator_) { swap(other); }
     shard_set& operator=(shard_set&& other) noexcept { return swap(other), *this; }
     shard_set(shard_set const&) = delete;
@@ -200,7 +206,7 @@ struct shard_set {
         for (std::size_t shard = 0; shard != built_shards_; ++shard) at_(shard).~shard_t();
         for (std::size_t chunk = 0; chunk != shard_chunks_.size(); ++chunk)
             if (shard_t* const chunk_shards = std::exchange(shard_chunks_[chunk], nullptr))
-                forkunion_allocator<shard_t> {allocator_}.deallocate(chunk_shards, std::size_t {1} << chunk);
+                shards_allocator_t {allocator_}.deallocate(chunk_shards, std::size_t {1} << chunk);
     }
 
     /** Exchanges two sets whole; a move implies the caller holds both exclusively. */
@@ -272,7 +278,7 @@ struct shard_set {
 
     /** The host allocator behind the shard table and every checkpoint catalog; the shards hold
      *  their own. */
-    forkunion_allocator_t allocator() const noexcept { return allocator_; }
+    allocator_t allocator() const noexcept { return allocator_; }
 
     /** Entries the shards past the retired ones host without growing again; they grow past it on
      *  demand. */
@@ -818,6 +824,7 @@ struct shard_set {
 #pragma endregion Commits and Snapshots
 
   private:
+    using shards_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<shard_t>;
 
     /** The high bit of @c shards_count_, set while one caller opens a shard generation past the
      *  count. */
@@ -882,7 +889,7 @@ struct shard_set {
         std::size_t const biased = position + 1;
         std::size_t const chunk = static_cast<std::size_t>(std::bit_width(biased)) - 1;
         if (!shard_chunks_[chunk]) {
-            shard_t* const chunk_shards = forkunion_allocator<shard_t> {allocator_}.allocate(std::size_t {1} << chunk);
+            shard_t* const chunk_shards = shards_allocator_t {allocator_}.allocate(std::size_t {1} << chunk);
             if (!chunk_shards) return status_code_t::out_of_memory_k;
             shard_chunks_[chunk] = chunk_shards;
         }
@@ -911,7 +918,7 @@ struct shard_set {
     std::size_t shard_generation_width_ = 0;
 
     /** The host allocator behind the shard table and every checkpoint catalog. */
-    forkunion_allocator_t allocator_;
+    [[no_unique_address]] allocator_t allocator_;
 
     /** Entries routed so far - the next batch's rotation base. */
     std::size_t routed_entries_ = 0;

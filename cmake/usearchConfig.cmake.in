@@ -8,6 +8,5 @@ find_package_handle_standard_args(@PROJECT_NAME@ CONFIG_MODE)
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)
 
-# The libraries and the header-only engine install as separate components, so either set may be absent.
-include("${CMAKE_CURRENT_LIST_DIR}/@PROJECT_NAME@Targets.cmake" OPTIONAL)
-include("${CMAKE_CURRENT_LIST_DIR}/@PROJECT_NAME@HeaderTargets.cmake" OPTIONAL)
+# Only the project's own targets: the siblings sit inside the archives, so nothing else is found.
+include("${CMAKE_CURRENT_LIST_DIR}/@PROJECT_NAME@Targets.cmake")

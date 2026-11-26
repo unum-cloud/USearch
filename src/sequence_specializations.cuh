@@ -260,7 +260,8 @@ template <typename checkpoint_type_>
 util::status_t sequence_ram_variant<cpu_class_>::save(checkpoint_type_ checkpoint, executor_t& executor,
                                                       progress_ticks_t& ticks) noexcept {
     return with_sequence_provenance(geometry, costs, [&](util::save_config_t const& config) noexcept {
-        return index.save(checkpoint, us::sequence::codec_t {}, executor, config, token_of(geometry.metric), ticks);
+        return basic::save(index, checkpoint, us::sequence::codec_t {}, executor, config, token_of(geometry.metric),
+                           ticks);
     });
 }
 
@@ -268,7 +269,7 @@ template <cpu_class_t cpu_class_>
 template <typename checkpoint_type_>
 util::status_t sequence_ram_variant<cpu_class_>::load(checkpoint_type_ checkpoint, executor_t& executor,
                                                       progress_ticks_t& ticks) noexcept {
-    return index.load(checkpoint, us::sequence::codec_t {}, executor, util::load_config_t {}, ticks);
+    return basic::load(index, checkpoint, us::sequence::codec_t {}, executor, util::load_config_t {}, ticks);
 }
 
 template <cpu_class_t cpu_class_>
@@ -276,8 +277,8 @@ util::expected<std::size_t> sequence_ram_variant<cpu_class_>::storage_requiremen
     std::size_t required = 0;
     util::status_t const sized = with_sequence_provenance(
         geometry, costs, [&](util::save_config_t const& config) noexcept {
-            auto const [bytes, bytes_status] = index.storage_requirements(us::sequence::codec_t {}, config,
-                                                                          token_of(geometry.metric));
+            auto const [bytes, bytes_status] = basic::storage_requirements(index, us::sequence::codec_t {}, config,
+                                                                           token_of(geometry.metric));
             required = bytes;
             return bytes_status;
         });
