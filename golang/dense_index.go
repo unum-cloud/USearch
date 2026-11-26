@@ -550,7 +550,7 @@ type DenseReshardPlan = livePlan[C.usearch_dense_reshard_plan_t]
 type DenseVectors struct {
 	raw   C.usearch_rows_view_t
 	rows  uint
-	arena *Arena
+	arena arenaWrite
 }
 
 // Rows reports how many rows the call wrote; zero when Get found the key absent.
@@ -569,9 +569,10 @@ func (vectors DenseVectors) Scalar() Scalar { return Scalar(vectors.raw.scalar) 
 // StatusInvalidArgument when Value is not the scalar type they were written as, and with
 // StatusDevice when the arena is memory the host may not read.
 func DenseValues[Value Element](vectors DenseVectors) ([]Value, error) {
-	if err := vectors.arena.readable(); err != nil {
+	if err := vectors.arena.open(); err != nil {
 		return nil, err
 	}
+	defer vectors.arena.close()
 	if vectors.rows == 0 {
 		return nil, nil
 	}
@@ -586,15 +587,16 @@ func DenseValues[Value Element](vectors DenseVectors) ([]Value, error) {
 // Monolith is the serialized index SaveBuffer wrote into its arena.
 type Monolith struct {
 	raw   C.usearch_bytes_view_t
-	arena *Arena
+	arena arenaWrite
 }
 
 // Bytes views the monolith from its arena, refused with StatusDevice when the arena is memory the
 // host may not read.
 func (monolith Monolith) Bytes() ([]byte, error) {
-	if err := monolith.arena.readable(); err != nil {
+	if err := monolith.arena.open(); err != nil {
 		return nil, err
 	}
+	defer monolith.arena.close()
 	return unsafe.Slice((*byte)(unsafe.Pointer(monolith.raw.data)), monolith.raw.length), nil
 }
 
@@ -604,7 +606,7 @@ type DenseBatch struct {
 	keys    C.usearch_keys_view_t
 	links   C.usearch_keys_tape_view_t
 	written uint
-	arena   *Arena
+	arena   arenaWrite
 }
 
 // batchLinks picks the slot a cursor pull writes each entry's links into, nil for none.
@@ -622,17 +624,22 @@ func (batch DenseBatch) Written() uint { return batch.written }
 // Keys views the entries' keys from the arena, refused with StatusDevice when the arena is memory
 // the host may not read.
 func (batch DenseBatch) Keys() ([]Key, error) {
-	if err := batch.arena.readable(); err != nil {
+	if err := batch.arena.open(); err != nil {
 		return nil, err
 	}
+	defer batch.arena.close()
 	return unsafe.Slice((*Key)(unsafe.Pointer(batch.keys.data)), batch.written), nil
 }
 
 // Links views the keys one entry links to from the arena, nil after NextKeys, refused as Keys is;
 // entry must be below Written.
 func (batch DenseBatch) Links(entry uint) ([]Key, error) {
-	if err := batch.arena.readable(); err != nil || batch.links.offsets == nil {
+	if err := batch.arena.open(); err != nil {
 		return nil, err
+	}
+	defer batch.arena.close()
+	if batch.links.offsets == nil {
+		return nil, nil
 	}
 	offsets := unsafe.Slice((*uint)(unsafe.Pointer(batch.links.offsets)), batch.written+1)
 	linked := unsafe.Slice((*Key)(unsafe.Pointer(batch.links.keys)), offsets[batch.written])
@@ -647,7 +654,7 @@ type DenseDraws struct {
 	parents       C.usearch_matches_view_t
 	coordinates   C.usearch_rows_view_t
 	written       uint
-	arena         *Arena
+	arena         arenaWrite
 }
 
 // Written reports the draws; fewer than wanted only once the region is exhausted.
@@ -656,18 +663,20 @@ func (draws DenseDraws) Written() uint { return draws.written }
 // Keys views the drawn keys from the arena, refused with StatusDevice when the arena is memory the
 // host may not read.
 func (draws DenseDraws) Keys() ([]Key, error) {
-	if err := draws.arena.readable(); err != nil {
+	if err := draws.arena.open(); err != nil {
 		return nil, err
 	}
+	defer draws.arena.close()
 	return unsafe.Slice((*Key)(unsafe.Pointer(draws.keys.data)), draws.written), nil
 }
 
 // EntryOrdinals views which of its key's entries each draw is, in the order Get writes them,
 // refused as Keys is.
 func (draws DenseDraws) EntryOrdinals() ([]uint, error) {
-	if err := draws.arena.readable(); err != nil {
+	if err := draws.arena.open(); err != nil {
 		return nil, err
 	}
+	defer draws.arena.close()
 	return unsafe.Slice((*uint)(unsafe.Pointer(draws.entryOrdinals)), draws.written), nil
 }
 
@@ -1374,7 +1383,7 @@ func (receiver denseReceiver) get(call *callWithResult[DenseVectors], completion
 		return err
 	}
 	arguments := open[C.usearch_dense_get_t](call)
-	call.result.arena = arena
+	call.result.arena = call.stamp(arena, outputs)
 	*arguments = C.usearch_dense_get_t{
 		index:          index,
 		executor:       executor,
@@ -1490,7 +1499,7 @@ func (receiver denseReceiver) search(call *callWithResult[MatchesView], completi
 		return err
 	}
 	arguments := open[C.usearch_dense_search_t](call)
-	call.result.arena = arena
+	call.result.arena = call.stamp(arena, outputs)
 	call.result.queries = queries.rows
 	*arguments = C.usearch_dense_search_t{
 		index:            index,
@@ -1524,7 +1533,7 @@ func (receiver denseReceiver) maxsim(call *callWithResult[MatchesTape], completi
 		return fail(StatusShapeMismatch, "the query rows do not divide into whole queries")
 	}
 	arguments := open[C.usearch_dense_maxsim_t](call)
-	call.result.arena = arena
+	call.result.arena = call.stamp(arena, outputs)
 	call.result.queries = queries.rows / rowsPerQuery
 	*arguments = C.usearch_dense_maxsim_t{
 		index:            index,
@@ -1554,7 +1563,7 @@ func (receiver denseReceiver) multiply(call *callWithResult[MatchesTape], comple
 		return err
 	}
 	arguments := open[C.usearch_dense_multiply_t](call)
-	call.result.arena = arena
+	call.result.arena = call.stamp(arena, outputs)
 	call.result.queries = left.rows
 	*arguments = C.usearch_dense_multiply_t{
 		index:            index,
@@ -1587,7 +1596,7 @@ func (receiver denseReceiver) attend(call *callWithResult[DenseVectors], complet
 		return fail(StatusShapeMismatch, "the softmax carry holds fewer entries than there are queries")
 	}
 	arguments := open[C.usearch_dense_attend_t](call)
-	call.result.arena = arena
+	call.result.arena = call.stamp(arena, outputs)
 	valueLookup, valueLookupState := call.lookup(lookup)
 	call.result.rows = queries.rows
 	*arguments = C.usearch_dense_attend_t{
@@ -1719,7 +1728,7 @@ func (receiver denseReceiver) sample(call *callWithResult[DenseDraws], completio
 		return fail(StatusShapeMismatch, "the shown keys and coordinates disagree in length")
 	}
 	arguments := open[C.usearch_dense_sample_t](call)
-	call.result.arena = arena
+	call.result.arena = call.stamp(arena, outputs)
 	*arguments = C.usearch_dense_sample_t{
 		index:             index,
 		executor:          executor,
@@ -1774,7 +1783,7 @@ func (receiver denseReceiver) saveBuffer(call *callWithResult[Monolith], complet
 		return err
 	}
 	arguments := open[C.usearch_dense_save_buffer_t](call)
-	call.result.arena = arena
+	call.result.arena = call.stamp(arena, outputs)
 	*arguments = C.usearch_dense_save_buffer_t{
 		index:      index,
 		executor:   executor,
@@ -1861,7 +1870,7 @@ func (on DenseCursorOn) next(call *callWithResult[DenseBatch], wanted uint, aren
 		return err
 	}
 	arguments := open[C.usearch_dense_cursor_next_t](call)
-	call.result.arena = arena
+	call.result.arena = call.stamp(arena, outputs)
 	*arguments = C.usearch_dense_cursor_next_t{
 		index:      index,
 		executor:   executor,
@@ -1952,7 +1961,7 @@ func (on DenseSearchStreamOn) Next(wanted uint, arena *Arena) (MatchesView, erro
 	}
 	var call callWithResult[MatchesView]
 	arguments := open[C.usearch_dense_search_stream_next_t](&call)
-	call.result.arena = arena
+	call.result.arena = call.stamp(arena, outputs)
 	call.result.queries = 1
 	*arguments = C.usearch_dense_search_stream_next_t{
 		index:      index,

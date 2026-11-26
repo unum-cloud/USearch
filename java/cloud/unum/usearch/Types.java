@@ -992,6 +992,33 @@ public final class Types {
             return length == 0 ? MemorySegment.NULL : pointer.reinterpret(length, views, null);
         }
 
+        /** The engine's generation of the arena, which every call that takes it advances once. */
+        long generation() {
+            return Library.generation(ARENA_GENERATION, handle.address());
+        }
+
+        /**
+         * Runs {@code copy} under an open export of the arena, so no call takes it meanwhile.
+         *
+         * @throws USearchException CONTENDED when a later call took the arena since {@code generation}
+         *     wrote the result, or a call holds it now.
+         */
+        <T> T read(long generation, java.util.function.Supplier<T> copy) {
+            MemorySegment address = handle.address();
+            if (Library.release(ARENA_EXPORT_OPEN, address) != 0) {
+                throw new USearchException(Status.CONTENDED, "a call holds the arena");
+            }
+            try {
+                if (Library.generation(ARENA_GENERATION, address) != generation) {
+                    throw new USearchException(
+                            Status.CONTENDED, "a later call took the arena since this result was written");
+                }
+                return copy.get();
+            } finally {
+                Library.release(ARENA_EXPORT_CLOSE, address);
+            }
+        }
+
         /**
          * Frees the memory and invalidates every view over it, once every deferred call naming it is
          * final; joining such a call afterwards raises {@link IllegalStateException}. It is idempotent.
@@ -1011,6 +1038,15 @@ public final class Types {
         @Override
         public String toString() {
             return "Arena(" + handle + ")";
+        }
+    }
+
+    /** The arena a result reads, and the generation the call that wrote it brought the arena to. */
+    record Stamp(Arena arena, long generation) {
+
+        /** Runs {@code copy}, which reads the result, under an open export; see {@link Arena#read}. */
+        <T> T read(java.util.function.Supplier<T> copy) {
+            return arena.read(generation, copy);
         }
     }
 
@@ -1067,20 +1103,30 @@ public final class Types {
     public static final class Monolith {
 
         private final MemorySegment bytes;
+        private final Stamp stamp;
 
-        private Monolith(MemorySegment bytes) {
+        private Monolith(MemorySegment bytes, Stamp stamp) {
             this.bytes = bytes;
+            this.stamp = stamp;
         }
 
         /** Lifts the {@code usearch_bytes_view_t} a call wrote into its arena. */
         static Monolith lift(Call call, MemorySegment view) {
-            return new Monolith(call.reach(
-                    (MemorySegment) Library.BYTES_DATA.get(view, 0L), (long) Library.BYTES_LENGTH.get(view, 0L)));
+            return new Monolith(
+                    call.reach(
+                            (MemorySegment) Library.BYTES_DATA.get(view, 0L),
+                            (long) Library.BYTES_LENGTH.get(view, 0L)),
+                    call.stamp());
         }
 
-        /** The bytes in place, which {@link DenseIndex#loadRamBuffer} reads back with no copy. */
+        /**
+         * The bytes in place, which {@link DenseIndex#loadRamBuffer} reads back with no copy; valid until
+         * the arena's next call.
+         *
+         * @throws USearchException CONTENDED once a later call took the arena.
+         */
         public MemorySegment segment() {
-            return bytes;
+            return stamp.read(() -> bytes);
         }
     }
 
@@ -1236,13 +1282,16 @@ public final class Types {
         private final MemorySegment counts;
         private final int queries;
         private final int columns;
+        private final Stamp stamp;
 
-        private Matches(MemorySegment keys, MemorySegment scores, MemorySegment counts, int queries, int columns) {
+        private Matches(
+                MemorySegment keys, MemorySegment scores, MemorySegment counts, int queries, int columns, Stamp stamp) {
             this.keys = keys;
             this.scores = scores;
             this.counts = counts;
             this.queries = queries;
             this.columns = columns;
+            this.stamp = stamp;
         }
 
         /** Lifts the {@code usearch_matches_view_t} a call over {@code queries} wrote into its arena. */
@@ -1254,7 +1303,8 @@ public final class Types {
                     call.reach((MemorySegment) Library.MATCHES_SCORES.get(view, 0L), slots * Double.BYTES),
                     call.reach((MemorySegment) Library.MATCHES_COUNTS.get(view, 0L), queries * Long.BYTES),
                     Extents.toIndex(queries, "the query count"),
-                    Extents.toIndex(columns, "the column count"));
+                    Extents.toIndex(columns, "the column count"),
+                    call.stamp());
         }
 
         /** Columns per query the call wrote, at most its wanted count, and the row width of both matrices. */
@@ -1276,7 +1326,7 @@ public final class Types {
             if (query < 0 || query >= queries) {
                 throw new USearchException(Status.SHAPE_MISMATCH, "the query is outside the batch");
             }
-            return (int) Math.min(counts.getAtIndex(ValueLayout.JAVA_LONG, query), columns);
+            return stamp.read(() -> (int) Math.min(counts.getAtIndex(ValueLayout.JAVA_LONG, query), columns));
         }
 
         /**
@@ -1286,7 +1336,7 @@ public final class Types {
          *     past the matches that query reported.
          */
         public Key key(int query, int rank) {
-            return Key.read(keys, slotOf(query, rank) * Key.BYTES);
+            return stamp.read(() -> Key.read(keys, slotOf(query, rank) * Key.BYTES));
         }
 
         /**
@@ -1296,7 +1346,7 @@ public final class Types {
          *     past the matches that query reported.
          */
         public double score(int query, int rank) {
-            return scores.getAtIndex(ValueLayout.JAVA_DOUBLE, slotOf(query, rank));
+            return stamp.read(() -> scores.getAtIndex(ValueLayout.JAVA_DOUBLE, slotOf(query, rank)));
         }
 
         private long slotOf(int query, int rank) {
@@ -1664,6 +1714,9 @@ public final class Types {
 
         private @Nullable Arena arena;
 
+        /** The generation the call brings its arena to, which its results read current at. */
+        private long generation;
+
         private Call(Verb verb, java.lang.foreign.Arena memory) {
             this.verb = verb;
             this.memory = memory;
@@ -1915,7 +1968,13 @@ public final class Types {
         void arena(VarHandle field, Arena held) {
             pointer(field, held.address());
             arena = held;
+            generation = held.generation() + 1;
             pass(held);
+        }
+
+        /** The arena this call writes into, and the generation it brings it to. */
+        Stamp stamp() {
+            return new Stamp(Objects.requireNonNull(arena), generation);
         }
 
         /** Widens a pointer this call wrote into its arena to the {@code length} bytes it addresses. */
@@ -2170,6 +2229,15 @@ public final class Types {
                     Library.POINTER.withName("outcome")));
 
     private static final VarHandle ARENA_INIT_ARENA = ARENA_INIT.field("arena");
+
+    private static final MethodHandle ARENA_EXPORT_OPEN =
+            Library.downcall("usearch_arena_export_open", FunctionDescriptor.of(Library.ENUM, Library.POINTER));
+
+    private static final MethodHandle ARENA_EXPORT_CLOSE =
+            Library.downcall("usearch_arena_export_close", FunctionDescriptor.ofVoid(Library.POINTER));
+
+    private static final MethodHandle ARENA_GENERATION =
+            Library.downcall("usearch_arena_generation", FunctionDescriptor.of(ValueLayout.JAVA_LONG, Library.POINTER));
 
     /** {@code usearch_arena_free}, which refuses while an Arrow export of the outputs is open. */
     private static final MethodHandle ARENA_FREE =

@@ -976,7 +976,7 @@ func (receiver shapesReceiver) get(call *callWithResult[TapeView], completion C.
 		return err
 	}
 	arguments := open[C.usearch_shapes_get_t](call)
-	call.result.arena = arena
+	call.result.arena = call.stamp(arena, outputs)
 	call.result.width = 3
 	*arguments = C.usearch_shapes_get_t{
 		index:          index,
@@ -1093,7 +1093,7 @@ func (receiver shapesReceiver) search(call *callWithResult[MatchesView], complet
 		return err
 	}
 	arguments := open[C.usearch_shapes_search_t](call)
-	call.result.arena = arena
+	call.result.arena = call.stamp(arena, outputs)
 	call.result.queries = queries.Entries()
 	*arguments = C.usearch_shapes_search_t{
 		index:            index,
@@ -1189,7 +1189,7 @@ func (receiver shapesReceiver) sample(call *callWithResult[DenseDraws], completi
 		return fail(StatusShapeMismatch, "the shown keys and coordinates disagree in length")
 	}
 	arguments := open[C.usearch_shapes_sample_t](call)
-	call.result.arena = arena
+	call.result.arena = call.stamp(arena, outputs)
 	*arguments = C.usearch_shapes_sample_t{
 		index:             index,
 		executor:          executor,
@@ -1244,7 +1244,7 @@ func (receiver shapesReceiver) saveBuffer(call *callWithResult[Monolith], comple
 		return err
 	}
 	arguments := open[C.usearch_shapes_save_buffer_t](call)
-	call.result.arena = arena
+	call.result.arena = call.stamp(arena, outputs)
 	*arguments = C.usearch_shapes_save_buffer_t{
 		index:      index,
 		executor:   executor,
@@ -1331,7 +1331,7 @@ func (on ShapesCursorOn) next(call *callWithResult[DenseBatch], wanted uint, are
 		return err
 	}
 	arguments := open[C.usearch_shapes_cursor_next_t](call)
-	call.result.arena = arena
+	call.result.arena = call.stamp(arena, outputs)
 	*arguments = C.usearch_shapes_cursor_next_t{
 		index:      index,
 		executor:   executor,

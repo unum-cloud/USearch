@@ -179,7 +179,9 @@ Every output whose length only the call knows, such as matches, rows, products, 
 Each call rewinds its arena, so the previous call's views die and a steady loop allocates once.
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own.
-A view and every slice its accessors returned end at the arena's next call, or its `Close`, and nothing checks them after that.
+A view read after a later call took its arena fails as `Contended`.
+A slice or segment an accessor returned is valid only until the arena's next call.
+Closing the arena ends every view over it.
 An arena from a VRAM executor may hold device memory: `Describe` reports its `HostAccess`, and every view over memory the host may not read refuses with `StatusDevice`, while its Arrow exports stay open.
 It grows and frees on that executor's stream, so it serves only calls on that executor, any other finishing `StatusDevice`.
 An arena never outlives the executor that made it, so `defer executor.Close()` comes before `defer arena.Close()`, and an arena from `NewArena(nil)` lives until it is closed.

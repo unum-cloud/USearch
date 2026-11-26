@@ -191,6 +191,10 @@ void usearch_arena_export_close(usearch_arena_t arena) {
     while (!exports.compare_exchange_weak(counted, counted - 1, std::memory_order_release, std::memory_order_relaxed));
 }
 
+uint64_t usearch_arena_generation(usearch_arena_t arena) {
+    return arena ? serial_atomic_ref<util::u64_t>(arena->generation).load(std::memory_order_relaxed) : 0;
+}
+
 void usearch_arena_describe(usearch_arena_describe_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     if (reject_if(!arguments->arena || !arguments->description, usearch_status_invalid_argument_k,

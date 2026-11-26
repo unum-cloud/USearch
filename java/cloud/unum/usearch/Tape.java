@@ -15,6 +15,7 @@ import cloud.unum.usearch.Types.Call;
 import cloud.unum.usearch.Types.Scalar;
 import cloud.unum.usearch.Types.Status;
 import cloud.unum.usearch.Types.USearchException;
+import org.jspecify.annotations.Nullable;
 
 /**
  * A ragged batch: the elements of every entry end to end, and one more offset than entries around
@@ -38,7 +39,17 @@ public final class Tape {
     private final Scalar scalar;
     private final int width;
 
-    private Tape(MemorySegment data, MemorySegment offsets, long count, Scalar scalar, int width) {
+    /** The arena and call a lifted tape was written by; {@code null} for one built from the caller's arrays. */
+    private final Types.@Nullable Stamp stamp;
+
+    private Tape(
+            MemorySegment data,
+            MemorySegment offsets,
+            long count,
+            Scalar scalar,
+            int width,
+            Types.@Nullable Stamp stamp) {
+        this.stamp = stamp;
         this.data = data;
         this.offsets = offsets;
         this.count = count;
@@ -56,7 +67,7 @@ public final class Tape {
         for (int entry = 0; entry != sequences.length; ++entry) {
             System.arraycopy(sequences[entry], 0, joined, (int) offsets[entry], sequences[entry].length);
         }
-        return new Tape(MemorySegment.ofArray(joined), MemorySegment.ofArray(offsets), sequences.length, Scalar.U8, 1);
+        return new Tape(MemorySegment.ofArray(joined), MemorySegment.ofArray(offsets), sequences.length, Scalar.U8, 1, null);
     }
 
     /** Texts as their UTF-8 bytes, one entry apiece, for a {@link SequenceIndex}. */
@@ -86,7 +97,7 @@ public final class Tape {
         for (int entry = 0; entry != shapes.length; ++entry) {
             System.arraycopy(shapes[entry], 0, joined, (int) offsets[entry] * 3, shapes[entry].length);
         }
-        return new Tape(MemorySegment.ofArray(joined), MemorySegment.ofArray(offsets), shapes.length, Scalar.F32, 3);
+        return new Tape(MemorySegment.ofArray(joined), MemorySegment.ofArray(offsets), shapes.length, Scalar.F32, 3, null);
     }
 
     /**
@@ -109,19 +120,20 @@ public final class Tape {
         if (Types.Extents.product(offsets[offsets.length - 1], elementBytes, "the tape") > data.byteSize()) {
             throw new USearchException(Status.SHAPE_MISMATCH, "the offsets reach past the data");
         }
-        return new Tape(data, MemorySegment.ofArray(offsets), offsets.length - 1, scalar, width);
+        return new Tape(data, MemorySegment.ofArray(offsets), offsets.length - 1, scalar, width, null);
     }
 
     /** Lifts the {@code usearch_tape_view_t} of {@code written} entries a call wrote into its arena. */
     static Tape lift(Call call, MemorySegment view, long written, int width) {
         Scalar scalar = Scalar.of((int) SCALAR.get(view, 0L));
         if (written == 0) {
-            return new Tape(MemorySegment.NULL, MemorySegment.ofArray(new long[1]), 0, scalar, width);
+            return new Tape(MemorySegment.NULL, MemorySegment.ofArray(new long[1]), 0, scalar, width, null);
         }
         MemorySegment offsets = call.reach((MemorySegment) OFFSETS.get(view, 0L), (written + 1) * Long.BYTES);
         long elements = offsets.getAtIndex(ValueLayout.JAVA_LONG, written);
         long bytes = Types.Extents.product(elements, (long) scalar.valueBytes() * width, "the tape");
-        return new Tape(call.reach((MemorySegment) DATA.get(view, 0L), bytes), offsets, written, scalar, width);
+        return new Tape(
+                call.reach((MemorySegment) DATA.get(view, 0L), bytes), offsets, written, scalar, width, call.stamp());
     }
 
     /** Fills the {@code usearch_tape_view_t} embedded at {@code at} of the call's structure. */
@@ -157,13 +169,19 @@ public final class Tape {
         if (entry < 0 || entry > count) {
             throw new USearchException(Status.SHAPE_MISMATCH, "the tape holds " + count + " entries");
         }
-        return offsets.getAtIndex(ValueLayout.JAVA_LONG, entry);
+        return reading(() -> offsets.getAtIndex(ValueLayout.JAVA_LONG, entry));
+    }
+
+    /** Runs {@code copy} under an export of the arena a lifted tape lives in, and bare for an input tape. */
+    private <T> T reading(java.util.function.Supplier<T> copy) {
+        return stamp == null ? copy.get() : stamp.read(copy);
     }
 
     /**
-     * One entry's elements in place.
+     * One entry's elements in place, valid until the arena's next call for a lifted tape.
      *
-     * @throws USearchException SHAPE_MISMATCH when the entry is past the tape.
+     * @throws USearchException SHAPE_MISMATCH when the entry is past the tape, and CONTENDED once a later
+     *     call took the arena.
      */
     public MemorySegment segment(long entry) {
         if (entry < 0 || entry >= count) {
@@ -171,7 +189,7 @@ public final class Tape {
         }
         long elementBytes = (long) scalar.valueBytes() * width;
         long begin = offset(entry) * elementBytes;
-        return data.asSlice(begin, offset(entry + 1) * elementBytes - begin);
+        return reading(() -> data.asSlice(begin, offset(entry + 1) * elementBytes - begin));
     }
 
     /** One entry's bytes, copied out. */

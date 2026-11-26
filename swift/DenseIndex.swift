@@ -809,7 +809,7 @@ public struct DenseViewNvmeConfig {
 /// in place as `Value` until the arena's next call, and holding the arena alive.
 public struct DenseVectors<Value: ScalarValue>: RandomAccessCollection {
     /// The arena the rows live in, held so they outlive no release of it.
-    let arena: Arena
+    let arena: ArenaWrite
     /// The packed rows the call wrote.
     var vectors = usearch_rows_view_t()
     /// One past the last row the call wrote.
@@ -826,19 +826,20 @@ public struct DenseVectors<Value: ScalarValue>: RandomAccessCollection {
 
     /// One row's stored values, packed at their natural width.
     public subscript(row: Int) -> Row {
-        boundsCheck(row, below: endIndex, in: arena)
-        let perValue = Value.scalarKind.dimensionsPerValue
-        return Row(
-            arena: arena,
-            base: vectors.data! + row * vectors.stride,
-            endIndex: (columns + perValue - 1) / perValue
-        )
+        arena.read(row, below: endIndex) {
+            let perValue = Value.scalarKind.dimensionsPerValue
+            return Row(
+                arena: arena,
+                base: vectors.data! + row * vectors.stride,
+                endIndex: (columns + perValue - 1) / perValue
+            )
+        }
     }
 
     /// One row of the arena's values, read in place.
     public struct Row: RandomAccessCollection {
         /// The arena the row lives in, held so it outlives no release of it.
-        let arena: Arena
+        let arena: ArenaWrite
         /// The row's first value.
         let base: UnsafeRawPointer
         /// One past the last value in the row.
@@ -849,8 +850,9 @@ public struct DenseVectors<Value: ScalarValue>: RandomAccessCollection {
 
         /// The value at a position.
         public subscript(position: Int) -> Value {
-            boundsCheck(position, below: endIndex, in: arena)
-            return base.load(fromByteOffset: position * MemoryLayout<Value>.stride, as: Value.self)
+            arena.read(position, below: endIndex) {
+                return base.load(fromByteOffset: position * MemoryLayout<Value>.stride, as: Value.self)
+            }
         }
     }
 }
@@ -858,7 +860,7 @@ public struct DenseVectors<Value: ScalarValue>: RandomAccessCollection {
 /// The keys a cursor pull wrote into an arena, in walk order.
 public struct DenseKeys: RandomAccessCollection {
     /// The arena the keys live in, held so they outlive no release of it.
-    let arena: Arena
+    let arena: ArenaWrite
     /// The keys the call wrote.
     var keys = usearch_keys_view_t()
     /// One past the last key the call wrote.
@@ -869,10 +871,11 @@ public struct DenseKeys: RandomAccessCollection {
 
     /// The key at a position.
     public subscript(position: Int) -> Key {
-        boundsCheck(position, below: endIndex, in: arena)
-        return Key(
-            raw: UnsafeRawPointer(keys.data!).load(fromByteOffset: position * keys.stride, as: usearch_key_t.self)
-        )
+        arena.read(position, below: endIndex) {
+            return Key(
+                raw: UnsafeRawPointer(keys.data!).load(fromByteOffset: position * keys.stride, as: usearch_key_t.self)
+            )
+        }
     }
 }
 
@@ -880,7 +883,7 @@ public struct DenseKeys: RandomAccessCollection {
 /// is, the shown or earlier draw it hangs from, and where it is placed, read in place.
 public struct DenseDraws {
     /// The arena the draws live in, held so they outlive no release of it.
-    let arena: Arena
+    let arena: ArenaWrite
     /// The drawn keys the call wrote.
     var drawnKeys = usearch_keys_view_t()
     /// Which of its key's entries each draw is.
@@ -903,8 +906,9 @@ public struct DenseDraws {
 
     /// Which of its key's entries one draw is, in the order `get` writes them.
     public func entryOrdinal(_ draw: Int) -> Int {
-        boundsCheck(draw, below: count, in: arena)
-        return entryOrdinals![draw]
+        arena.read(draw, below: count) {
+            return entryOrdinals![draw]
+        }
     }
 }
 
@@ -912,7 +916,7 @@ public struct DenseDraws {
 /// place.
 public struct DenseLinks: RandomAccessCollection {
     /// The arena the keys live in, held so they outlive no release of it.
-    let arena: Arena
+    let arena: ArenaWrite
     /// The linked keys and offsets the call wrote.
     let links: usearch_keys_tape_view_t
     /// One past the last entry the pull wrote.
@@ -923,9 +927,10 @@ public struct DenseLinks: RandomAccessCollection {
 
     /// The keys one entry links to, as the graph stored them when the pull ran.
     public subscript(entry: Int) -> [Key] {
-        boundsCheck(entry, below: endIndex, in: arena)
-        guard let offsets = links.offsets, let keys = links.keys else { return [] }
-        return (offsets[entry] ..< offsets[entry + 1]).map { Key(raw: keys[$0]) }
+        arena.read(entry, below: endIndex) {
+            guard let offsets = links.offsets, let keys = links.keys else { return [] }
+            return (offsets[entry] ..< offsets[entry + 1]).map { Key(raw: keys[$0]) }
+        }
     }
 }
 
@@ -934,7 +939,7 @@ public struct DenseLinks: RandomAccessCollection {
 /// place.
 public struct DenseProducts: RandomAccessCollection {
     /// The arena the pairs live in, held so they outlive no release of it.
-    let arena: Arena
+    let arena: ArenaWrite
     /// The keys, products and offsets the call wrote.
     var products = usearch_matches_tape_view_t()
     /// One past the last left row or query.
@@ -948,16 +953,17 @@ public struct DenseProducts: RandomAccessCollection {
 
     /// One left row's pairs, in traversal order, or one query's keys, largest score first.
     public subscript(query: Int) -> QueryMatches {
-        boundsCheck(query, below: endIndex, in: arena)
-        let cells = products.offsets[query] ..< products.offsets[query + 1]
-        return QueryMatches(arena: arena, keys: products.keys, scores: products.scores, cells: cells)
+        arena.read(query, below: endIndex) {
+            let cells = products.offsets[query] ..< products.offsets[query + 1]
+            return QueryMatches(arena: arena, keys: products.keys, scores: products.scores, cells: cells)
+        }
     }
 }
 
 /// The monolith `saveBuffer` wrote into an arena, read in place.
 public struct Monolith {
     /// The arena the bytes live in, held so they outlive no release of it.
-    let arena: Arena
+    let arena: ArenaWrite
     /// The bytes the call wrote.
     var monolith = usearch_bytes_view_t()
 
@@ -968,8 +974,9 @@ public struct Monolith {
     public func withUnsafeBytes<Result, Failure: Swift.Error>(
         _ body: (UnsafeRawBufferPointer) throws(Failure) -> Result
     ) throws(Failure) -> Result {
-        precondition(arena.hostAccess == .readable, hostRefusal)
-        return try body(UnsafeRawBufferPointer(start: monolith.data, count: monolith.length))
+        try arena.read { () throws(Failure) in
+            try body(UnsafeRawBufferPointer(start: monolith.data, count: monolith.length))
+        }
     }
 }
 
@@ -1948,7 +1955,7 @@ struct DenseCall {
         as value: Value.Type,
         arena: Arena
     ) throws(USearchError) -> Submission<DenseVectors<Value>> {
-        let vectors = callState.slots(DenseVectors<Value>(arena: arena, endIndex: 0))
+        let vectors = callState.slots(DenseVectors<Value>(arena: ArenaWrite(arena), endIndex: 0))
         var arguments = usearch_dense_get_t(
             index: index.raw,
             executor: executor?.raw,
@@ -2057,7 +2064,7 @@ struct DenseCall {
     ) throws(USearchError) -> Submission<Matches> {
         callState.anchor(queries.owner)
         callState.anchor(config.stats)
-        let matches = callState.slots(Matches(arena: arena, endIndex: queries.rows))
+        let matches = callState.slots(Matches(arena: ArenaWrite(arena), endIndex: queries.rows))
         var arguments = usearch_dense_search_t(
             index: index.raw,
             executor: executor?.raw,
@@ -2089,7 +2096,7 @@ struct DenseCall {
         let count = try wholeQueries(queries, rowsPerQuery)
         callState.anchor(queries.owner)
         callState.anchor(config.stats)
-        let products = callState.slots(DenseProducts(arena: arena, endIndex: count))
+        let products = callState.slots(DenseProducts(arena: ArenaWrite(arena), endIndex: count))
         var arguments = usearch_dense_maxsim_t(
             index: index.raw,
             executor: executor?.raw,
@@ -2122,7 +2129,7 @@ struct DenseCall {
     ) throws(USearchError) -> Submission<DenseProducts> {
         callState.anchor(left.owner)
         callState.anchor(config.stats)
-        let products = callState.slots(DenseProducts(arena: arena, endIndex: left.rows))
+        let products = callState.slots(DenseProducts(arena: ArenaWrite(arena), endIndex: left.rows))
         var arguments = usearch_dense_multiply_t(
             index: index.raw,
             executor: executor?.raw,
@@ -2159,7 +2166,7 @@ struct DenseCall {
         callState.anchor(queries.owner)
         callState.anchor(lookup.values.owner)
         callState.anchor(config.stats)
-        let outputs = callState.slots(DenseVectors<Value>(arena: arena, endIndex: queries.rows))
+        let outputs = callState.slots(DenseVectors<Value>(arena: ArenaWrite(arena), endIndex: queries.rows))
         var arguments = usearch_dense_attend_t(
             index: index.raw,
             executor: executor?.raw,
@@ -2278,7 +2285,7 @@ struct DenseCall {
             throw USearchError(status: .shapeMismatch, message: "the shown keys need three coordinates apiece")
         }
         callState.anchor(config.stats)
-        let draws = callState.slots(DenseDraws(arena: arena))
+        let draws = callState.slots(DenseDraws(arena: ArenaWrite(arena)))
         let progress = callState.pass(config.progress, steps: config.progressSteps)
         func view(_ keys: UnsafePointer<Key>?) -> usearch_keys_view_t {
             usearch_keys_view_t(
@@ -2340,7 +2347,7 @@ struct DenseCall {
     }
 
     func saveBuffer(arena: Arena, config: DenseSaveBufferConfig) throws(USearchError) -> Submission<Monolith> {
-        let monolith = callState.slots(Monolith(arena: arena))
+        let monolith = callState.slots(Monolith(arena: ArenaWrite(arena)))
         var arguments = usearch_dense_save_buffer_t(
             index: index.raw,
             executor: executor?.raw,
@@ -2458,7 +2465,7 @@ public final class DenseCursor {
     /// means the walk is exhausted. The vectors themselves come from `get`.
     public func nextLinks(wanted: Int, arena: Arena) throws(USearchError) -> (keys: DenseKeys, links: DenseLinks) {
         let (keys, links) = try pull(wanted, true, arena, nil)
-        return (keys, DenseLinks(arena: arena, links: links, endIndex: keys.count))
+        return (keys, DenseLinks(arena: ArenaWrite(arena), links: links, endIndex: keys.count))
     }
 
     /// The receiver whose pulls block on `executor`, named again for every pull. Binding-only.
@@ -2473,7 +2480,7 @@ public final class DenseCursor {
         _ executor: Executor?
     ) throws(USearchError) -> (keys: DenseKeys, links: usearch_keys_tape_view_t) {
         let callState = CallState()
-        let keys = callState.slots(DenseKeys(arena: arena, endIndex: 0))
+        let keys = callState.slots(DenseKeys(arena: ArenaWrite(arena), endIndex: 0))
         let links = callState.slots(usearch_keys_tape_view_t())
         var arguments = usearch_dense_cursor_next_t(
             index: index.raw,
@@ -2509,7 +2516,7 @@ public struct DenseCursorOn {
     /// Copies up to `wanted` next keys into `arena` on the executor, with the keys each links to.
     public func nextLinks(wanted: Int, arena: Arena) throws(USearchError) -> (keys: DenseKeys, links: DenseLinks) {
         let (keys, links) = try cursor.pull(wanted, true, arena, executor)
-        return (keys, DenseLinks(arena: arena, links: links, endIndex: keys.count))
+        return (keys, DenseLinks(arena: ArenaWrite(arena), links: links, endIndex: keys.count))
     }
 }
 
@@ -2541,7 +2548,7 @@ public final class DenseSearchStream {
     /// an empty query means the traversal is drained.
     public func next(wanted: Int, arena: Arena) throws(USearchError) -> Matches {
         let callState = CallState()
-        let matches = callState.slots(Matches(arena: arena, endIndex: 1))
+        let matches = callState.slots(Matches(arena: ArenaWrite(arena), endIndex: 1))
         var arguments = usearch_dense_search_stream_next_t(
             index: index.raw,
             executor: executor?.raw,

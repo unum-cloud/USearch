@@ -416,7 +416,7 @@ public struct Match: Equatable, Sendable {
 /// in place until the arena's next call.
 public struct Matches: RandomAccessCollection {
     /// The arena the matches live in, held so they outlive no release of it.
-    let arena: Arena
+    let arena: ArenaWrite
     /// The packed matches the call wrote.
     var view = usearch_matches_view_t()
     /// One past the last query the call resolved.
@@ -430,21 +430,22 @@ public struct Matches: RandomAccessCollection {
 
     /// One query's matches, as many as the call wrote.
     public subscript(query: Int) -> QueryMatches {
-        boundsCheck(query, below: endIndex, in: arena)
-        let start = query * view.columns
-        return QueryMatches(
-            arena: arena,
-            keys: view.keys,
-            scores: view.scores,
-            cells: start ..< start + view.counts[query]
-        )
+        arena.read(query, below: endIndex) {
+            let start = query * view.columns
+            return QueryMatches(
+                arena: arena,
+                keys: view.keys,
+                scores: view.scores,
+                cells: start ..< start + view.counts[query]
+            )
+        }
     }
 }
 
 /// One query's matches, or one left row's pairs, read in place from the arena they live in.
 public struct QueryMatches: RandomAccessCollection {
     /// The arena the matches live in, held so they outlive no release of it.
-    let arena: Arena
+    let arena: ArenaWrite
     /// The keys of every query of the call.
     let keys: UnsafePointer<usearch_key_t>?
     /// The scores of every query of the call, positionally paired with `keys`.
@@ -460,9 +461,10 @@ public struct QueryMatches: RandomAccessCollection {
 
     /// The match at a position, key and score read from their paired arrays.
     public subscript(position: Int) -> Match {
-        boundsCheck(position, below: cells.count, in: arena)
-        let cell = cells.lowerBound + position
-        return Match(key: Key(raw: keys![cell]), distance: scores![cell])
+        arena.read(position, below: cells.count) {
+            let cell = cells.lowerBound + position
+            return Match(key: Key(raw: keys![cell]), distance: scores![cell])
+        }
     }
 }
 
@@ -705,12 +707,6 @@ func created<Handle>(_ slot: UnsafeMutablePointer<Handle?>) throws(USearchError)
 /// Traps on a position past `count`, as a collection does.
 func boundsCheck(_ position: Int, below count: Int) {
     precondition(position >= 0 && position < count, "the position is out of bounds")
-}
-
-/// Traps on a position past `count`, or on outputs in memory the host may not read.
-func boundsCheck(_ position: Int, below count: Int, in arena: Arena) {
-    precondition(arena.hostAccess == .readable, hostRefusal)
-    boundsCheck(position, below: count)
 }
 
 // MARK: - Deferred Calls
@@ -1146,6 +1142,35 @@ public final class Arena {
         usearch_arena_describe(&arguments)
         try callState.wait()
         return ArenaDescription(description.pointee)
+    }
+}
+
+/// The arena a view reads, and which of the calls given it wrote the view.
+struct ArenaWrite {
+    let arena: Arena
+    let generation: UInt64
+
+    /// Runs `body`, which copies out of the arena, under an open export, so no call takes the arena
+    /// meanwhile. Traps on a read of an arena a later call rewound, or of host-unreadable memory.
+    func read<Value, Failure: Swift.Error>(_ body: () throws(Failure) -> Value) throws(Failure) -> Value {
+        precondition(usearch_arena_export_open(arena.raw) == usearch_status_success_k, "a call holds the arena")
+        defer { usearch_arena_export_close(arena.raw) }
+        precondition(usearch_arena_generation(arena.raw) == generation, "the arena was rewound since this view was written")
+        precondition(arena.hostAccess == .readable, hostRefusal)
+        return try body()
+    }
+
+    /// Reads as `read` does, after trapping on a `position` past `count`, as a collection does.
+    func read<Value>(_ position: Int, below count: Int, _ body: () -> Value) -> Value {
+        boundsCheck(position, below: count)
+        return read(body)
+    }
+}
+
+extension ArenaWrite {
+    /// Stamps the views of `arena` for the call about to take it, at the generation it reaches.
+    init(_ arena: Arena) {
+        self.init(arena: arena, generation: usearch_arena_generation(arena.raw) &+ 1)
     }
 }
 

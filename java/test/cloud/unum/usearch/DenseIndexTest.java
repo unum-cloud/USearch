@@ -565,6 +565,16 @@ public class DenseIndexTest {
     }
 
     @Test
+    public void aLaterCallEndsEarlierViews() {
+        try (DenseIndex index = populated();
+                Arena arena = new Arena()) {
+            DenseVectors first = index.on(POOL).get(Key.of(10), Scalar.F32, arena);
+            index.on(POOL).search(RowsView.of(new float[] {1, 0}, 2), 1, arena);
+            assertEquals(Status.CONTENDED, assertThrows(USearchException.class, () -> floatsOf(first)).status());
+        }
+    }
+
+    @Test
     public void closingAnArenaVoidsItsViews() {
         DenseVectors first;
         Matches second;

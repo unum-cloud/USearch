@@ -1688,6 +1688,11 @@ USEARCH_EXPORT void usearch_arena_export_close(usearch_arena_t arena) {
     while (!exports.compare_exchange_weak(counted, counted - 1, std::memory_order_release, std::memory_order_relaxed));
 }
 
+USEARCH_EXPORT uint64_t usearch_arena_generation(usearch_arena_t arena) {
+    if (!arena) return 0;
+    return fu::standard_atomic_ref<util::u64_t> {arena->generation}.load(std::memory_order_relaxed);
+}
+
 USEARCH_EXPORT void usearch_arena_describe(usearch_arena_describe_t* arguments) {
     call_outcome_t outcome(*arguments);
     usearch_arena_t const arena = arguments->arena;

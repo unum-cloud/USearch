@@ -875,7 +875,7 @@ struct ShapesCall {
         as value: Value.Type,
         arena: Arena
     ) throws(USearchError) -> Submission<TapeEntries<Value>> {
-        let entries = callState.slots(TapeEntries<Value>(arena: arena, endIndex: 0, valuesPerElement: 3))
+        let entries = callState.slots(TapeEntries<Value>(arena: ArenaWrite(arena), endIndex: 0, valuesPerElement: 3))
         var arguments = usearch_shapes_get_t(
             index: index.raw,
             executor: executor?.raw,
@@ -977,7 +977,7 @@ struct ShapesCall {
         config: DenseSearchConfig
     ) throws(USearchError) -> Submission<Matches> {
         callState.anchor(config.stats)
-        let matches = callState.slots(Matches(arena: arena, endIndex: queries.count))
+        let matches = callState.slots(Matches(arena: ArenaWrite(arena), endIndex: queries.count))
         try callState.pass(tape: queries, valuesPerElement: 3) { (tape) throws(USearchError) in
             var arguments = usearch_shapes_search_t(
                 index: index.raw,
@@ -1051,7 +1051,7 @@ struct ShapesCall {
             throw USearchError(status: .shapeMismatch, message: "the shown keys need three coordinates apiece")
         }
         callState.anchor(config.stats)
-        let draws = callState.slots(DenseDraws(arena: arena))
+        let draws = callState.slots(DenseDraws(arena: ArenaWrite(arena)))
         let progress = callState.pass(config.progress, steps: config.progressSteps)
         try callState.pass(config.shown) { (shown) throws(USearchError) in
             try callState.pass(config.focus) { (focus) throws(USearchError) in
@@ -1102,7 +1102,7 @@ struct ShapesCall {
     }
 
     func saveBuffer(arena: Arena, config: DenseSaveBufferConfig) throws(USearchError) -> Submission<Monolith> {
-        let monolith = callState.slots(Monolith(arena: arena))
+        let monolith = callState.slots(Monolith(arena: ArenaWrite(arena)))
         var arguments = usearch_shapes_save_buffer_t(
             index: index.raw,
             executor: executor?.raw,
@@ -1158,7 +1158,7 @@ public final class ShapesCursor {
     /// Copies up to `wanted` next keys into `arena`, each with the keys it links to.
     public func nextLinks(wanted: Int, arena: Arena) throws(USearchError) -> (keys: DenseKeys, links: DenseLinks) {
         let (keys, links) = try pull(wanted, true, arena, nil)
-        return (keys, DenseLinks(arena: arena, links: links, endIndex: keys.count))
+        return (keys, DenseLinks(arena: ArenaWrite(arena), links: links, endIndex: keys.count))
     }
 
     /// The receiver whose pulls block on `executor`, named again for every pull. Binding-only.
@@ -1173,7 +1173,7 @@ public final class ShapesCursor {
         _ executor: Executor?
     ) throws(USearchError) -> (keys: DenseKeys, links: usearch_keys_tape_view_t) {
         let callState = CallState()
-        let keys = callState.slots(DenseKeys(arena: arena, endIndex: 0))
+        let keys = callState.slots(DenseKeys(arena: ArenaWrite(arena), endIndex: 0))
         let links = callState.slots(usearch_keys_tape_view_t())
         var arguments = usearch_shapes_cursor_next_t(
             index: index.raw,
@@ -1209,6 +1209,6 @@ public struct ShapesCursorOn {
     /// Copies up to `wanted` next keys into `arena` on the executor, with the keys each links to.
     public func nextLinks(wanted: Int, arena: Arena) throws(USearchError) -> (keys: DenseKeys, links: DenseLinks) {
         let (keys, links) = try cursor.pull(wanted, true, arena, executor)
-        return (keys, DenseLinks(arena: arena, links: links, endIndex: keys.count))
+        return (keys, DenseLinks(arena: ArenaWrite(arena), links: links, endIndex: keys.count))
     }
 }

@@ -22,6 +22,9 @@ extern fn usearch_executor_drain(arguments: *usearch_executor_drain_t) void;
 extern fn usearch_executor_free(executor: ?*anyopaque) Status;
 extern fn usearch_arena_init(arguments: *usearch_arena_init_t) void;
 extern fn usearch_arena_free(arena: ?*anyopaque) Status;
+extern fn usearch_arena_export_open(arena: ?*anyopaque) Status;
+extern fn usearch_arena_export_close(arena: ?*anyopaque) void;
+extern fn usearch_arena_generation(arena: ?*anyopaque) u64;
 extern fn usearch_arena_describe(arguments: *usearch_arena_describe_t) void;
 
 extern fn usearch_status_name(status: Status) [*:0]const u8;
@@ -528,15 +531,45 @@ pub const QueryMatches = struct {
 /// holding up to the `wanted` the call asked for, readable until the arena's next call.
 /// Mirrors `usearch_matches_view_t`.
 pub const Matches = struct {
+    write: ArenaWrite = .{},
     view: usearch_matches_view_t = .{},
     /// Queries the call resolved.
     queries: usize,
 
     /// The matches written for one query, `position` below `queries`.
-    pub fn query(self: Matches, position: usize) QueryMatches {
+    pub fn query(self: Matches, position: usize) Error!QueryMatches {
+        try self.write.open();
+        defer self.write.close();
         const first = position * self.view.columns;
         const written = if (self.view.counts) |counts| counts[0..self.queries][position] else 0;
         return .{ .keys = outputSlice(Key, self.view.keys, first, written), .scores = outputSlice(Distance, self.view.scores, first, written) };
+    }
+};
+
+/// The arena a result reads, and the generation the call that wrote it brought the arena to.
+pub const ArenaWrite = struct {
+    handle: ?*anyopaque = null,
+    generation: u64 = 0,
+
+    /// Names the arena a call about to take it writes into, at the generation it brings it to.
+    pub fn stamp(handle: ?*anyopaque) ArenaWrite {
+        return .{ .handle = handle, .generation = usearch_arena_generation(handle) + 1 };
+    }
+
+    /// Holds an export of the arena, so no call takes it until `close`, and answers
+    /// `Error.Contended` when a later call took it since the result was written, or one holds it.
+    pub fn open(self: ArenaWrite) Error!void {
+        if (self.handle == null) return;
+        if (usearch_arena_export_open(self.handle) != .success) return Error.Contended;
+        if (usearch_arena_generation(self.handle) != self.generation) {
+            usearch_arena_export_close(self.handle);
+            return Error.Contended;
+        }
+    }
+
+    /// Ends the export `open` took.
+    pub fn close(self: ArenaWrite) void {
+        if (self.handle != null) usearch_arena_export_close(self.handle);
     }
 };
 
@@ -845,7 +878,6 @@ const usearch_executor_for_nvme_t = extern struct {
     scratch_limit: usize = 0,
 };
 
-
 const usearch_arena_init_t = extern struct {
     arena: *?*anyopaque,
     executor: ?*anyopaque,
@@ -1011,9 +1043,10 @@ pub const Executor = struct {
 /// products, monoliths and cursor batches - mirroring `usearch_arena_t`.
 ///
 /// Every verb writing such outputs views one as `*Arena`, blocking or deferred alike. Each call
-/// rewinds it, ending the previous call's views, and refills it, growing only past its high-water
-/// mark, so a steady loop allocates once. An arena serves one call at a time: a second use while a
-/// call holds it fails with `Error.Contended` and leaves that call's views alone.
+/// rewinds it, ending the previous call's views, whose accessors then answer `Error.Contended`, and
+/// refills it, growing only past its high-water mark, so a steady loop allocates once. An arena
+/// serves one call at a time: a second use while a call holds it fails with `Error.Contended` and
+/// leaves that call's views alone.
 ///
 /// Every output an arena hands back is a host slice, so `init` refuses with `Error.Device` an
 /// executor whose memory the host may not read; Apple's shared and CUDA's managed memory pass. A

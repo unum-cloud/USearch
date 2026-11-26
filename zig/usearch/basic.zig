@@ -6,6 +6,7 @@ const types = @import("types.zig");
 const Error = types.Error;
 const Scalar = types.Scalar;
 const outputSlice = types.outputSlice;
+const ArenaWrite = types.ArenaWrite;
 const refuse = types.refuse;
 
 /// How wide a tape's offsets are, naming the member of its offsets to read.
@@ -89,25 +90,32 @@ pub fn TapeEntries(comptime Element: type) type {
     return struct {
         const Self = @This();
 
+        write: ArenaWrite = .{},
         view: usearch_tape_view_t = .{},
         /// Entries written; zero for an absent key.
         written: usize = 0,
 
         /// The `written + 1` offsets, in elements; empty for an absent key.
-        pub fn offsets(self: Self) []const usize {
+        pub fn offsets(self: Self) Error![]const usize {
+            try self.write.open();
+            defer self.write.close();
             if (self.written == 0) return &.{};
             return outputSlice(usize, @ptrCast(@alignCast(self.view.offsets.u64)), 0, self.written + 1);
         }
 
         /// One entry's elements, `position` below `written`.
-        pub fn entry(self: Self, position: usize) []const Element {
-            const tape = self.offsets();
+        pub fn entry(self: Self, position: usize) Error![]const Element {
+            try self.write.open();
+            defer self.write.close();
+            const tape = try self.offsets();
             return outputSlice(Element, @ptrCast(@alignCast(self.view.data)), tape[position], tape[position + 1] - tape[position]);
         }
 
         /// Every entry's elements, end to end.
-        pub fn elements(self: Self) []const Element {
-            const tape = self.offsets();
+        pub fn elements(self: Self) Error![]const Element {
+            try self.write.open();
+            defer self.write.close();
+            const tape = try self.offsets();
             return if (tape.len == 0) &.{} else outputSlice(Element, @ptrCast(@alignCast(self.view.data)), 0, tape[tape.len - 1]);
         }
     };

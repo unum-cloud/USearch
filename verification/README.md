@@ -23,6 +23,7 @@ Model checking for the index protocols: the gates, the watermarks, the capacity 
 - `dense_vram_index_locks.pml`: the CUDA index's rows, published by one release under the bounded slot-zero lock.
 - `dense_vram_index_merge.pml`: the Apple refine merging a re-selected row into the live one.
 - `dense_vram_indexes/`: the sharded CUDA index's batches, load and save, and the await of a search across its shards' streams.
+- `arena_lifetime.pml`: an arena's calls, generation and exports, its free and its executor's free, the same file in every engine.
 - `nvme_ring.pml`: the io_uring words of `linux_uring_ring_t` behind the ring engines.
 - `ram_tables.pml`, `ram_tables_growth.pml`: `chunked_multimap`'s probes and its chunk growth.
 
@@ -80,6 +81,10 @@ ForkUnion's [verification README](https://github.com/ashvardanian/ForkUnion/blob
 - A search's await queues every shard's event record before the first stream's wait on it, and every record releases: [`dense_vram_indexes/awaiting.pml`](dense_vram_indexes/awaiting.pml).
 - A refine's merge never stores the sentinel into slot zero: [`dense_vram_index_merge.pml`](dense_vram_index_merge.pml).
 - `abandon_` waits out every read the kernel consumed before it drops their completions: [`nvme_ring.pml`](nvme_ring.pml).
+- An arena's free waits out the calls naming it before it reads the export count, or an export opened during the wait is open when the arena is deleted, and it counts the arena off its executor last, after the memory went back through it: [`arena_lifetime.pml`](arena_lifetime.pml).
+- A call advances its arena's generation once, after the export count and the executor's claim admitted it and never on its body's re-hold, and a binding copies an output only under an export, re-reading the generation inside it, or a copy reads the next call's outputs as current: [`arena_lifetime.pml`](arena_lifetime.pml).
+- A call takes the arena and an export raises the count each with a sequentially consistent read-modify-write before reading the other's word, or both read the other's from before and the call rewinds outputs the export holds: [`arena_lifetime.pml`](arena_lifetime.pml).
+- A call the pool refuses after its claims has advanced the generation without rewinding, which reads earlier results as stale and never as current: [`arena_lifetime.pml`](arena_lifetime.pml).
 
 ## What Is Not Covered
 

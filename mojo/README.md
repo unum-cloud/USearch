@@ -120,7 +120,9 @@ Every output whose length only the call knows, such as matches, rows, products, 
 Each call rewinds its arena, so the previous call's views die and a steady loop allocates once.
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own.
-A view's origin keeps its arena alive, and the view reads it in place until the arena's next call.
+A view's origin keeps its arena alive.
+A view read after a later call took its arena fails as `Contended`.
+A slice or segment an accessor returned is valid only until the arena's next call.
 Every result is read in place as a host `Span`, so `Arena(executor)` refuses with `Status.DEVICE` an executor whose memory the host may not read, as CUDA and ROCm device memory, while Apple's shared memory passes; `arena.describe()` reports the device, its vendor and `host_access`, and a VRAM arena serves only that executor's calls.
 Every arena holds the origin of the executor that made it, so Mojo frees the arena before that executor.
 

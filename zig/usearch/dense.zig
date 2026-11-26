@@ -38,6 +38,7 @@ const Scalar = types.Scalar;
 const Status = types.Status;
 const Traversal = types.Traversal;
 const outputSlice = types.outputSlice;
+const ArenaWrite = types.ArenaWrite;
 const refuseInto = types.refuseInto;
 const usearch_keys_view_t = types.abi.keys_view_t;
 const usearch_matches_tape_view_t = types.abi.matches_tape_view_t;
@@ -830,7 +831,6 @@ const usearch_dense_cursor_init_t = extern struct {
     cursor: *?*anyopaque,
 };
 
-
 const usearch_dense_cursor_next_t = extern struct {
     index: ?*anyopaque,
     executor: ?*anyopaque,
@@ -1027,7 +1027,7 @@ extern fn usearch_dense_maxsim(arguments: *usearch_dense_maxsim_t) void;
 /// var arena = try usearch.Arena.init(null);
 /// defer arena.deinit();
 /// const matches = try index.search(try .ofRow(f32, &query), 10, &arena, .{});
-/// const nearest = matches.query(0).keys[0];
+/// const nearest = (try matches.query(0)).keys[0];
 /// ```
 pub const DenseIndex = extern struct {
     /// The opaque `usearch_dense_index_t` the ABI hands back.
@@ -1548,6 +1548,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub fn get(self: Self, comptime Element: type, key: Key, arena: *Arena) Answer(DenseVectors(Element)) {
             var local: Deferred(DenseVectors(Element)) = undefined;
             const held = self.hold(&local, .{});
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_dense_get_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1635,6 +1636,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub fn search(self: Self, queries: RowsView, wanted: usize, arena: *Arena, config: DenseSearchConfig) Answer(Matches) {
             var local: Deferred(Matches) = undefined;
             const held = self.hold(&local, .{ .queries = queries.rows });
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_dense_search_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1710,6 +1712,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
             if (config.shown.len != config.shown_coordinates.len) return self.refused(.shape_mismatch, "The shown keys and coordinates disagree in length");
             var local: Deferred(DenseDraws) = undefined;
             const held = self.hold(&local, .{});
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_dense_sample_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1740,6 +1743,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub fn cursorNext(self: Self, cursor: DenseCursor, wanted: usize, links: bool, arena: *Arena) Answer(DenseCursorBatch) {
             var local: Deferred(DenseCursorBatch) = undefined;
             const held = self.hold(&local, .{});
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_dense_cursor_next_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1760,6 +1764,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub fn searchStreamNext(self: Self, stream: DenseSearchStream, wanted: usize, arena: *Arena) Answer(Matches) {
             var local: Deferred(Matches) = undefined;
             const held = self.hold(&local, .{ .queries = 1 });
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_dense_search_stream_next_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1794,6 +1799,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub fn saveBuffer(self: Self, arena: *Arena, config: DenseSaveBufferConfig) Answer(Monolith) {
             var local: Deferred(Monolith) = undefined;
             const held = self.hold(&local, .{});
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_dense_save_buffer_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1811,6 +1817,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub fn multiply(self: Self, left: RowsView, arena: *Arena, config: DenseMultiplyConfig) Answer(DenseProducts) {
             var local: Deferred(DenseProducts) = undefined;
             const held = self.hold(&local, .{ .queries = left.rows });
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_dense_multiply_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1838,6 +1845,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
                 return self.refused(.shape_mismatch, "The carry holds fewer states than there are query rows");
             var local: Deferred(DenseVectors(Element)) = undefined;
             const held = self.hold(&local, .{ .rows = queries.rows });
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_dense_attend_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1868,6 +1876,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
                 return self.refused(.shape_mismatch, "The rows do not divide into queries of `rows_per_query`");
             var local: Deferred(DenseProducts) = undefined;
             const held = self.hold(&local, .{ .queries = queries.rows / rows_per_query });
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_dense_maxsim_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1948,12 +1957,15 @@ pub fn DenseVectors(comptime Element: type) type {
     return struct {
         const Self = @This();
 
+        write: ArenaWrite = .{},
         view: usearch_rows_view_t = .{},
         /// Rows written.
         rows: usize = 0,
 
         /// One row, `position` below `rows`.
-        pub fn row(self: Self, position: usize) []const Element {
+        pub fn row(self: Self, position: usize) Error![]const Element {
+            try self.write.open();
+            defer self.write.close();
             std.debug.assert(position < self.rows);
             const base: [*]const u8 = @ptrCast(self.view.data.?);
             const first: [*]const Element = @ptrCast(@alignCast(base + position * self.view.stride));
@@ -1961,7 +1973,9 @@ pub fn DenseVectors(comptime Element: type) type {
         }
 
         /// Every row, back to back.
-        pub fn bytes(self: Self) []const u8 {
+        pub fn bytes(self: Self) Error![]const u8 {
+            try self.write.open();
+            defer self.write.close();
             return outputSlice(u8, @ptrCast(self.view.data), 0, self.rows * self.view.stride);
         }
     };
@@ -1969,10 +1983,13 @@ pub fn DenseVectors(comptime Element: type) type {
 
 /// The monolith `DenseIndex.saveBuffer` serialized into an arena, readable until its next call.
 pub const Monolith = struct {
+    write: ArenaWrite = .{},
     view: BytesView = .{ .data = null, .length = 0 },
 
     /// The serialized bytes.
-    pub fn bytes(self: Monolith) []const u8 {
+    pub fn bytes(self: Monolith) Error![]const u8 {
+        try self.write.open();
+        defer self.write.close();
         return outputSlice(u8, self.view.data, 0, self.view.length);
     }
 };
@@ -1981,6 +1998,7 @@ pub const Monolith = struct {
 /// Apache Arrow does: query `i` spans pairs `offsets[i]` up to `offsets[i + 1]` of `keys` and
 /// `scores`, readable until the arena's next call. Mirrors `usearch_matches_tape_view_t`.
 pub const DenseProducts = struct {
+    write: ArenaWrite = .{},
     view: usearch_matches_tape_view_t = .{},
     /// Left-hand rows the call multiplied, or queries it scored.
     queries: usize,
@@ -1992,25 +2010,33 @@ pub const DenseProducts = struct {
 
     /// The pairs of one left row in traversal order, or one query's keys largest first for a
     /// `maxsim`, `position` below `queries`.
-    pub fn query(self: DenseProducts, position: usize) QueryMatches {
-        const tape = self.offsets();
+    pub fn query(self: DenseProducts, position: usize) Error!QueryMatches {
+        try self.write.open();
+        defer self.write.close();
+        const tape = try self.offsets();
         const begin = tape[position];
         const length = tape[position + 1] - begin;
         return .{ .keys = outputSlice(Key, self.view.keys, begin, length), .scores = outputSlice(Distance, self.view.scores, begin, length) };
     }
 
     /// The `queries + 1` offsets.
-    pub fn offsets(self: DenseProducts) []const usize {
+    pub fn offsets(self: DenseProducts) Error![]const usize {
+        try self.write.open();
+        defer self.write.close();
         return outputSlice(usize, self.view.offsets, 0, self.queries + 1);
     }
 
     /// Every pair's indexed key, end to end.
-    pub fn keys(self: DenseProducts) []const Key {
+    pub fn keys(self: DenseProducts) Error![]const Key {
+        try self.write.open();
+        defer self.write.close();
         return outputSlice(Key, self.view.keys, 0, self.written);
     }
 
     /// Every pair's product, positionally paired with `keys`.
-    pub fn scores(self: DenseProducts) []const Distance {
+    pub fn scores(self: DenseProducts) Error![]const Distance {
+        try self.write.open();
+        defer self.write.close();
         return outputSlice(Distance, self.view.scores, 0, self.written);
     }
 };
@@ -2018,18 +2044,23 @@ pub const DenseProducts = struct {
 /// One batch a `DenseCursor` pull wrote into an arena: the keys, and the keys each links to where
 /// asked for, readable until the arena's next call; the vectors come from `DenseIndex.get`.
 pub const DenseCursorBatch = struct {
+    write: ArenaWrite = .{},
     keys_view: usearch_keys_view_t = .{},
     links_view: usearch_keys_tape_view_t = .{},
     /// Entries the pull wrote; zero once the walk is exhausted.
     written: usize = 0,
 
     /// The keys.
-    pub fn keys(self: DenseCursorBatch) []const Key {
+    pub fn keys(self: DenseCursorBatch) Error![]const Key {
+        try self.write.open();
+        defer self.write.close();
         return outputSlice(Key, self.keys_view.data, 0, self.written);
     }
 
     /// The keys one entry links to, `position` below `written`, of a pull that asked for links.
-    pub fn links(self: DenseCursorBatch, position: usize) []const Key {
+    pub fn links(self: DenseCursorBatch, position: usize) Error![]const Key {
+        try self.write.open();
+        defer self.write.close();
         const offsets = self.links_view.offsets.?[0 .. self.written + 1];
         return outputSlice(Key, self.links_view.keys, offsets[position], offsets[position + 1] - offsets[position]);
     }
@@ -2039,6 +2070,7 @@ pub const DenseCursorBatch = struct {
 /// entries it is, the shown or earlier draw it hangs from, and where it is placed, readable until
 /// the arena's next call.
 pub const DenseDraws = struct {
+    write: ArenaWrite = .{},
     keys_view: usearch_keys_view_t = .{},
     entry_ordinals_view: ?[*]const usize = null,
     parents_view: usearch_matches_view_t = .{},
@@ -2047,12 +2079,16 @@ pub const DenseDraws = struct {
     written: usize = 0,
 
     /// The keys drawn.
-    pub fn keys(self: DenseDraws) []const Key {
+    pub fn keys(self: DenseDraws) Error![]const Key {
+        try self.write.open();
+        defer self.write.close();
         return outputSlice(Key, self.keys_view.data, 0, self.written);
     }
 
     /// Which of its key's entries each draw is, in the order `get` writes them.
-    pub fn entryOrdinals(self: DenseDraws) []const usize {
+    pub fn entryOrdinals(self: DenseDraws) Error![]const usize {
+        try self.write.open();
+        defer self.write.close();
         return outputSlice(usize, self.entry_ordinals_view, 0, self.written);
     }
 
@@ -2062,7 +2098,9 @@ pub const DenseDraws = struct {
     }
 
     /// Where each draw is placed, three `f32` apiece.
-    pub fn coordinates(self: DenseDraws) []const [3]f32 {
+    pub fn coordinates(self: DenseDraws) Error![]const [3]f32 {
+        try self.write.open();
+        defer self.write.close();
         return outputSlice([3]f32, @ptrCast(@alignCast(self.coordinates_view.data)), 0, self.written);
     }
 };
@@ -2285,16 +2323,17 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
     defer arena.deinit();
     try std.testing.expectEqual(types.ArenaDescription{ .residency = .ram, .device = null, .vendor = .unknown, .vendor_ordinal = null, .host_access = .readable }, try arena.describe());
     const matches = try index.on(executor).search(try .ofRow(f32, slab[0..dimensions]), 2, &arena, .{ .stats = &stats });
-    try std.testing.expectEqual(@as(usize, 2), matches.query(0).keys.len);
-    try std.testing.expectEqual(keys[0], matches.query(0).keys[0]);
+    try std.testing.expectEqual(@as(usize, 2), (try matches.query(0)).keys.len);
+    try std.testing.expectEqual(keys[0], (try matches.query(0)).keys[0]);
 
     // The caller's own thread answers the same search.
     const again = try index.search(try .ofRow(f32, slab[0..dimensions]), 2, &arena, .{});
-    try std.testing.expectEqual(keys[0], again.query(0).keys[0]);
+    try std.testing.expectEqual(keys[0], (try again.query(0)).keys[0]);
+    try std.testing.expectError(Error.Contended, matches.query(0));
 
     // A zero `wanted` lands the counts alone, so a row reads empty rather than through absent keys.
     const none = try index.search(try .ofRow(f32, slab[0..dimensions]), 0, &arena, .{});
-    try std.testing.expectEqual(@as(usize, 0), none.query(0).keys.len);
+    try std.testing.expectEqual(@as(usize, 0), (try none.query(0)).keys.len);
 
     // A predicate narrows the matches, and still finds the admitted row behind rejected ones.
     const Only = struct {
@@ -2307,10 +2346,10 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
     const admitted = try index.on(executor).search(try .ofRow(f32, slab[0..dimensions]), 2, &arena, .{
         .predicate = .of(&only, Only.admits),
     });
-    try std.testing.expectEqualSlices(Key, keys[2..3], admitted.query(0).keys);
+    try std.testing.expectEqualSlices(Key, keys[2..3], (try admitted.query(0)).keys);
 
     const exported = try index.on(executor).get(f32, keys[1], &arena);
-    try std.testing.expectEqualSlices(f32, &.{ 0, 1, 0 }, exported.row(0));
+    try std.testing.expectEqualSlices(f32, &.{ 0, 1, 0 }, try exported.row(0));
     try std.testing.expectEqual(@as(usize, 1), exported.rows);
     try std.testing.expectEqual(@as(usize, dimensions), exported.view.columns);
     try std.testing.expectEqual(@as(usize, 1), try index.count(keys[1]));
@@ -2318,11 +2357,11 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
     try std.testing.expectEqual(false, try index.on(executor).contains(.fromInteger(99)));
     const absent = try index.get(f32, .fromInteger(99), &arena);
     try std.testing.expectEqual(@as(usize, 0), absent.rows);
-    try std.testing.expectEqual(@as(usize, 0), absent.bytes().len);
+    try std.testing.expectEqual(@as(usize, 0), (try absent.bytes()).len);
 
     // A failed call leaves the arena the caller's, ready for the next one.
     try std.testing.expectError(Error.ConfigMismatch, index.multiply(try .ofRow(f32, slab[0..dimensions]), &arena, .{}));
-    try std.testing.expectEqualSlices(f32, &.{ 0, 0, 1 }, (try index.get(f32, keys[2], &arena)).row(0));
+    try std.testing.expectEqualSlices(f32, &.{ 0, 0, 1 }, try (try index.get(f32, keys[2], &arena)).row(0));
 
     // The width travels with the rows, and the engine refuses one the geometry disagrees with.
     const narrow = [_]f32{ 1, 0 };
@@ -2343,24 +2382,24 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
         var stream = opened;
         defer stream.deinit();
         const pulled = try index.on(executor).searchStreamNext(stream, 2, &arena);
-        try std.testing.expectEqualSlices(Key, keys[0..2], pulled.query(0).keys);
-        try std.testing.expectEqual(@as(usize, 1), (try index.searchStreamNext(stream, 2, &arena)).query(0).keys.len);
+        try std.testing.expectEqualSlices(Key, keys[0..2], (try pulled.query(0)).keys);
+        try std.testing.expectEqual(@as(usize, 1), (try (try index.searchStreamNext(stream, 2, &arena)).query(0)).keys.len);
         // A drained walk answers an empty row, as a pull of zero does.
-        try std.testing.expectEqual(@as(usize, 0), (try index.searchStreamNext(stream, 2, &arena)).query(0).keys.len);
+        try std.testing.expectEqual(@as(usize, 0), (try (try index.searchStreamNext(stream, 2, &arena)).query(0)).keys.len);
     } else |failure| try std.testing.expectEqual(Error.Unsupported, failure);
 
     // A cursor walks the keys, `wanted` at a time, and exports their links only when asked.
     var walk = try DenseCursor.init(index, &.{});
     defer walk.deinit();
     const batch = try index.on(executor).cursorNext(walk, 2, false, &arena);
-    try std.testing.expectEqualSlices(Key, keys[0..2], batch.keys());
+    try std.testing.expectEqualSlices(Key, keys[0..2], try batch.keys());
     const rest = try index.cursorNext(walk, 2, false, &arena);
-    try std.testing.expectEqualSlices(Key, keys[2..3], rest.keys());
+    try std.testing.expectEqualSlices(Key, keys[2..3], try rest.keys());
     const drained = try index.cursorNext(walk, 2, false, &arena);
-    try std.testing.expectEqual(@as(usize, 0), drained.keys().len);
+    try std.testing.expectEqual(@as(usize, 0), (try drained.keys()).len);
 
     // A monolith round-trips through memory, and its metadata reads without loading it.
-    const monolith = (try index.on(executor).saveBuffer(&arena, .{})).bytes();
+    const monolith = try (try index.on(executor).saveBuffer(&arena, .{})).bytes();
     try std.testing.expectEqual(frozen, try DenseIndex.metadataReadBuffer(monolith, .{ .executor = executor }));
     var copy = try DenseIndex.loadRamBuffer(monolith, .{ .executor = executor });
     defer copy.deinit();
@@ -2428,8 +2467,8 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
     // A sample draws held keys, each placed in three dimensions, and refuses shown keys without places.
     const draws = try index.on(executor).sample(2, &arena, .{ .seed = 42 });
     try std.testing.expect(draws.written <= 2);
-    for (draws.keys()) |drawn| try std.testing.expect(drawn.asInteger().? >= 1 and drawn.asInteger().? <= 3);
-    try std.testing.expectEqual(draws.written, draws.coordinates().len);
+    for (try draws.keys()) |drawn| try std.testing.expect(drawn.asInteger().? >= 1 and drawn.asInteger().? <= 3);
+    try std.testing.expectEqual(draws.written, (try draws.coordinates()).len);
     try std.testing.expectError(Error.ShapeMismatch, index.sample(2, &arena, .{ .shown = keys[0..1] }));
 }
 
@@ -2445,13 +2484,13 @@ test "a scan scores every entry, so every query finds itself first" {
     var arena: Arena = try .init(null);
     defer arena.deinit();
     const matches = try index.search(try .of(f32, &slab, dimensions), 1, &arena, .{ .traversal = .scan });
-    for (keys, 0..) |key, query| try std.testing.expectEqual(key, matches.query(query).keys[0]);
+    for (keys, 0..) |key, query| try std.testing.expectEqual(key, (try matches.query(query)).keys[0]);
 
     // Sub-byte rows report their own stride, so no width arithmetic happens here.
     const nibbles = try index.get(Scalar.U4x2, keys[3], &arena);
     try std.testing.expectEqual(@as(usize, 2), nibbles.view.stride);
     try std.testing.expectEqual(@as(usize, dimensions), nibbles.view.columns);
-    try std.testing.expectEqual(@as(usize, 2), nibbles.row(0).len);
+    try std.testing.expectEqual(@as(usize, 2), (try nibbles.row(0)).len);
 }
 
 test "a deferred call is the same verb, final once waited on" {
@@ -2482,7 +2521,7 @@ test "a deferred call is the same verb, final once waited on" {
     try index.deferred(executor, &getting).get(f32, keys[1], &arena);
     defer getting.deinit();
     const vectors = try getting.wait();
-    try std.testing.expectEqualSlices(f32, &.{ 0, 1 }, vectors.row(0));
+    try std.testing.expectEqualSlices(f32, &.{ 0, 1 }, try vectors.row(0));
     try std.testing.expectEqual(vectors, try getting.wait());
 
     // Storage is the caller's, so a batch of calls is an array and a reused slot is resubmitted;
@@ -2565,7 +2604,7 @@ test "a running call holds its arena, so another call naming it is contended" {
     try std.testing.expectError(Error.Contended, contending.wait());
     gate.released.store(true, .release);
     const held = try holding.wait();
-    try std.testing.expectEqualSlices(Key, keys[0..1], held.query(0).keys);
+    try std.testing.expectEqualSlices(Key, keys[0..1], (try held.query(0)).keys);
 }
 
 test "a product lands ragged, and a softmax weighs every key the walk scores" {
@@ -2582,19 +2621,19 @@ test "a product lands ragged, and a softmax weighs every key the walk scores" {
     var arena: Arena = try .init(null);
     defer arena.deinit();
     const products = try index.multiply(try .of(f32, &left, dimensions), &arena, .{});
-    const offsets = products.offsets();
+    const offsets = try products.offsets();
     try std.testing.expectEqual(products.written, offsets[2]);
-    try std.testing.expectEqual(products.written, products.keys().len);
-    try std.testing.expectEqual(products.written, products.scores().len);
-    try std.testing.expectEqual(offsets[2] - offsets[1], products.query(1).keys.len);
+    try std.testing.expectEqual(products.written, (try products.keys()).len);
+    try std.testing.expectEqual(products.written, (try products.scores()).len);
+    try std.testing.expectEqual(offsets[2] - offsets[1], (try products.query(1)).keys.len);
     try std.testing.expect(products.required >= products.written);
 
     // A second arena keeps the first product alive past the next one.
     var second: Arena = try .init(null);
     defer second.deinit();
     const cut = try index.multiply(try .of(f32, &left, dimensions), &second, .{ .wanted = 1 });
-    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2 }, cut.offsets());
-    try std.testing.expect(products.keys().len >= cut.keys().len);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2 }, try cut.offsets());
+    try std.testing.expect((try products.keys()).len >= (try cut.keys()).len);
 
     // A graph this small walks every key, so attention is exact over all of them, whether the two
     // query rows are two tokens of one head or one token of two; a key without a row refuses.
@@ -2633,7 +2672,7 @@ test "a product lands ragged, and a softmax weighs every key the walk scores" {
                 partition += weight;
                 for (&mixed, 0..) |*column, position| column.* += weight * values[key * dimensions + position];
             }
-            const attended = outputs.row(query);
+            const attended = try outputs.row(query);
             for (mixed, attended) |column, attended_column|
                 try std.testing.expectApproxEqAbs(column / partition, attended_column, 1e-3 * @max(@abs(column / partition), 1));
             try std.testing.expectApproxEqAbs(maximum, carry[query].maximum_score, 1e-3 * @max(@abs(maximum), 1));
@@ -2652,9 +2691,9 @@ test "a product lands ragged, and a softmax weighs every key the walk scores" {
     try std.testing.expectError(Error.ShapeMismatch, index.attend(f32, try .of(f32, &left, dimensions), .of(f16, {}, Halves.resolve), &arena, .{}));
 
     const documents = try index.maxsim(try .of(f32, &left, dimensions), 2, 4, &arena, .{});
-    try std.testing.expect(documents.query(0).keys.len != 0);
+    try std.testing.expect((try documents.query(0)).keys.len != 0);
     const every = try index.maxsim(try .of(f32, &left, dimensions), 2, 0, &second, .{});
-    try std.testing.expect(every.query(0).keys.len >= documents.query(0).keys.len);
+    try std.testing.expect((try every.query(0)).keys.len >= (try documents.query(0)).keys.len);
     try std.testing.expectError(Error.ShapeMismatch, index.maxsim(try .of(f32, &left, dimensions), 3, 4, &arena, .{}));
 }
 

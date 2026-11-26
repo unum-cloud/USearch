@@ -107,8 +107,10 @@ There is one verb per operation: no allocating twin, no caller buffers, and no d
 Each call rewinds its arena, so the previous call's views die and a steady loop allocates once it reaches its high-water mark.
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own.
-Views stay on the arena's thread, which the compiler checks, and hold the arena alive, but end at its next call: a stale one reads what that call wrote.
-A view cannot be `~Escapable` while its lifetime annotation is still behind an experimental feature flag as of Swift 6.4, so nothing checks which call wrote it.
+Views stay on the arena's thread, which the compiler checks, and hold the arena alive.
+A view read after a later call took its arena fails as `Contended`.
+A slice or segment an accessor returned is valid only until the arena's next call.
+A view cannot be `~Escapable` while its lifetime annotation is still behind an experimental feature flag as of Swift 6.4, so the engine's generation, not the compiler, tells which call wrote it.
 An arena from a VRAM executor serves only that executor's calls, keeping the executor alive until the arena goes. `describe()` reports its device, vendor and `hostAccess`: reading a result in memory the host may not read, as CUDA and ROCm device memory, traps with "the outputs are memory the host may not read", and `description.host()` throws `device` for it first, while Apple's shared memory reads like host pages.
 
 ```swift

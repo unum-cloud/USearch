@@ -257,12 +257,9 @@ typedef struct Executor {
     /** The library's executor as verbs read it, NULL once closed. */
     _Atomic(usearch_executor_t) handle;
 
-    /** The library's executor, freed once nothing holds it. */
+    /** The library's executor this object frees as it dies, which no verb, arena or result can
+     *  race, as each holds the object. */
     usearch_executor_t owned;
-
-    /** One while it is open, plus one per GPU arena it made that is still alive, since each frees
-     *  on its first stream. */
-    atomic_size_t holds;
 } Executor;
 
 /** The memory every output whose length scales with a call lands in, rewound by the next call
@@ -271,8 +268,8 @@ typedef struct Arena {
     PyObject ob_base;
     usearch_arena_t handle;
 
-    /** The @c Executor a GPU arena serves alone, held until the arena is freed; NULL for host
-     *  pages. */
+    /** The @c Executor that made it, held until the arena is freed; NULL for the calling thread's
+     *  host pages. */
     PyObject* executor;
 } Arena;
 
@@ -380,6 +377,10 @@ typedef struct usearch_py_call_t {
 
     /** The @c Arena the outputs land in, held; NULL for a verb with none. */
     PyObject* arena;
+
+    /** The arena's generation this call makes once it takes the arena, which its answer must
+     *  still find. */
+    uint64_t generation;
 
     /** The object the library writes the outputs into and the call answers; NULL answers None. */
     PyObject* result;
@@ -681,18 +682,35 @@ int usearch_py_refuse_host_read(PyObject* arena);
 /** The handle of the @c Arena @p arena, or NULL for none, which the library refuses. */
 usearch_arena_t usearch_py_arena_handle(PyObject* arena);
 
-/** The handle of the @c Arena @p object, or NULL for None; 0, or -1 with a @c TypeError set. */
-int usearch_py_arena_from_object(PyObject* object, usearch_arena_t* handle);
+/**
+ *  @brief The @c Arena a call through @p receiver writes into: @p object, or, for NULL or None, a
+ *      fresh one where the receiver's executor computes, which only the call's result holds.
+ *  @return A new reference, or NULL with an exception set.
+ */
+PyObject* usearch_py_arena_for_call(usearch_py_receiver_t const* receiver, PyObject* object);
 
-/** Holds the @c Arena @p object in @p call, or none for None; 0, or -1 with a @c TypeError set. */
-int usearch_py_call_hold_arena(usearch_py_call_t* call, PyObject* object);
+/** Holds the @c Arena that @c usearch_py_arena_for_call answers in @p call, stamping the generation
+ *  the call makes; 0, or -1 with an exception set. */
+int usearch_py_call_hold_arena(usearch_py_receiver_t const* receiver, usearch_py_call_t* call, PyObject* object);
 
 /**
- *  @brief Holds the @c Arena @p object in @p call, or none for None, and opens its result of
- *      @p type over it, which leads with its arena as @c ArenaBuffer does.
+ *  @brief Holds the arena of @p object in @p call and opens its result of @p type over it, which
+ *      leads with its arena and generation as @c ArenaBuffer does.
  *  @return The result the library writes into, or NULL with an exception set.
  */
-void* usearch_py_call_arena(usearch_py_call_t* call, PyObject* object, PyTypeObject* type);
+void* usearch_py_call_arena(usearch_py_receiver_t const* receiver, usearch_py_call_t* call, PyObject* object,
+                            PyTypeObject* type);
+
+/**
+ *  @brief Opens one export of the arena @p view reads, a result of any type leading with its arena
+ *      and generation, and checks that generation is current, so no call rewinds the memory until
+ *      @c usearch_py_view_export_close.
+ *  @return 0, or -1 with a @c ValueError set once a later call took the arena.
+ */
+int usearch_py_view_export_open(PyObject* view);
+
+/** Closes one export @c usearch_py_view_export_open opened on the arena @p view reads. */
+void usearch_py_view_export_close(PyObject* view);
 
 /** Opens the result of @p type, a report the library writes into, as the answer of @p call; NULL
  *  with an exception set. */
@@ -704,6 +722,9 @@ typedef struct ArenaBuffer {
 
     /** The arena the output lives in, kept alive so the memory outlives every other name for it. */
     PyObject* arena;
+
+    /** The arena's generation the output was made under; any other reads as stale. */
+    uint64_t generation;
 
     /** The rows a call writes into a @c DenseVectors, which hold its scalar and columns; zeroed
      *  for every other output. */
@@ -718,12 +739,16 @@ typedef struct ArenaBuffer {
     int rank;
     Py_ssize_t shape[3];
     Py_ssize_t strides[3];
+
+    /** Reads of @c __cuda_array_interface__; each counts as an export until the view dies. */
+    atomic_size_t cuda_array_interface_reads;
 } ArenaBuffer;
 
 /** A ranked run a verb writes into an arena, the slot the library writes its view into. */
 typedef struct Matches {
     PyObject ob_base;
     PyObject* arena;
+    uint64_t generation;
     usearch_matches_view_t view;
 
     /** Rows in each output, one per query. */
@@ -734,6 +759,7 @@ typedef struct Matches {
 typedef struct DenseProducts {
     PyObject ob_base;
     PyObject* arena;
+    uint64_t generation;
     usearch_matches_tape_view_t view;
 
     /** The left rows or queries, one fewer than the offsets. */
@@ -758,8 +784,8 @@ PyObject* usearch_py_rows_answer(usearch_py_call_t* call);
  *
  *  @return A new reference, or @c NULL with an exception set.
  */
-PyObject* usearch_py_arena_buffer(PyTypeObject* type, PyObject* arena, void const* data, char const* format,
-                                  Py_ssize_t item_bytes, Py_ssize_t const* shape, int rank);
+PyObject* usearch_py_arena_buffer(PyTypeObject* type, PyObject* arena, uint64_t generation, void const* data,
+                                  char const* format, Py_ssize_t item_bytes, Py_ssize_t const* shape, int rank);
 
 /**
  *  @brief A @c DenseVectors over the @p count rows a call wrote packed into the @c Arena @p arena.
@@ -769,16 +795,17 @@ PyObject* usearch_py_arena_buffer(PyTypeObject* type, PyObject* arena, void cons
  *
  *  @return A new reference, or NULL with an exception set.
  */
-PyObject* usearch_py_rows_new(PyObject* arena, usearch_rows_view_t const* rows, size_t count);
+PyObject* usearch_py_rows_new(PyObject* arena, uint64_t generation, usearch_rows_view_t const* rows, size_t count);
 
-/** A new @c Matches over the @p queries a ranked verb wrote into @p arena; NULL with an exception
- *  set. */
-PyObject* usearch_py_matches_new(PyObject* arena, usearch_matches_view_t const* matches, size_t queries);
+/** A new @c Matches over the @p queries a ranked verb wrote into @p arena under @p generation; NULL
+ *  with an exception set. */
+PyObject* usearch_py_matches_new(PyObject* arena, uint64_t generation, usearch_matches_view_t const* matches,
+                                 size_t queries);
 
 /** A new @c DenseProducts over the @p pairs across @p queries left rows or queries @c multiply or
  *  @c maxsim wrote into @p arena, and the pairs it @p required; NULL with an exception set. */
-PyObject* usearch_py_products_new(PyObject* arena, usearch_matches_tape_view_t const* products, size_t queries,
-                                  size_t pairs, size_t required);
+PyObject* usearch_py_products_new(PyObject* arena, uint64_t generation, usearch_matches_tape_view_t const* products,
+                                  size_t queries, size_t pairs, size_t required);
 
 extern char const doc_version[];
 extern char const doc_refuse_host_read[];

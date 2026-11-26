@@ -448,8 +448,8 @@ class UninitializedError(Error):
 class ConfigMismatchError(Error, ValueError):
     """The request contradicts an already-frozen configuration."""
 
-class ContendedError(Error):
-    """An executor, an arena, or a walk is already serving another call."""
+class ContendedError(Error, BufferError):
+    """An executor, an arena, or a walk is serving another call, or an arena's output is still exported."""
 
 class CancelledError(Error):
     """A progress handler stopped the call, which published nothing."""
@@ -492,7 +492,7 @@ class Batch:
       >>> def even(keys, admissions):
       ...     for row in range(len(admissions)):
       ...         admissions[row] = keys[row, 15] % 2 == 0
-      >>> index.search(queries, 10, arena, predicate=usearch.Batch(even))
+      >>> index.search(queries, 10, predicate=usearch.Batch(even))
     """
 
     def __init__(
@@ -550,14 +550,18 @@ class Executor:
     def __exit__(
         self, kind: type[BaseException] | None, value: BaseException | None, traceback: TracebackType | None, /
     ) -> None:
-        """Closes it once its calls finish, or leaves that to its last live GPU arena."""
+        """Closes it for verbs, which raise `UninitializedError` afterwards; its threads live while anything holds it."""
         ...
 
     def __repr__(self) -> str: ...
 
 @final
 class Arena:
-    """The memory every output whose length scales with a call lands in, rewound by each call handed it."""
+    """The memory outputs land in, rewound by each call handed it; a verb given none makes one its result owns.
+
+    A result of an earlier call raises `ValueError` once a later call rewound the arena, and a call naming it while
+    a view of a result is exported raises `ContendedError`. It holds its executor, whose threads live as long as it does.
+    """
 
     def __new__(cls, executor: Executor | None = None, /) -> Self:
         """Makes one where `executor` computes, or host pages for the calling thread."""
@@ -988,8 +992,8 @@ class On[IndexT]:
         self: On[DenseIndex],
         queries: _Tensor,
         wanted: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         expansion_factor: int = 0,
         traversal: Traversal = ...,
@@ -1005,7 +1009,7 @@ class On[IndexT]:
         Args:
           queries (buffer): A (Q, dimensions) matrix of query rows.
           wanted (int): Upper bound on matches per query - the 'k' in 'kANN'.
-          arena (Arena): Where the matches land, rewound by the call.
+          arena (Arena, optional): Where the matches land, rewound by the call; None makes one the result owns.
           expansion_factor (int, optional): Breadth of the candidates; 0 derives it.
           traversal (Traversal, optional): `Traversal.WALK`, the default, walks the graph;
             `Traversal.SCAN` scores every entry exactly, on RAM and NVMe handles.
@@ -1029,7 +1033,7 @@ class On[IndexT]:
           >>> index.reserve(1)
           >>> query = array('d', [0.1, 0.2, 0.3, 0.4])
           >>> index.insert([7], query)
-          >>> key, distance = index.search(query, 1, usearch.Arena())[0][0]
+          >>> key, distance = index.search(query, 1)[0][0]
           >>> int(key)
           7
         """
@@ -1040,8 +1044,8 @@ class On[IndexT]:
         self: On[SequenceIndex],
         queries: _Sequences,
         wanted: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         expansion_factor: int = 0,
         traversal: Traversal = ...,
@@ -1055,8 +1059,8 @@ class On[IndexT]:
         self: On[ShapesIndex],
         queries: _Shapes,
         wanted: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         expansion_factor: int = 0,
         traversal: Traversal = ...,
@@ -1071,8 +1075,8 @@ class On[IndexT]:
         self: On[GeospatialIndex],
         queries: _Tensor,
         wanted: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         relation: GeospatialRelation = ...,
         metres: float = 0.0,
@@ -1110,12 +1114,14 @@ class On[IndexT]:
     @overload
     def count(self: On[GeospatialIndex], key: _KeyLike, /) -> int: ...
     @overload
-    def get(self: On[DenseIndex], key: _KeyLike, arena: Arena, /, *, outputs_dtype: Scalar = ...) -> DenseVectors:
+    def get(
+        self: On[DenseIndex], key: _KeyLike, /, arena: Arena | None = None, *, outputs_dtype: Scalar = ...
+    ) -> DenseVectors:
         """Every vector stored under `key`, in insertion order, and none when the key is absent.
 
         Args:
           key (Key | int | str): The identity to retrieve.
-          arena (Arena): Where the rows land, rewound by the call.
+          arena (Arena, optional): Where the rows land, rewound by the call; None makes one the result owns.
           outputs_dtype (Scalar, optional): The scalar type to export as; converted from storage.
 
         Returns:
@@ -1127,19 +1133,21 @@ class On[IndexT]:
         ...
 
     @overload
-    def get(self: On[SequenceIndex], key: _KeyLike, arena: Arena, /) -> tuple[_ArenaBuffer, _ArenaBuffer]: ...
-    @overload
     def get(
-        self: On[ShapesIndex], key: _KeyLike, arena: Arena, /, *, outputs_dtype: Scalar = ...
+        self: On[SequenceIndex], key: _KeyLike, /, arena: Arena | None = None
     ) -> tuple[_ArenaBuffer, _ArenaBuffer]: ...
     @overload
-    def get(self: On[GeospatialIndex], key: _KeyLike, arena: Arena, /) -> _ArenaBuffer: ...
+    def get(
+        self: On[ShapesIndex], key: _KeyLike, /, arena: Arena | None = None, *, outputs_dtype: Scalar = ...
+    ) -> tuple[_ArenaBuffer, _ArenaBuffer]: ...
+    @overload
+    def get(self: On[GeospatialIndex], key: _KeyLike, /, arena: Arena | None = None) -> _ArenaBuffer: ...
     def multiply(
         self: On[DenseIndex],
         rows: _Tensor,
         wanted: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         expansion_factor: int = 0,
         dtype: Scalar | None = None,
@@ -1156,7 +1164,7 @@ class On[IndexT]:
           rows (buffer): An (R, dimensions) matrix of left-hand rows.
           wanted (int): Upper bound on pairs kept per row, the first ones its walk scored;
             0 keeps every pair.
-          arena (Arena): Where the pairs and their offsets land, rewound by the call.
+          arena (Arena, optional): Where the pairs and their offsets land, rewound by the call; None makes one the result owns.
           expansion_factor (int, optional): Breadth of the candidates; 0 derives it. A wider
             factor widens the emitted pattern, being what the walk's breadth decides.
           dtype (Scalar, optional): Names the left-hand scalar type when the buffer cannot.
@@ -1178,8 +1186,8 @@ class On[IndexT]:
         queries: _Tensor,
         values: _Tensor,
         row_of: Callable[[Key], int | None],
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         head_count: int = 1,
         expansion_factor: int = 0,
@@ -1209,7 +1217,7 @@ class On[IndexT]:
             another width or scalar type. It re-enters Python from the library's threads, so it
             runs under the GIL and serializes the walk. A VRAM walk resolves values on the
             device, where no Python callable runs, so a VRAM arena raises `DeviceError`.
-          arena (Arena): Where the attended rows land, rewound by the call.
+          arena (Arena, optional): Where the attended rows land, rewound by the call; None makes one the result owns.
           head_count (int, optional): The query heads sharing the index's key-value head, and
             with it one walk per token; it must divide Q.
           expansion_factor (int, optional): Breadth of the candidates; 0 derives it. Wider
@@ -1242,8 +1250,8 @@ class On[IndexT]:
         queries: _Tensor,
         rows_per_query: int,
         wanted: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         expansion_factor: int = 0,
         traversal: Traversal = ...,
@@ -1268,7 +1276,7 @@ class On[IndexT]:
             applies as is. The query row count must be a whole multiple of it.
           wanted (int): Upper bound on matches per query - the 'k' over documents, not rows;
             0 keeps every document the query scored.
-          arena (Arena): Where the scored documents land, rewound by the call.
+          arena (Arena, optional): Where the scored documents land, rewound by the call; None makes one the result owns.
           expansion_factor (int, optional): Breadth of the candidates; 0 derives it. Widening it
             nominates more documents, each still scored exactly.
           traversal (Traversal, optional): `Traversal.WALK`, the default, nominates documents by
@@ -1431,8 +1439,8 @@ class On[IndexT]:
     def sample(
         self: On[DenseIndex],
         wanted: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         shown: Sequence[_KeyLike] | _Tensor | None = None,
         shown_coordinates: _Tensor | None = None,
@@ -1451,7 +1459,7 @@ class On[IndexT]:
 
         Args:
           wanted (int): The upper bound on draws.
-          arena (Arena): Where the draws are written, rewound by the call.
+          arena (Arena, optional): Where the draws are written, rewound by the call; None makes one the result owns.
           shown (keys, optional): The keys already shown, never drawn again.
           shown_coordinates (tensor, optional): (len(shown), 3) float32 places of the shown
             keys, the points later draws are placed against.
@@ -1499,13 +1507,18 @@ class On[IndexT]:
     ) -> None: ...
     @overload
     def save_buffer(
-        self: On[DenseIndex], arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0
+        self: On[DenseIndex],
+        /,
+        arena: Arena | None = None,
+        *,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
     ) -> Monolith:
         """Serializes the index as one monolith of every shard, the very bytes `save` writes to
         a `.safegraphs` path.
 
         Args:
-          arena (Arena): Where the monolith lands, rewound by the call.
+          arena (Arena, optional): Where the monolith lands, rewound by the call; None makes one the result owns.
           progress (callable, optional): Called with (completed, total) bytes; returning
             False stops the write and raises `CancelledError`, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
@@ -1516,7 +1529,7 @@ class On[IndexT]:
         Example:
           >>> index = usearch.DenseIndex.init_ram(dimensions=4)
           >>> index.reserve(1)
-          >>> checkpoint = index.save_buffer(usearch.Arena())
+          >>> checkpoint = index.save_buffer()
           >>> usearch.DenseIndex.metadata_read_buffer(checkpoint).dimensions
           4
         """
@@ -1524,17 +1537,32 @@ class On[IndexT]:
 
     @overload
     def save_buffer(
-        self: On[SequenceIndex], arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0
+        self: On[SequenceIndex],
+        /,
+        arena: Arena | None = None,
+        *,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
     ) -> Monolith: ...
     @overload
     def save_buffer(
-        self: On[ShapesIndex], arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0
+        self: On[ShapesIndex],
+        /,
+        arena: Arena | None = None,
+        *,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
     ) -> Monolith: ...
     @overload
     def save_buffer(
-        self: On[GeospatialIndex], arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0
+        self: On[GeospatialIndex],
+        /,
+        arena: Arena | None = None,
+        *,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
     ) -> Monolith: ...
-    def next(self: On[DenseCursor], wanted: int, arena: Arena, /, *, links: bool = False) -> DenseBatch:
+    def next(self: On[DenseCursor], wanted: int, /, arena: Arena | None = None, *, links: bool = False) -> DenseBatch:
         """The next batch of at most `wanted` entries the cursor walks to, in `arena`, blocking on
         the receiver's executor."""
         ...
@@ -1568,8 +1596,8 @@ class On[IndexT]:
     def within(
         self: On[GeospatialIndex],
         queries: _Tensor,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         metres: float = 0.0,
         relation: GeospatialRelation = ...,
@@ -1823,8 +1851,8 @@ class DeferredOn[IndexT]:
         self: DeferredOn[DenseIndex],
         queries: _Tensor,
         wanted: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         expansion_factor: int = 0,
         traversal: Traversal = ...,
@@ -1840,7 +1868,7 @@ class DeferredOn[IndexT]:
         Args:
           queries (buffer): A (Q, dimensions) matrix of query rows.
           wanted (int): Upper bound on matches per query - the 'k' in 'kANN'.
-          arena (Arena): Where the matches land, rewound by the call.
+          arena (Arena, optional): Where the matches land, rewound by the call; None makes one the result owns.
           expansion_factor (int, optional): Breadth of the candidates; 0 derives it.
           traversal (Traversal, optional): `Traversal.WALK`, the default, walks the graph;
             `Traversal.SCAN` scores every entry exactly, on RAM and NVMe handles.
@@ -1864,7 +1892,7 @@ class DeferredOn[IndexT]:
           >>> index.reserve(1)
           >>> query = array('d', [0.1, 0.2, 0.3, 0.4])
           >>> index.insert([7], query)
-          >>> key, distance = index.search(query, 1, usearch.Arena())[0][0]
+          >>> key, distance = index.search(query, 1)[0][0]
           >>> int(key)
           7
         """
@@ -1875,8 +1903,8 @@ class DeferredOn[IndexT]:
         self: DeferredOn[SequenceIndex],
         queries: _Sequences,
         wanted: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         expansion_factor: int = 0,
         traversal: Traversal = ...,
@@ -1890,8 +1918,8 @@ class DeferredOn[IndexT]:
         self: DeferredOn[ShapesIndex],
         queries: _Shapes,
         wanted: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         expansion_factor: int = 0,
         traversal: Traversal = ...,
@@ -1906,8 +1934,8 @@ class DeferredOn[IndexT]:
         self: DeferredOn[GeospatialIndex],
         queries: _Tensor,
         wanted: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         relation: GeospatialRelation = ...,
         metres: float = 0.0,
@@ -1946,13 +1974,13 @@ class DeferredOn[IndexT]:
     def count(self: DeferredOn[GeospatialIndex], key: _KeyLike, /) -> Deferred[int]: ...
     @overload
     def get(
-        self: DeferredOn[DenseIndex], key: _KeyLike, arena: Arena, /, *, outputs_dtype: Scalar = ...
+        self: DeferredOn[DenseIndex], key: _KeyLike, /, arena: Arena | None = None, *, outputs_dtype: Scalar = ...
     ) -> Deferred[DenseVectors]:
         """Every vector stored under `key`, in insertion order, and none when the key is absent.
 
         Args:
           key (Key | int | str): The identity to retrieve.
-          arena (Arena): Where the rows land, rewound by the call.
+          arena (Arena, optional): Where the rows land, rewound by the call; None makes one the result owns.
           outputs_dtype (Scalar, optional): The scalar type to export as; converted from storage.
 
         Returns:
@@ -1965,20 +1993,22 @@ class DeferredOn[IndexT]:
 
     @overload
     def get(
-        self: DeferredOn[SequenceIndex], key: _KeyLike, arena: Arena, /
+        self: DeferredOn[SequenceIndex], key: _KeyLike, /, arena: Arena | None = None
     ) -> Deferred[tuple[_ArenaBuffer, _ArenaBuffer]]: ...
     @overload
     def get(
-        self: DeferredOn[ShapesIndex], key: _KeyLike, arena: Arena, /, *, outputs_dtype: Scalar = ...
+        self: DeferredOn[ShapesIndex], key: _KeyLike, /, arena: Arena | None = None, *, outputs_dtype: Scalar = ...
     ) -> Deferred[tuple[_ArenaBuffer, _ArenaBuffer]]: ...
     @overload
-    def get(self: DeferredOn[GeospatialIndex], key: _KeyLike, arena: Arena, /) -> Deferred[_ArenaBuffer]: ...
+    def get(
+        self: DeferredOn[GeospatialIndex], key: _KeyLike, /, arena: Arena | None = None
+    ) -> Deferred[_ArenaBuffer]: ...
     def multiply(
         self: DeferredOn[DenseIndex],
         rows: _Tensor,
         wanted: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         expansion_factor: int = 0,
         dtype: Scalar | None = None,
@@ -1995,7 +2025,7 @@ class DeferredOn[IndexT]:
           rows (buffer): An (R, dimensions) matrix of left-hand rows.
           wanted (int): Upper bound on pairs kept per row, the first ones its walk scored;
             0 keeps every pair.
-          arena (Arena): Where the pairs and their offsets land, rewound by the call.
+          arena (Arena, optional): Where the pairs and their offsets land, rewound by the call; None makes one the result owns.
           expansion_factor (int, optional): Breadth of the candidates; 0 derives it. A wider
             factor widens the emitted pattern, being what the walk's breadth decides.
           dtype (Scalar, optional): Names the left-hand scalar type when the buffer cannot.
@@ -2017,8 +2047,8 @@ class DeferredOn[IndexT]:
         queries: _Tensor,
         values: _Tensor,
         row_of: Callable[[Key], int | None],
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         head_count: int = 1,
         expansion_factor: int = 0,
@@ -2048,7 +2078,7 @@ class DeferredOn[IndexT]:
             another width or scalar type. It re-enters Python from the library's threads, so it
             runs under the GIL and serializes the walk. A VRAM walk resolves values on the
             device, where no Python callable runs, so a VRAM arena raises `DeviceError`.
-          arena (Arena): Where the attended rows land, rewound by the call.
+          arena (Arena, optional): Where the attended rows land, rewound by the call; None makes one the result owns.
           head_count (int, optional): The query heads sharing the index's key-value head, and
             with it one walk per token; it must divide Q.
           expansion_factor (int, optional): Breadth of the candidates; 0 derives it. Wider
@@ -2081,8 +2111,8 @@ class DeferredOn[IndexT]:
         queries: _Tensor,
         rows_per_query: int,
         wanted: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         expansion_factor: int = 0,
         traversal: Traversal = ...,
@@ -2107,7 +2137,7 @@ class DeferredOn[IndexT]:
             applies as is. The query row count must be a whole multiple of it.
           wanted (int): Upper bound on matches per query - the 'k' over documents, not rows;
             0 keeps every document the query scored.
-          arena (Arena): Where the scored documents land, rewound by the call.
+          arena (Arena, optional): Where the scored documents land, rewound by the call; None makes one the result owns.
           expansion_factor (int, optional): Breadth of the candidates; 0 derives it. Widening it
             nominates more documents, each still scored exactly.
           traversal (Traversal, optional): `Traversal.WALK`, the default, nominates documents by
@@ -2276,8 +2306,8 @@ class DeferredOn[IndexT]:
     def sample(
         self: DeferredOn[DenseIndex],
         wanted: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         shown: Sequence[_KeyLike] | _Tensor | None = None,
         shown_coordinates: _Tensor | None = None,
@@ -2296,7 +2326,7 @@ class DeferredOn[IndexT]:
 
         Args:
           wanted (int): The upper bound on draws.
-          arena (Arena): Where the draws are written, rewound by the call.
+          arena (Arena, optional): Where the draws are written, rewound by the call; None makes one the result owns.
           shown (keys, optional): The keys already shown, never drawn again.
           shown_coordinates (tensor, optional): (len(shown), 3) float32 places of the shown
             keys, the points later draws are placed against.
@@ -2354,13 +2384,18 @@ class DeferredOn[IndexT]:
     ) -> Deferred[None]: ...
     @overload
     def save_buffer(
-        self: DeferredOn[DenseIndex], arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0
+        self: DeferredOn[DenseIndex],
+        /,
+        arena: Arena | None = None,
+        *,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
     ) -> Deferred[Monolith]:
         """Serializes the index as one monolith of every shard, the very bytes `save` writes to
         a `.safegraphs` path.
 
         Args:
-          arena (Arena): Where the monolith lands, rewound by the call.
+          arena (Arena, optional): Where the monolith lands, rewound by the call; None makes one the result owns.
           progress (callable, optional): Called with (completed, total) bytes; returning
             False stops the write and raises `CancelledError`, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
@@ -2371,7 +2406,7 @@ class DeferredOn[IndexT]:
         Example:
           >>> index = usearch.DenseIndex.init_ram(dimensions=4)
           >>> index.reserve(1)
-          >>> checkpoint = index.save_buffer(usearch.Arena())
+          >>> checkpoint = index.save_buffer()
           >>> usearch.DenseIndex.metadata_read_buffer(checkpoint).dimensions
           4
         """
@@ -2379,17 +2414,27 @@ class DeferredOn[IndexT]:
 
     @overload
     def save_buffer(
-        self: DeferredOn[SequenceIndex], arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0
+        self: DeferredOn[SequenceIndex],
+        /,
+        arena: Arena | None = None,
+        *,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
     ) -> Deferred[Monolith]: ...
     @overload
     def save_buffer(
-        self: DeferredOn[ShapesIndex], arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0
+        self: DeferredOn[ShapesIndex],
+        /,
+        arena: Arena | None = None,
+        *,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
     ) -> Deferred[Monolith]: ...
     @overload
     def save_buffer(
         self: DeferredOn[GeospatialIndex],
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         progress: _Progress | None = None,
         progress_steps: int = 0,
@@ -2398,8 +2443,8 @@ class DeferredOn[IndexT]:
     def within(
         self: DeferredOn[GeospatialIndex],
         queries: _Tensor,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         metres: float = 0.0,
         relation: GeospatialRelation = ...,
@@ -2727,7 +2772,7 @@ class DenseCursor:
         """The receiver whose `next` blocks on `executor`; the cursor keeps none."""
         ...
 
-    def next(self, wanted: int, arena: Arena, /, *, links: bool = False) -> DenseBatch:
+    def next(self, wanted: int, /, arena: Arena | None = None, *, links: bool = False) -> DenseBatch:
         """The next batch of at most `wanted` entries, in `arena`, on the calling thread."""
         ...
 
@@ -2745,7 +2790,7 @@ class DenseSearchStream:
     """A resumable best-first stream of matches for one query, pulled by `next`."""
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
-    def next(self, wanted: int, arena: Arena, /) -> Matches:
+    def next(self, wanted: int, /, arena: Arena | None = None) -> Matches:
         """The next at most `wanted` matches, as one query in `arena`."""
         ...
 
@@ -2956,8 +3001,8 @@ class DenseIndex:
         self,
         queries: _Tensor,
         wanted: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         expansion_factor: int = 0,
         traversal: Traversal = ...,
@@ -2974,7 +3019,7 @@ class DenseIndex:
         """How many entries share `key`."""
         ...
 
-    def get(self, key: _KeyLike, arena: Arena, /, *, outputs_dtype: Scalar = ...) -> DenseVectors:
+    def get(self, key: _KeyLike, /, arena: Arena | None = None, *, outputs_dtype: Scalar = ...) -> DenseVectors:
         """Every vector stored under `key`, empty when it is absent."""
         ...
 
@@ -2982,8 +3027,8 @@ class DenseIndex:
         self,
         rows: _Tensor,
         wanted: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         expansion_factor: int = 0,
         dtype: Scalar | None = None,
@@ -2999,8 +3044,8 @@ class DenseIndex:
         queries: _Tensor,
         values: _Tensor,
         row_of: Callable[[Key], int | None],
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         head_count: int = 1,
         expansion_factor: int = 0,
@@ -3021,8 +3066,8 @@ class DenseIndex:
         queries: _Tensor,
         rows_per_query: int,
         wanted: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         expansion_factor: int = 0,
         traversal: Traversal = ...,
@@ -3070,8 +3115,8 @@ class DenseIndex:
     def sample(
         self,
         wanted: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         shown: Sequence[_KeyLike] | _Tensor | None = None,
         shown_coordinates: _Tensor | None = None,
@@ -3089,7 +3134,9 @@ class DenseIndex:
         """Writes a checkpoint in the layout the extension picks."""
         ...
 
-    def save_buffer(self, arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0) -> Monolith:
+    def save_buffer(
+        self, /, arena: Arena | None = None, *, progress: _Progress | None = None, progress_steps: int = 0
+    ) -> Monolith:
         """Serializes one monolith into an arena."""
         ...
 
@@ -3414,8 +3461,8 @@ class SequenceIndex:
         self,
         queries: _Sequences,
         wanted: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         expansion_factor: int = 0,
         traversal: Traversal = ...,
@@ -3431,7 +3478,7 @@ class SequenceIndex:
         """How many entries share `key`."""
         ...
 
-    def get(self, key: _KeyLike, arena: Arena, /) -> tuple[_ArenaBuffer, _ArenaBuffer]:
+    def get(self, key: _KeyLike, /, arena: Arena | None = None) -> tuple[_ArenaBuffer, _ArenaBuffer]:
         """The (offsets, bytes) tape of every sequence stored under `key`."""
         ...
 
@@ -3467,7 +3514,9 @@ class SequenceIndex:
         """Writes a checkpoint in the layout the extension picks."""
         ...
 
-    def save_buffer(self, arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0) -> Monolith:
+    def save_buffer(
+        self, /, arena: Arena | None = None, *, progress: _Progress | None = None, progress_steps: int = 0
+    ) -> Monolith:
         """Serializes the index into an arena."""
         ...
 
@@ -3727,8 +3776,8 @@ class ShapesIndex:
         self,
         queries: _Shapes,
         wanted: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         expansion_factor: int = 0,
         traversal: Traversal = ...,
@@ -3745,7 +3794,9 @@ class ShapesIndex:
         """How many entries share `key`."""
         ...
 
-    def get(self, key: _KeyLike, arena: Arena, /, *, outputs_dtype: Scalar = ...) -> tuple[_ArenaBuffer, _ArenaBuffer]:
+    def get(
+        self, key: _KeyLike, /, arena: Arena | None = None, *, outputs_dtype: Scalar = ...
+    ) -> tuple[_ArenaBuffer, _ArenaBuffer]:
         """The (offsets, points) tape of every shape stored under `key`."""
         ...
 
@@ -3781,7 +3832,9 @@ class ShapesIndex:
         """Writes a checkpoint in the layout the extension picks."""
         ...
 
-    def save_buffer(self, arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0) -> Monolith:
+    def save_buffer(
+        self, /, arena: Arena | None = None, *, progress: _Progress | None = None, progress_steps: int = 0
+    ) -> Monolith:
         """Serializes the index into an arena."""
         ...
 
@@ -4026,8 +4079,8 @@ class GeospatialIndex:
         self,
         queries: _Tensor,
         wanted: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         relation: GeospatialRelation = ...,
         metres: float = 0.0,
@@ -4045,8 +4098,8 @@ class GeospatialIndex:
     def within(
         self,
         queries: _Tensor,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         metres: float = 0.0,
         relation: GeospatialRelation = ...,
@@ -4064,7 +4117,7 @@ class GeospatialIndex:
         """How many observations share `key`."""
         ...
 
-    def get(self, key: _KeyLike, arena: Arena, /) -> _ArenaBuffer:
+    def get(self, key: _KeyLike, /, arena: Arena | None = None) -> _ArenaBuffer:
         """The (count, 11) float64 observations stored under `key`."""
         ...
 
@@ -4100,7 +4153,9 @@ class GeospatialIndex:
         """Writes a checkpoint in the layout the extension picks."""
         ...
 
-    def save_buffer(self, arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0) -> Monolith:
+    def save_buffer(
+        self, /, arena: Arena | None = None, *, progress: _Progress | None = None, progress_steps: int = 0
+    ) -> Monolith:
         """Serializes the index into an arena."""
         ...
 

@@ -44,8 +44,7 @@ index.reserve(len(vectors))  # Optional capacity hint; inserts grow on demand
 index.insert(np.arange(len(vectors)), vectors)  # On the calling thread
 
 pool = usearch.Executor.for_ram()  # The workers a receiver names
-arena = usearch.Arena(pool)  # The memory results land in, made where the pool computes
-matches = index.on(pool).search(vectors[:100], 10, arena)  # Blocking, on the pool
+matches = index.on(pool).search(vectors[:100], 10)  # Blocking, on the pool, into memory the result owns
 assert len(index) == 10_000
 assert np.asarray(matches.distances).shape == (100, 10)
 key, distance = matches[0][0]
@@ -58,8 +57,8 @@ The index runs a verb on the calling thread, `index.on(executor)` answers a `use
 The receiver's type alone chooses the completion, so all three offer the same verbs with the same arguments, and no verb takes an `executor=` keyword.
 
 ```python
-async def nearest(pool, arena):
-    call = index.deferred(pool).search(queries, 10, arena)  # a usearch.Deferred, submitted now
+async def nearest(pool):
+    call = index.deferred(pool).search(queries, 10)  # a usearch.Deferred, submitted now
     call.status  # usearch.Status.DEFERRED until final
     return await call  # or, outside a coroutine: call.wait()
 ```
@@ -69,8 +68,8 @@ Two calls on two executors run together, and `asyncio.gather` awaits both:
 
 ```python
 async def fan_out(left, left_pool, right, right_pool):
-    near_left = left.deferred(left_pool).search(queries, 10, usearch.Arena(left_pool))
-    near_right = right.deferred(right_pool).search(queries, 10, usearch.Arena(right_pool))
+    near_left = left.deferred(left_pool).search(queries, 10)
+    near_right = right.deferred(right_pool).search(queries, 10)
     return await asyncio.gather(near_left, near_right)  # both submitted before either is awaited
 ```
 
@@ -92,7 +91,7 @@ pool.drain(usearch.Mood.SPINNING)  # Waits, then keeps idle workers hot
 `memory_domains` are the NUMA nodes the threads stay local to, and `for_nvme` opens one submission ring per worker.
 One call holds an executor at a time and nothing queues, so a second call raises `ContendedError`.
 A deferred call on a pool of several threads runs on its thread 0, so polling `status` alone finishes it, and its callbacks run on the pool's threads under the GIL.
-Used as a context manager, an executor waits for its calls and closes on exit.
+Used as a context manager, an executor closes on exit: receivers naming it refuse calls afterwards with `UninitializedError`, while its threads or streams are freed only once the last arena, result and receiver holding it is gone, so results stay readable after the `with` block ends.
 
 ### Concurrency
 
@@ -102,17 +101,19 @@ An exception escaping a `progress`, `predicate` or `row_of` callback goes to `sy
 
 ## Arenas
 
-Every output whose length only the call knows lands in a `usearch.Arena` you pass, and the verb answers a view over it without copying.
-`usearch.Arena(executor)` places it where that executor computes, and `usearch.Arena()` makes host pages for the calling thread.
-Each call rewinds its arena, so a steady loop allocates once and the previous call's views go stale; copy a result with `np.array(...)` or pass the next call another arena.
-An arena serves one call at a time, so each deferred call needs its own.
+Every output whose length only the call knows lands in a `usearch.Arena`, and the verb answers a view over it without copying.
+A call given no arena makes a fresh one on its executor that only its result holds, so that result lives as long as you keep it.
+Passing an arena opts into reuse: `usearch.Arena(executor)` places it where that executor computes, `usearch.Arena()` makes host pages for the calling thread, and each call naming it rewinds it, so a steady loop allocates once.
+A result must be copied, with `np.array(...)`, or dropped before the next call on its arena:
+a result of an earlier call raises `ValueError` once read, and while a view of one is exported - a `memoryview` or NumPy array, a DLPack tensor, an Arrow array, or a read `__cuda_array_interface__` - the next call raises `ContendedError`, which is also a `BufferError`.
+An arena serves one call at a time, so each deferred call needs its own, and it holds its executor, whose threads live as long as the arena does.
 A VRAM arena holds device memory and serves only its executor's calls, its views exporting `__cuda_array_interface__`, while every view exports `__dlpack__`, so `torch.from_dlpack(vectors)` takes it in place.
 `arena.describe()` names the residency, the device, its vendor and vendor ordinal, and `host_access`: where it reads `HostAccess.REFUSED`, the buffer protocol raises `BufferError` and the accessors that read on the host, such as `matches[0]`, raise `DeviceError`.
 
 ```python
-found, fetched = usearch.Arena(), usearch.Arena()  # Two live results, two arenas
-for key, _ in index.search(query, 10, found)[0]:
-    rerank(key, index.get(key, fetched))
+fetched = usearch.Arena()  # One arena, rewound by every `get`
+for key, _ in index.search(query, 10)[0]:  # The matches own their memory
+    rerank(np.array(index.get(key, fetched)))  # A copy, so the next `get` may rewind
 ```
 
 `search` answers a `usearch.Matches`, `get` and `attend` a `usearch.DenseVectors`, a cursor's batches a `usearch.DenseBatch`, `multiply` and `maxsim` a `usearch.DenseProducts`, and `save_buffer` a `usearch.Monolith`.
@@ -140,7 +141,7 @@ Every failure raises a subclass of `usearch.Error`, a `RuntimeError` holding the
 
 ```python
 try:
-    index.on(pool).search(queries, 10, arena, progress=lambda completed, total: completed < 100)
+    index.on(pool).search(queries, 10, progress=lambda completed, total: completed < 100)
 except usearch.CancelledError:
     ...  # The handler stopped the call, which published nothing
 except usearch.Error as error:
@@ -212,7 +213,7 @@ A ranked verb answers a `Matches` that reads through to three outputs in the are
 
 ```python
 stats = usearch.DenseTraversalStats()  # Overwritten by every call, summed with `+=`
-matches = index.on(pool).search(queries, 10, arena, expansion_factor=64, stats=stats)
+matches = index.on(pool).search(queries, 10, expansion_factor=64, stats=stats)
 matches.keys  # shape (queries, columns, 16), format 'B', columns at most 10
 matches.distances  # shape (queries, columns), format 'd'
 matches.counts  # shape (queries,)
@@ -229,15 +230,15 @@ It re-enters Python from the library's threads, so it runs under the GIL and ser
 A plain callable is asked about one `Key` at a time and is cheap, while `usearch.Batch(handler)` is asked once per traversal round about every candidate the round gathered, for handlers that pay per call:
 
 ```python
-index.on(pool).search(queries, 10, arena, predicate=lambda key: int(key) % 2 == 0)
+index.on(pool).search(queries, 10, predicate=lambda key: int(key) % 2 == 0)
 
 
 def even(keys, admissions):  # a (count, 16) view of key bytes, and a (count,) view to write 1 into
     np.asarray(admissions)[:] = keys_to_integers(keys) % 2 == 0
 
 
-index.on(pool).search(queries, 10, arena, predicate=usearch.Batch(even))
-index.on(pool).search(queries, 10, arena, predicate=usearch.Batch(even, cost=usearch.PredicateCost.CHEAP))
+index.on(pool).search(queries, 10, predicate=usearch.Batch(even))
+index.on(pool).search(queries, 10, predicate=usearch.Batch(even, cost=usearch.PredicateCost.CHEAP))
 ```
 
 Both views are valid only for the call, and the admissions start as rejections.
@@ -247,8 +248,9 @@ A `progress` handler is called with `(completed, total)` units, and `False` stop
 ### Retrieval and Streaming
 
 ```python
-index.get(42, arena)  # a (count, dimensions) `DenseVectors` of what is stored under it
+index.get(42)  # a (count, dimensions) `DenseVectors` of what is stored under it
 cursor = index.cursor()  # entry scan, pulled in batches; `cursor([42])` walks out from key 42
+arena = usearch.Arena(pool)  # One arena every pull rewinds, so each batch is consumed before the next
 while batch := cursor.on(pool).next(1024, arena, links=True):  # each pull names its executor
     ...  # batch.keys, and batch.links as (offsets, keys) when asked; vectors come from `get`
 with index.on(pool).search_stream(query) as stream:  # resumable best-first stream
@@ -287,7 +289,7 @@ A `usearch.DenseReshardPlan` resumes a stopped reshard as a refine plan does.
 ### Sampling
 
 ```python
-drawn = index.on(pool).sample(256, arena, shown=shown, shown_coordinates=xyz, focus=near, seed=42)
+drawn = index.on(pool).sample(256, shown=shown, shown_coordinates=xyz, focus=near, seed=42)
 ```
 
 `sample` draws keys around `focus`, each hanging from a shown or earlier draw, and places them in three dimensions beside the `shown` keys.
@@ -299,7 +301,7 @@ The `Sample` holds `keys`, `entry_ordinals`, `parents` and `coordinates`, and a 
 It needs an inner-product index, as `maxsim` and `attend` do, and the pairs come back ragged, with Apache Arrow offsets around them:
 
 ```python
-products = index.on(pool).multiply(rows, 0, arena)  # 0 keeps every pair; a bound keeps the first ones
+products = index.on(pool).multiply(rows, 0)  # 0 keeps every pair; a bound keeps the first ones
 offsets = np.asarray(products.offsets)  # (rows + 1,): left row `i` spans offsets[i] to offsets[i + 1]
 columns = np.asarray(products.keys)  # (pairs, 16): which indexed entry each pair names
 scores = np.asarray(products.scores)  # (pairs,): the exact products
@@ -313,7 +315,7 @@ It answers the ragged run `multiply` does, one run of documents per query, large
 
 ```python
 tokens = DenseIndex.init_ram(dimensions=128, metric=DenseMetric.INNER, values_per_key=32)
-documents = tokens.on(pool).maxsim(query_tokens, 32, 10, arena)  # 32 token rows per query, up to 10 documents
+documents = tokens.on(pool).maxsim(query_tokens, 32, 10)  # 32 token rows per query, up to 10 documents
 ```
 
 ### Attention
@@ -324,7 +326,7 @@ The index holds one layer's keys for one key-value head, `row_of` names the row 
 ```python
 carry = np.zeros((len(queries), 2), dtype=np.float32)
 row_of = {key: row for row, key in enumerate(context_keys)}.get  # a scored Key in, its row of `values` out
-outputs = index.on(pool).attend(queries, values, row_of, arena, head_count=8, outputs_dtype=Scalar.BF16, carry=carry)
+outputs = index.on(pool).attend(queries, values, row_of, head_count=8, outputs_dtype=Scalar.BF16, carry=carry)
 ```
 
 A `row_of` answering `None` raises `ShapeMismatchError`, and it runs under the GIL, while a VRAM arena, whose walk no Python callable can join, raises `DeviceError`.
@@ -351,12 +353,12 @@ Its verbs and receivers are the dense ones, and a batch is a list of `str` or by
 
 ```python
 import numpy as np
-from usearch import Arena, SequenceIndex, SequenceMetric
+from usearch import SequenceIndex, SequenceMetric
 from usearch.keys import keys_to_integers
 
 words = SequenceIndex.init_ram(SequenceMetric.LEVENSHTEIN_UTF8)
 words.insert([1, 2, 3], ["kitten", b"sitting", bytearray(b"mitten")])
-matches = words.search(["sitting"], 1, Arena())
+matches = words.search(["sitting"], 1)
 assert keys_to_integers(np.asarray(matches.keys)[0]).tolist() == [2]
 assert np.asarray(matches.distances)[0, 0] == 0
 ```
@@ -416,9 +418,9 @@ Every arena output speaks the Arrow PyCapsule protocol, exporting its rows or pa
 ```python
 import pyarrow as pa
 
-vectors = index.get(42, arena)  # a `DenseVectors`
+vectors = index.get(42)  # a `DenseVectors`
 column = pa.array(vectors)  # a fixed-size list over the arena's pages, which the capsule keeps alive
-matches = index.search(column, 10, other)  # the same rows, read in place as queries
+matches = index.search(column, 10)  # the same rows, read in place as queries
 ```
 
 `usearch.DenseVectors`, `usearch.Matches` and `usearch.DenseProducts` answer `__arrow_c_array__`, `__arrow_c_device_array__` and `__arrow_c_stream__`, the device form carrying VRAM arenas as they are, and every matrix or key argument accepts an object answering `__arrow_c_array__` or `__arrow_c_stream__`, such as a `pyarrow` array, a chunked array or a `polars` series.
@@ -432,7 +434,7 @@ Sequences and shapes cross as Python values, so the tape converters stay unbound
 ```python
 from usearch.eval import self_recall
 
-stats = self_recall(index.on(pool), usearch.Arena(pool))
+stats = self_recall(index.on(pool))
 print(stats.mean_recall, stats.mean_efficiency)
 ```
 
@@ -448,6 +450,6 @@ print(stats.mean_recall, stats.mean_efficiency)
 - __Deferred calls are awaitables.__
   `await` polls `usearch_outcome_status` and re-polls through `loop.call_soon` on the running loop, and `wait` blocks in `usearch_outcome_wait`.
 - __Reference counting is the lifetime.__
-  Releasing a `Deferred` waits for its call, and a view over an arena lasts until the next call rewinds it.
+  Releasing a `Deferred` waits for its call, a view keeps its result, arena and executor alive, and an arena refuses the next call while a view of it is exported.
 - __Language idioms over parallel APIs.__
   The buffer protocol, DLPack, `in`, struct sequences, context managers and `+=` take the place of helper methods.

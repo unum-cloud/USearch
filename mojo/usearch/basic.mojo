@@ -16,7 +16,7 @@ Date: November 16, 2026
 from std.ffi import c_int, c_size_t
 from std.sys.info import size_of
 
-from usearch.types import Address, Error, NULL_ADDRESS, ScalarKind, Status, _anchor, _in_arena
+from usearch.types import Address, ArenaRead, Error, NULL_ADDRESS, ScalarKind, Status, _anchor, _in_arena
 
 
 @fieldwise_init
@@ -188,6 +188,9 @@ struct TapeEntries[dtype: DType, origin: MutOrigin, width: Int = 1](Movable, Siz
     var written: Int
     """Entries written; zero when the key is absent."""
 
+    var viewing: ArenaRead
+    """The arena the result reads and the generation the call that wrote it brought it to."""
+
     def __len__(self) -> Int:
         """The entries written.
 
@@ -196,7 +199,7 @@ struct TapeEntries[dtype: DType, origin: MutOrigin, width: Int = 1](Movable, Siz
         """
         return self.written
 
-    def __getitem__(ref self, entry: Int) -> Span[Scalar[Self.dtype], origin_of(self)]:
+    def __getitem__(ref self, entry: Int) raises Error -> Span[Scalar[Self.dtype], origin_of(self)]:
         """One entry's scalars, `width` per element, viewed from the arena this result reads.
 
         Args:
@@ -205,11 +208,14 @@ struct TapeEntries[dtype: DType, origin: MutOrigin, width: Int = 1](Movable, Siz
         Returns:
             The entry's scalars.
         """
+        self.viewing.open("TapeEntries.__getitem__")
         var begin = self._offset(entry)
-        return _in_arena[Scalar[Self.dtype], origin_of(self)](
+        var viewed = _in_arena[Scalar[Self.dtype], origin_of(self)](
             self.view.data + begin * Self.width * size_of[Scalar[Self.dtype]](),
             (self._offset(entry + 1) - begin) * Self.width,
         )
+        self.viewing.close()
+        return viewed
 
     def _offset(self, position: Int) -> Int:
         """One offset of the tape, as wide as `layout` says."""

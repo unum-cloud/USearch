@@ -48,7 +48,7 @@ extension CallState {
 /// next call: a sequence's bytes, or a shape's coordinates, `x`, `y` and `z` of each point in turn.
 public struct TapeEntries<Value: ScalarValue>: RandomAccessCollection {
     /// The arena the tape lives in, held so it outlives no release of it.
-    let arena: Arena
+    let arena: ArenaWrite
     /// The tape the call wrote.
     var tape = usearch_tape_view_t()
     /// One past the last entry the call wrote.
@@ -61,13 +61,14 @@ public struct TapeEntries<Value: ScalarValue>: RandomAccessCollection {
 
     /// One entry's values, as many as its elements span.
     public subscript(entry: Int) -> DenseVectors<Value>.Row {
-        boundsCheck(entry, below: endIndex, in: arena)
-        let (first, last) = (offset(entry), offset(entry + 1))
-        return DenseVectors<Value>.Row(
-            arena: arena,
-            base: tape.data! + first * valuesPerElement * MemoryLayout<Value>.stride,
-            endIndex: (last - first) * valuesPerElement
-        )
+        arena.read(entry, below: endIndex) {
+            let (first, last) = (offset(entry), offset(entry + 1))
+            return DenseVectors<Value>.Row(
+                arena: arena,
+                base: tape.data! + first * valuesPerElement * MemoryLayout<Value>.stride,
+                endIndex: (last - first) * valuesPerElement
+            )
+        }
     }
 
     /// The element an entry starts at, in whichever width the library wrote the offsets.

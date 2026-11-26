@@ -49,6 +49,7 @@ from usearch.library import Library
 from usearch.types import (
     Address,
     Arena,
+    ArenaRead,
     BytesView,
     Call,
     CallHead,
@@ -657,7 +658,7 @@ struct _ShapesReserveCall(Call):
             c_size_t(self.points),
         }
 
-    def conclude(deinit self, outputs: Unwritten) -> NoneType:
+    def conclude(deinit self, outputs: Unwritten, viewing: ArenaRead) -> NoneType:
         return None
 
 
@@ -677,7 +678,7 @@ struct _ShapesClearCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion}
 
-    def conclude(deinit self, outputs: Unwritten) -> NoneType:
+    def conclude(deinit self, outputs: Unwritten, viewing: ArenaRead) -> NoneType:
         return None
 
 
@@ -697,7 +698,7 @@ struct _ShapesDescribeCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, outputs}
 
-    def conclude(deinit self, outputs: ShapesIndexDescription) -> ShapesIndexDescription:
+    def conclude(deinit self, outputs: ShapesIndexDescription, viewing: ArenaRead) -> ShapesIndexDescription:
         return outputs
 
 
@@ -718,7 +719,7 @@ struct _ShapesCountCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, KeyBytes.of(self.key), outputs}
 
-    def conclude(deinit self, outputs: ShapesKeyStats) -> ShapesKeyStats:
+    def conclude(deinit self, outputs: ShapesKeyStats, viewing: ArenaRead) -> ShapesKeyStats:
         return outputs
 
 
@@ -763,8 +764,11 @@ struct _ShapesGetCall[dtype: DType, kind: ScalarKind, origin: MutOrigin](Call):
             Self.kind,
         }
 
-    def conclude(deinit self, outputs: ShapesGetOutputs) -> Self.Result:
-        return {outputs.shapes, Int(outputs.written)}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: ShapesGetOutputs, viewing: ArenaRead) -> Self.Result:
+        return {outputs.shapes, Int(outputs.written), viewing}
 
 
 @fieldwise_init
@@ -804,7 +808,7 @@ struct _ShapesInsertCall(Call):
     def lengths_agree(self) -> Bool:
         return self.keys_count == self.count
 
-    def conclude(deinit self, outputs: Unwritten) -> NoneType:
+    def conclude(deinit self, outputs: Unwritten, viewing: ArenaRead) -> NoneType:
         return None
 
 
@@ -840,7 +844,7 @@ struct _ShapesRefineCall(Call):
             self.phase,
         }
 
-    def conclude(deinit self, outputs: DenseRefineReport) -> DenseRefineReport:
+    def conclude(deinit self, outputs: DenseRefineReport, viewing: ArenaRead) -> DenseRefineReport:
         return outputs
 
 
@@ -861,7 +865,7 @@ struct _ShapesRefinePlanFinishCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, self.plan, outputs}
 
-    def conclude(deinit self, outputs: DenseRefineReport) -> DenseRefineReport:
+    def conclude(deinit self, outputs: DenseRefineReport, viewing: ArenaRead) -> DenseRefineReport:
         return outputs
 
 
@@ -881,7 +885,7 @@ struct _ShapesHealthCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, outputs}
 
-    def conclude(deinit self, outputs: DenseReachability) -> DenseReachability:
+    def conclude(deinit self, outputs: DenseReachability, viewing: ArenaRead) -> DenseReachability:
         return outputs
 
 
@@ -946,7 +950,7 @@ struct _ShapesReshardCall(Call):
             self.phase,
         }
 
-    def conclude(deinit self, outputs: DenseRefineReport) -> DenseRefineReport:
+    def conclude(deinit self, outputs: DenseRefineReport, viewing: ArenaRead) -> DenseRefineReport:
         return outputs
 
 
@@ -967,7 +971,7 @@ struct _ShapesReshardPlanFinishCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.executor, head.outcome, head.completion, self.plan, outputs}
 
-    def conclude(deinit self, outputs: DenseRefineReport) -> DenseRefineReport:
+    def conclude(deinit self, outputs: DenseRefineReport, viewing: ArenaRead) -> DenseRefineReport:
         return outputs
 
 
@@ -1021,8 +1025,11 @@ struct _ShapesSampleCall[origin: MutOrigin](Call):
     def lengths_agree(self) -> Bool:
         return self.shown_coordinates_count == 3 * self.shown_count
 
-    def conclude(deinit self, outputs: DenseSampleOutputs) -> Self.Result:
-        return {outputs}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: DenseSampleOutputs, viewing: ArenaRead) -> Self.Result:
+        return {outputs, viewing}
 
 
 @fieldwise_init
@@ -1066,8 +1073,11 @@ struct _ShapesSearchCall[origin: MutOrigin](Call):
             self.stats,
         }
 
-    def conclude(deinit self, outputs: MatchesViewArguments) -> Self.Result:
-        return {outputs, self.count}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: MatchesViewArguments, viewing: ArenaRead) -> Self.Result:
+        return {outputs, self.count, viewing}
 
 
 @fieldwise_init
@@ -1087,7 +1097,7 @@ struct _ShapesSaveCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, self.path, ProgressArguments()}
 
-    def conclude(deinit self, outputs: Unwritten) -> NoneType:
+    def conclude(deinit self, outputs: Unwritten, viewing: ArenaRead) -> NoneType:
         return None
 
 
@@ -1108,8 +1118,11 @@ struct _ShapesSaveBufferCall[origin: MutOrigin](Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, outputs, self.arena, ProgressArguments()}
 
-    def conclude(deinit self, outputs: DenseSaveBufferOutputs) -> Self.Result:
-        return {outputs.data, Int(outputs.length)}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: DenseSaveBufferOutputs, viewing: ArenaRead) -> Self.Result:
+        return {outputs.data, Int(outputs.length), viewing}
 
 
 @fieldwise_init
@@ -1143,8 +1156,11 @@ struct _ShapesCursorNextCall[origin: MutOrigin](Call):
             c_size_t(self.wanted),
         }
 
-    def conclude(deinit self, outputs: DenseCursorNextOutputs) -> Self.Result:
-        return {outputs.keys, self.links, outputs.links, Int(outputs.written)}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: DenseCursorNextOutputs, viewing: ArenaRead) -> Self.Result:
+        return {outputs.keys, self.links, outputs.links, Int(outputs.written), viewing}
 
 
 # endregion Calls
@@ -2110,7 +2126,8 @@ struct ShapesIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
     def get[
         dtype: DType, kind: ScalarKind = ScalarKind.of[dtype]()
     ](self, key: Key, mut arena: Arena) -> Deferred[_ShapesGetCall[dtype, kind, origin_of(arena)], Self.origin]:
-        """Submits `ShapesVerbs.get`; the arena must stay allocated and unchanged until final. Calls `usearch_shapes_get`."""
+        """Submits `ShapesVerbs.get`; the arena must stay allocated and unchanged until final. Calls `usearch_shapes_get`.
+        """
         comptime assert kind.stores[dtype](), "the element type must store the kind whole"
         return {
             self.index[].library,
@@ -2124,7 +2141,8 @@ struct ShapesIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
     ](self, path: StringSlice[path_origin]) -> Deferred[
         _ShapesSaveCall, ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[path_origin]()))
     ]:
-        """Submits `ShapesVerbs.save`; the path must stay allocated and unchanged until final. Calls `usearch_shapes_save`."""
+        """Submits `ShapesVerbs.save`; the path must stay allocated and unchanged until final. Calls `usearch_shapes_save`.
+        """
         return {
             self.index[].library,
             _ShapesSaveCall(BytesView.of(path).arguments()),
@@ -2218,7 +2236,9 @@ struct ShapesCursor[origin: ImmOrigin]:
         Raises:
             `Error` if the engine refuses the copy.
         """
-        return self._next(_ShapesCursorNextCall[origin_of(arena)](self.address, False, wanted, arena._address), NULL_ADDRESS)
+        return self._next(
+            _ShapesCursorNextCall[origin_of(arena)](self.address, False, wanted, arena._address), NULL_ADDRESS
+        )
 
     def next_links(self, wanted: Int, mut arena: Arena) raises Error -> DenseBatch[origin_of(arena)]:
         """Copies up to `wanted` next keys into a passed arena, each with the keys it links to.
@@ -2234,7 +2254,9 @@ struct ShapesCursor[origin: ImmOrigin]:
         Raises:
             `Error` if the engine refuses the copy.
         """
-        return self._next(_ShapesCursorNextCall[origin_of(arena)](self.address, True, wanted, arena._address), NULL_ADDRESS)
+        return self._next(
+            _ShapesCursorNextCall[origin_of(arena)](self.address, True, wanted, arena._address), NULL_ADDRESS
+        )
 
     def on(ref self, ref executor: Executor) -> ShapesCursorOn[Self.origin, ImmOrigin(origin_of(self, executor))]:
         """The receiver whose pulls block on `executor`, named again for every pull. Binding-only.

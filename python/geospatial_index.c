@@ -757,7 +757,7 @@ static PyObject* GeospatialIndex_refine(PyObject* self, PyObject* const* args, P
 #pragma region Search
 
 static char const doc_GeospatialIndex_search[] =                                                  //
-    "``search(queries, wanted, arena, /, *, relation=GeospatialRelation.NEAR, metres=0.0,\n"      //
+    "``search(queries, wanted, /, arena=None, *, relation=GeospatialRelation.NEAR, metres=0.0,\n" //
     "seconds=0.0, expansion_factor=0, traversal=Traversal.WALK, predicate=None, progress=None,\n" //
     "progress_steps=0, stats=None) -> Matches``\n"                                                //
     "\n"                                                                                          //
@@ -769,7 +769,8 @@ static char const doc_GeospatialIndex_search[] =                                
     "Args:\n"                                                                                     //
     "  queries (buffer): An `(N, 11)` float64 matrix of query observations.\n"                    //
     "  wanted (int): Upper bound on matches per query, the 'k' in 'kANN'.\n"                      //
-    "  arena (Arena): Where the matches land, rewound by the call.\n"                             //
+    "  arena (Arena, optional): Where the matches land, rewound by the call; None makes one\n"    //
+    "    the result owns.\n"                                                                      //
     "  relation (GeospatialRelation, optional): Which entries count as matches.\n"                //
     "  metres (float, optional): The radius around each query; 0 ranks by distance alone.\n"      //
     "  seconds (float, optional): Slack on both ends of the query's time interval.\n"             //
@@ -814,7 +815,7 @@ static PyObject* GeospatialIndex_search(PyObject* self, PyObject* const* args, P
     usearch_geospatial_tolerance_t tolerance;
     usearch_py_call_t stack;
     usearch_py_call_t* call = NULL;
-    if (usearch_py_arguments_parse("search", args, positional_args_count, args_names_tuple, 3, 3, arguments,
+    if (usearch_py_arguments_parse("search", args, positional_args_count, args_names_tuple, 2, 3, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
         receiver_from_object(self, &receiver, &handle) != 0 ||
         usearch_py_size_from_object(wanted_object, "wanted", &wanted) != 0 ||
@@ -833,7 +834,7 @@ static PyObject* GeospatialIndex_search(PyObject* self, PyObject* const* args, P
                                                                                      &call->buffers[0]);
     if (!queries || usearch_py_predicate_from_object(predicate_object, &call->holds[callback_slot_k]) != 0 ||
         walk_parse(call, progress_object, stats_object) != 0 ||
-        !(matches = usearch_py_call_arena(call, arena_object, &MatchesType)))
+        !(matches = usearch_py_call_arena(&receiver, call, arena_object, &MatchesType)))
         return usearch_py_call_discard(&receiver, call);
 
     matches->queries = count;
@@ -863,9 +864,9 @@ static PyObject* GeospatialIndex_search(PyObject* self, PyObject* const* args, P
 }
 
 static char const doc_GeospatialIndex_within[] =                                                //
-    "``within(queries, arena, /, *, metres, relation=GeospatialRelation.NEAR, seconds=0.0,\n"   //
-    "traversal=Traversal.WALK, predicate=None, progress=None, progress_steps=0, stats=None)\n"  //
-    "-> DenseProducts``\n"                                                                      //
+    "``within(queries, /, arena=None, *, metres, relation=GeospatialRelation.NEAR,\n"           //
+    "seconds=0.0, traversal=Traversal.WALK, predicate=None, progress=None, progress_steps=0,\n" //
+    "stats=None) -> DenseProducts``\n"                                                          //
     "\n"                                                                                        //
     "Reports every entry within `metres` of each query observation that the relation admits,\n" //
     "the containment counterpart of `search`, unbounded in result count and complete on the\n"  //
@@ -874,7 +875,8 @@ static char const doc_GeospatialIndex_within[] =                                
     "\n"                                                                                        //
     "Args:\n"                                                                                   //
     "  queries (buffer): An `(N, 11)` float64 matrix of query observations.\n"                  //
-    "  arena (Arena): Where the report lands, rewound by the call.\n"                           //
+    "  arena (Arena, optional): Where the report lands, rewound by the call; None makes one\n"  //
+    "    the result owns.\n"                                                                    //
     "  metres (float): The radius around each query, which containment needs.\n"                //
     "  relation (GeospatialRelation, optional): Which entries count as matches.\n"              //
     "  seconds (float, optional): Slack on both ends of the query's time interval.\n"           //
@@ -914,7 +916,7 @@ static PyObject* GeospatialIndex_within(PyObject* self, PyObject* const* args, P
     usearch_geospatial_tolerance_t tolerance;
     usearch_py_call_t stack;
     usearch_py_call_t* call = NULL;
-    if (usearch_py_arguments_parse("within", args, positional_args_count, args_names_tuple, 2, 2, arguments,
+    if (usearch_py_arguments_parse("within", args, positional_args_count, args_names_tuple, 1, 2, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
         receiver_from_object(self, &receiver, &handle) != 0 ||
         usearch_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0 ||
@@ -931,7 +933,7 @@ static PyObject* GeospatialIndex_within(PyObject* self, PyObject* const* args, P
                                                                                      &call->buffers[0]);
     if (!queries || usearch_py_predicate_from_object(predicate_object, &call->holds[callback_slot_k]) != 0 ||
         walk_parse(call, progress_object, stats_object) != 0 ||
-        !(products = usearch_py_call_arena(call, arena_object, &DenseProductsType)))
+        !(products = usearch_py_call_arena(&receiver, call, arena_object, &DenseProductsType)))
         return usearch_py_call_discard(&receiver, call);
 
     products->queries = count;
@@ -1015,7 +1017,7 @@ static int GeospatialIndex_contains(PyObject* self, PyObject* key_object) {
 }
 
 static char const doc_GeospatialIndex_get[] =                                                         //
-    "``get(key, arena, /) -> buffer``\n"                                                              //
+    "``get(key, /, arena=None) -> buffer``\n"                                                         //
     "\n"                                                                                              //
     "Every observation stored under `key`, in insertion order, within the rounding the index\n"       //
     "stores them at, as a `(count, 11)` float64 matrix in the arena; empty when the key is absent.\n" //
@@ -1023,7 +1025,8 @@ static char const doc_GeospatialIndex_get[] =                                   
     "\n"                                                                                              //
     "Args:\n"                                                                                         //
     "  key (Key | int | str): The identity to retrieve.\n"                                            //
-    "  arena (Arena): Where the observations land, rewound by the call.";
+    "  arena (Arena, optional): Where the observations land, rewound by the call; None makes one\n"   //
+    "    the result owns.";
 
 /** A @c usearch_geospatial_get call and the observations it lands in the arena, inside the record's
  *  arguments. */
@@ -1036,7 +1039,8 @@ typedef struct get_call_t {
 static PyObject* get_answer(usearch_py_call_t* call) {
     get_call_t const* const get = (get_call_t const*)call->arguments;
     Py_ssize_t const shape[2] = {(Py_ssize_t)get->written, (Py_ssize_t)observation_fields};
-    return usearch_py_arena_buffer(&ArenaBufferType, call->arena, get->observations, "d", sizeof(double), shape, 2);
+    return usearch_py_arena_buffer(&ArenaBufferType, call->arena, call->generation, get->observations, "d",
+                                   sizeof(double), shape, 2);
 }
 
 static PyObject* GeospatialIndex_get(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
@@ -1048,13 +1052,13 @@ static PyObject* GeospatialIndex_get(PyObject* self, PyObject* const* args, Py_s
     usearch_key_t key;
     usearch_py_call_t stack;
     usearch_py_call_t* call = NULL;
-    if (usearch_py_arguments_parse("get", args, positional_args_count, args_names_tuple, 2, 2, arguments,
+    if (usearch_py_arguments_parse("get", args, positional_args_count, args_names_tuple, 1, 2, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
         receiver_from_object(self, &receiver, &handle) != 0 || usearch_py_key_from_object(key_object, &key) != 0 ||
         !(call = usearch_py_call_open(&receiver, &stack)))
         return NULL;
 
-    if (usearch_py_call_hold_arena(call, arena_object) != 0) return usearch_py_call_discard(&receiver, call);
+    if (usearch_py_call_hold_arena(&receiver, call, arena_object) != 0) return usearch_py_call_discard(&receiver, call);
     get_call_t* const get = (get_call_t*)call->arguments;
     call->answer = get_answer;
     get->arguments = (usearch_geospatial_get_t) {
@@ -1429,14 +1433,15 @@ static PyObject* GeospatialIndex_save(PyObject* self, PyObject* const* args, Py_
 }
 
 static char const doc_GeospatialIndex_save_buffer[] =                                         //
-    "``save_buffer(arena, /, *, progress=None, progress_steps=0) -> Monolith``\n"             //
+    "``save_buffer(arena=None, *, progress=None, progress_steps=0) -> Monolith``\n"           //
     "\n"                                                                                      //
     "Serializes the index into the arena: one monolith for a handle of one shard, the very\n" //
     "bytes `save` writes, or a manifest leading one part per shard.\n"                        //
     "Calls `usearch_geospatial_save_buffer`.\n"                                               //
     "\n"                                                                                      //
     "Args:\n"                                                                                 //
-    "  arena (Arena): Where the checkpoint lands, rewound by the call.\n"                     //
+    "  arena (Arena, optional): Where the checkpoint lands, rewound by the call; None\n"      //
+    "    makes one the result owns.\n"                                                        //
     "  progress (callable, optional): Called with (completed, total) parts; returning\n"      //
     "    False stops the write and raises `CancelledError`, None continues.\n"                //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"   //
@@ -1453,7 +1458,7 @@ typedef struct save_buffer_call_t {
 static PyObject* save_buffer_answer(usearch_py_call_t* call) {
     usearch_bytes_view_t const monolith = ((save_buffer_call_t const*)call->arguments)->monolith;
     Py_ssize_t const shape[1] = {(Py_ssize_t)monolith.length};
-    return usearch_py_arena_buffer(&MonolithType, call->arena, monolith.data, "B", 1, shape, 1);
+    return usearch_py_arena_buffer(&MonolithType, call->arena, call->generation, monolith.data, "B", 1, shape, 1);
 }
 
 static PyObject* GeospatialIndex_save_buffer(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
@@ -1467,7 +1472,7 @@ static PyObject* GeospatialIndex_save_buffer(PyObject* self, PyObject* const* ar
     size_t progress_steps = 0;
     usearch_py_call_t stack;
     usearch_py_call_t* call = NULL;
-    if (usearch_py_arguments_parse("save_buffer", args, positional_args_count, args_names_tuple, 1, 1, arguments,
+    if (usearch_py_arguments_parse("save_buffer", args, positional_args_count, args_names_tuple, 0, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
         receiver_from_object(self, &receiver, &handle) != 0 ||
         usearch_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0 ||
@@ -1475,7 +1480,7 @@ static PyObject* GeospatialIndex_save_buffer(PyObject* self, PyObject* const* ar
         return NULL;
 
     if (usearch_py_callable_from_object(progress_object, "progress", &call->holds[progress_slot_k]) != 0 ||
-        usearch_py_call_hold_arena(call, arena_object) != 0)
+        usearch_py_call_hold_arena(&receiver, call, arena_object) != 0)
         return usearch_py_call_discard(&receiver, call);
     save_buffer_call_t* const save = (save_buffer_call_t*)call->arguments;
     call->answer = save_buffer_answer;

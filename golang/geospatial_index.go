@@ -179,7 +179,7 @@ type GeospatialKeyStats struct {
 type GeospatialObservations struct {
 	raw     *C.usearch_geospatial_observation_t
 	written uint
-	arena   *Arena
+	arena   arenaWrite
 }
 
 // Written reports how many observations the call wrote; zero when the key is absent.
@@ -188,9 +188,10 @@ func (observations GeospatialObservations) Written() uint { return observations.
 // Observations views the observations from the arena, in insertion order, refused with
 // StatusDevice when the arena is memory the host may not read.
 func (observations GeospatialObservations) Observations() ([]GeospatialObservation, error) {
-	if err := observations.arena.readable(); err != nil {
+	if err := observations.arena.open(); err != nil {
 		return nil, err
 	}
+	defer observations.arena.close()
 	return unsafe.Slice((*GeospatialObservation)(unsafe.Pointer(observations.raw)), observations.written), nil
 }
 
@@ -1031,7 +1032,7 @@ func (receiver geospatialReceiver) get(call *callWithResult[GeospatialObservatio
 		return err
 	}
 	arguments := open[C.usearch_geospatial_get_t](call)
-	call.result.arena = arena
+	call.result.arena = call.stamp(arena, outputs)
 	*arguments = C.usearch_geospatial_get_t{
 		index:        index,
 		executor:     executor,
@@ -1152,7 +1153,7 @@ func (receiver geospatialReceiver) search(call *callWithResult[MatchesView], com
 		return err
 	}
 	arguments := open[C.usearch_geospatial_search_t](call)
-	call.result.arena = arena
+	call.result.arena = call.stamp(arena, outputs)
 	call.result.queries = uint(len(queries))
 	*arguments = C.usearch_geospatial_search_t{
 		index:      index,
@@ -1188,7 +1189,7 @@ func (receiver geospatialReceiver) within(call *callWithResult[MatchesTape], com
 		return err
 	}
 	arguments := open[C.usearch_geospatial_within_t](call)
-	call.result.arena = arena
+	call.result.arena = call.stamp(arena, outputs)
 	call.result.queries = uint(len(queries))
 	*arguments = C.usearch_geospatial_within_t{
 		index:      index,
@@ -1288,7 +1289,7 @@ func (receiver geospatialReceiver) sample(call *callWithResult[DenseDraws], comp
 		return fail(StatusShapeMismatch, "the shown keys and coordinates disagree in length")
 	}
 	arguments := open[C.usearch_geospatial_sample_t](call)
-	call.result.arena = arena
+	call.result.arena = call.stamp(arena, outputs)
 	*arguments = C.usearch_geospatial_sample_t{
 		index:             index,
 		executor:          executor,
@@ -1343,7 +1344,7 @@ func (receiver geospatialReceiver) saveBuffer(call *callWithResult[Monolith], co
 		return err
 	}
 	arguments := open[C.usearch_geospatial_save_buffer_t](call)
-	call.result.arena = arena
+	call.result.arena = call.stamp(arena, outputs)
 	*arguments = C.usearch_geospatial_save_buffer_t{
 		index:      index,
 		executor:   executor,
@@ -1430,7 +1431,7 @@ func (on GeospatialCursorOn) next(call *callWithResult[DenseBatch], wanted uint,
 		return err
 	}
 	arguments := open[C.usearch_geospatial_cursor_next_t](call)
-	call.result.arena = arena
+	call.result.arena = call.stamp(arena, outputs)
 	*arguments = C.usearch_geospatial_cursor_next_t{
 		index:      index,
 		executor:   executor,

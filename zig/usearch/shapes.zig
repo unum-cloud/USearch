@@ -544,7 +544,6 @@ const usearch_shapes_cursor_init_t = extern struct {
     cursor: *?*anyopaque,
 };
 
-
 const usearch_shapes_cursor_next_t = extern struct {
     index: ?*anyopaque,
     executor: ?*anyopaque,
@@ -677,7 +676,7 @@ extern fn usearch_shapes_describe(arguments: *usearch_shapes_describe_t) void;
 /// defer arena.deinit();
 /// const probe = [_][3]f32{ .{ 0, 0, 0 }, .{ 1, 0, 0 } };
 /// const matches = try index.search(try .of([3]f32, u64, &probe, &.{ 0, 2 }), 1, &arena, .{});
-/// const nearest = matches.query(0).keys[0];
+/// const nearest = (try matches.query(0)).keys[0];
 /// ```
 pub const ShapesIndex = extern struct {
     /// The opaque `usearch_shapes_index_t` the ABI hands back.
@@ -1137,6 +1136,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub fn get(self: Self, comptime Element: type, key: Key, arena: *Arena) Answer(TapeEntries([3]Element)) {
             var local: Deferred(TapeEntries([3]Element)) = undefined;
             const held = self.hold(&local, .{});
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_shapes_get_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1224,6 +1224,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub fn search(self: Self, queries: TapeView, wanted: usize, arena: *Arena, config: ShapesSearchConfig) Answer(Matches) {
             var local: Deferred(Matches) = undefined;
             const held = self.hold(&local, .{ .queries = queries.entries });
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_shapes_search_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1291,6 +1292,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
             if (config.shown.len != config.shown_coordinates.len) return self.refused(.shape_mismatch, "The shown keys and coordinates disagree in length");
             var local: Deferred(DenseDraws) = undefined;
             const held = self.hold(&local, .{});
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_shapes_sample_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1321,6 +1323,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub fn cursorNext(self: Self, cursor: ShapesCursor, wanted: usize, links: bool, arena: *Arena) Answer(DenseCursorBatch) {
             var local: Deferred(DenseCursorBatch) = undefined;
             const held = self.hold(&local, .{});
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_shapes_cursor_next_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1357,6 +1360,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub fn saveBuffer(self: Self, arena: *Arena, config: DenseSaveBufferConfig) Answer(Monolith) {
             var local: Deferred(Monolith) = undefined;
             const held = self.hold(&local, .{});
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_shapes_save_buffer_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1474,7 +1478,7 @@ test "shapes of different point counts share one tape, and each finds itself fir
     var arena: Arena = try .init(executor);
     defer arena.deinit();
     const matches = try index.on(executor).search(try .of([3]f32, u64, &cloud, &offsets), 1, &arena, .{});
-    for (keys, 0..) |key, query| try std.testing.expectEqual(key, matches.query(query).keys[0]);
+    for (keys, 0..) |key, query| try std.testing.expectEqual(key, (try matches.query(query)).keys[0]);
 
     try std.testing.expectEqual(ShapesKeyStats{ .entries = 1, .total_points = 9, .largest_points = 9 }, try index.on(executor).count(keys[1]));
     try std.testing.expectEqual(true, try index.contains(keys[2]));
@@ -1483,19 +1487,19 @@ test "shapes of different point counts share one tape, and each finds itself fir
     const stored = try index.on(executor).get(f32, keys[1], &arena);
     try std.testing.expectEqual(@as(usize, 1), stored.written);
     // The pose comes back within the stored rounding, never bit for bit.
-    try std.testing.expectEqual(@as(usize, 9), stored.entry(0).len);
-    for (cloud[5..14], stored.entry(0)) |inserted, exported| for (inserted, exported) |expected, actual|
+    try std.testing.expectEqual(@as(usize, 9), (try stored.entry(0)).len);
+    for (cloud[5..14], try stored.entry(0)) |inserted, exported| for (inserted, exported) |expected, actual|
         try std.testing.expectApproxEqAbs(expected, actual, 1e-5);
     const halves = try index.get(f16, keys[0], &arena);
-    try std.testing.expectEqual(@as(usize, 5), halves.entry(0).len);
+    try std.testing.expectEqual(@as(usize, 5), (try halves.entry(0)).len);
     try std.testing.expectEqual(@as(usize, 0), (try index.get(f32, .fromInteger(99), &arena)).written);
 
     var walk = try ShapesCursor.init(index, &.{});
     defer walk.deinit();
-    try std.testing.expectEqualSlices(Key, &keys, (try index.on(executor).cursorNext(walk, 4, false, &arena)).keys());
+    try std.testing.expectEqualSlices(Key, &keys, try (try index.on(executor).cursorNext(walk, 4, false, &arena)).keys());
     try std.testing.expectEqual(@as(usize, 0), (try index.cursorNext(walk, 4, false, &arena)).written);
 
-    const monolith = (try index.on(executor).saveBuffer(&arena, .{})).bytes();
+    const monolith = try (try index.on(executor).saveBuffer(&arena, .{})).bytes();
     const frozen = description.metadata;
     try std.testing.expectEqual(frozen, try ShapesIndex.metadataReadBuffer(monolith, .{ .executor = executor }));
     var copy = try ShapesIndex.loadRamBuffer(monolith, .{ .executor = executor });
@@ -1518,7 +1522,7 @@ test "shapes of different point counts share one tape, and each finds itself fir
     const reachability = try index.on(executor).health();
     try std.testing.expectEqual([2]usize{ 3, 3 }, [2]usize{ reachability.audited, reachability.reachable });
     const draws = try index.on(executor).sample(2, &arena, .{ .seed = 42 });
-    try std.testing.expectEqual(draws.written, draws.coordinates().len);
+    try std.testing.expectEqual(draws.written, (try draws.coordinates()).len);
 }
 
 test "a shapes refine keeps a stopped round in a plan, and a reshard refuses what it cannot move" {

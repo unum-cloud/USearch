@@ -49,6 +49,7 @@ from usearch.library import Library
 from usearch.types import (
     Address,
     Arena,
+    ArenaRead,
     BytesView,
     Call,
     CallHead,
@@ -435,6 +436,9 @@ struct GeospatialObservations[origin: MutOrigin](Movable, Sized):
     var written: Int
     """Observations written; zero when the key is absent."""
 
+    var viewing: ArenaRead
+    """The arena the result reads and the generation the call that wrote it brought it to."""
+
     def __len__(self) -> Int:
         """The observations written.
 
@@ -443,13 +447,16 @@ struct GeospatialObservations[origin: MutOrigin](Movable, Sized):
         """
         return self.written
 
-    def view(ref self) -> Span[GeospatialObservation, origin_of(self)]:
+    def view(ref self) raises Error -> Span[GeospatialObservation, origin_of(self)]:
         """Every observation, within the rounding the index stores them at.
 
         Returns:
             The observations, viewed from the arena this result reads.
         """
-        return _in_arena[GeospatialObservation, origin_of(self)](self.address, self.written)
+        self.viewing.open("GeospatialObservations.view")
+        var viewed = _in_arena[GeospatialObservation, origin_of(self)](self.address, self.written)
+        self.viewing.close()
+        return viewed
 
 
 @fieldwise_init
@@ -468,31 +475,43 @@ struct GeospatialMatches[origin: MutOrigin](Movable):
     var written: Int
     """Matches written across every query."""
 
-    def offsets(ref self) -> Span[c_size_t, origin_of(self)]:
+    var viewing: ArenaRead
+    """The arena the result reads and the generation the call that wrote it brought it to."""
+
+    def offsets(ref self) raises Error -> Span[c_size_t, origin_of(self)]:
         """One more offset than queries, as Apache Arrow lays a ragged batch out.
 
         Returns:
             The offsets into `keys()` and `distances()`, viewed from the arena this result reads.
         """
-        return _in_arena[c_size_t, origin_of(self)](self.view.offsets, self.queries + 1)
+        self.viewing.open("GeospatialMatches.offsets")
+        var viewed = _in_arena[c_size_t, origin_of(self)](self.view.offsets, self.queries + 1)
+        self.viewing.close()
+        return viewed
 
-    def keys(ref self) -> Span[Key, origin_of(self)]:
+    def keys(ref self) raises Error -> Span[Key, origin_of(self)]:
         """Each match's entry, viewed from the arena this result reads.
 
         Returns:
             One key per match.
         """
-        return _in_arena[Key, origin_of(self)](self.view.keys, self.written)
+        self.viewing.open("GeospatialMatches.keys")
+        var viewed = _in_arena[Key, origin_of(self)](self.view.keys, self.written)
+        self.viewing.close()
+        return viewed
 
-    def distances(ref self) -> Span[Distance, origin_of(self)]:
+    def distances(ref self) raises Error -> Span[Distance, origin_of(self)]:
         """Each match's chord metres, positionally paired with `keys()`.
 
         Returns:
             One distance per match.
         """
-        return _in_arena[Distance, origin_of(self)](self.view.scores, self.written)
+        self.viewing.open("GeospatialMatches.distances")
+        var viewed = _in_arena[Distance, origin_of(self)](self.view.scores, self.written)
+        self.viewing.close()
+        return viewed
 
-    def query_keys(ref self, query: Int) -> Span[Key, origin_of(self)]:
+    def query_keys(ref self, query: Int) raises Error -> Span[Key, origin_of(self)]:
         """One query's keys, trimmed to the matches it found. Binding-only.
 
         Args:
@@ -501,10 +520,15 @@ struct GeospatialMatches[origin: MutOrigin](Movable):
         Returns:
             The keys, viewed from the arena this result reads.
         """
+        self.viewing.open("GeospatialMatches.query_keys")
         var begin = self._offset(query)
-        return _in_arena[Key, origin_of(self)](self.view.keys + begin * size_of[Key](), self._offset(query + 1) - begin)
+        var viewed = _in_arena[Key, origin_of(self)](
+            self.view.keys + begin * size_of[Key](), self._offset(query + 1) - begin
+        )
+        self.viewing.close()
+        return viewed
 
-    def query_distances(ref self, query: Int) -> Span[Distance, origin_of(self)]:
+    def query_distances(ref self, query: Int) raises Error -> Span[Distance, origin_of(self)]:
         """One query's chord metres, paired positionally with `query_keys`. Binding-only.
 
         Args:
@@ -513,10 +537,13 @@ struct GeospatialMatches[origin: MutOrigin](Movable):
         Returns:
             The distances, viewed from the arena this result reads.
         """
+        self.viewing.open("GeospatialMatches.query_distances")
         var begin = self._offset(query)
-        return _in_arena[Distance, origin_of(self)](
+        var viewed = _in_arena[Distance, origin_of(self)](
             self.view.scores + begin * size_of[Distance](), self._offset(query + 1) - begin
         )
+        self.viewing.close()
+        return viewed
 
     def _offset(self, position: Int) -> Int:
         """One offset of the report; a cancelled call left the offsets null."""
@@ -1108,7 +1135,7 @@ struct _GeospatialReserveCall(Call):
             c_size_t(self.entries),
         }
 
-    def conclude(deinit self, outputs: Unwritten) -> NoneType:
+    def conclude(deinit self, outputs: Unwritten, viewing: ArenaRead) -> NoneType:
         return None
 
 
@@ -1128,7 +1155,7 @@ struct _GeospatialClearCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion}
 
-    def conclude(deinit self, outputs: Unwritten) -> NoneType:
+    def conclude(deinit self, outputs: Unwritten, viewing: ArenaRead) -> NoneType:
         return None
 
 
@@ -1148,7 +1175,7 @@ struct _GeospatialDescribeCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, outputs}
 
-    def conclude(deinit self, outputs: GeospatialIndexDescription) -> GeospatialIndexDescription:
+    def conclude(deinit self, outputs: GeospatialIndexDescription, viewing: ArenaRead) -> GeospatialIndexDescription:
         return outputs
 
 
@@ -1169,7 +1196,7 @@ struct _GeospatialCountCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, KeyBytes.of(self.key), outputs}
 
-    def conclude(deinit self, outputs: GeospatialKeyStats) -> GeospatialKeyStats:
+    def conclude(deinit self, outputs: GeospatialKeyStats, viewing: ArenaRead) -> GeospatialKeyStats:
         return outputs
 
 
@@ -1213,8 +1240,11 @@ struct _GeospatialGetCall[origin: MutOrigin](Call):
             self.arena,
         }
 
-    def conclude(deinit self, outputs: GeospatialGetOutputs) -> Self.Result:
-        return {outputs.observations, Int(outputs.written)}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: GeospatialGetOutputs, viewing: ArenaRead) -> Self.Result:
+        return {outputs.observations, Int(outputs.written), viewing}
 
 
 @fieldwise_init
@@ -1254,7 +1284,7 @@ struct _GeospatialInsertCall(Call):
     def lengths_agree(self) -> Bool:
         return self.keys_count == self.count
 
-    def conclude(deinit self, outputs: Unwritten) -> NoneType:
+    def conclude(deinit self, outputs: Unwritten, viewing: ArenaRead) -> NoneType:
         return None
 
 
@@ -1290,7 +1320,7 @@ struct _GeospatialRefineCall(Call):
             self.phase,
         }
 
-    def conclude(deinit self, outputs: DenseRefineReport) -> DenseRefineReport:
+    def conclude(deinit self, outputs: DenseRefineReport, viewing: ArenaRead) -> DenseRefineReport:
         return outputs
 
 
@@ -1311,7 +1341,7 @@ struct _GeospatialRefinePlanFinishCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, self.plan, outputs}
 
-    def conclude(deinit self, outputs: DenseRefineReport) -> DenseRefineReport:
+    def conclude(deinit self, outputs: DenseRefineReport, viewing: ArenaRead) -> DenseRefineReport:
         return outputs
 
 
@@ -1331,7 +1361,7 @@ struct _GeospatialHealthCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, outputs}
 
-    def conclude(deinit self, outputs: DenseReachability) -> DenseReachability:
+    def conclude(deinit self, outputs: DenseReachability, viewing: ArenaRead) -> DenseReachability:
         return outputs
 
 
@@ -1396,7 +1426,7 @@ struct _GeospatialReshardCall(Call):
             self.phase,
         }
 
-    def conclude(deinit self, outputs: DenseRefineReport) -> DenseRefineReport:
+    def conclude(deinit self, outputs: DenseRefineReport, viewing: ArenaRead) -> DenseRefineReport:
         return outputs
 
 
@@ -1417,7 +1447,7 @@ struct _GeospatialReshardPlanFinishCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.executor, head.outcome, head.completion, self.plan, outputs}
 
-    def conclude(deinit self, outputs: DenseRefineReport) -> DenseRefineReport:
+    def conclude(deinit self, outputs: DenseRefineReport, viewing: ArenaRead) -> DenseRefineReport:
         return outputs
 
 
@@ -1471,8 +1501,11 @@ struct _GeospatialSampleCall[origin: MutOrigin](Call):
     def lengths_agree(self) -> Bool:
         return self.shown_coordinates_count == 3 * self.shown_count
 
-    def conclude(deinit self, outputs: DenseSampleOutputs) -> Self.Result:
-        return {outputs}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: DenseSampleOutputs, viewing: ArenaRead) -> Self.Result:
+        return {outputs, viewing}
 
 
 @fieldwise_init
@@ -1519,8 +1552,11 @@ struct _GeospatialSearchCall[origin: MutOrigin](Call):
             self.stats,
         }
 
-    def conclude(deinit self, outputs: MatchesViewArguments) -> Self.Result:
-        return {outputs, self.count}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: MatchesViewArguments, viewing: ArenaRead) -> Self.Result:
+        return {outputs, self.count, viewing}
 
 
 @fieldwise_init
@@ -1577,8 +1613,11 @@ struct _GeospatialWithinCall[origin: MutOrigin](Call):
             self.stats,
         }
 
-    def conclude(deinit self, outputs: GeospatialWithinOutputs) -> Self.Result:
-        return {outputs.matches, self.count, Int(outputs.written)}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: GeospatialWithinOutputs, viewing: ArenaRead) -> Self.Result:
+        return {outputs.matches, self.count, Int(outputs.written), viewing}
 
 
 @fieldwise_init
@@ -1598,7 +1637,7 @@ struct _GeospatialSaveCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, self.path, ProgressArguments()}
 
-    def conclude(deinit self, outputs: Unwritten) -> NoneType:
+    def conclude(deinit self, outputs: Unwritten, viewing: ArenaRead) -> NoneType:
         return None
 
 
@@ -1619,8 +1658,11 @@ struct _GeospatialSaveBufferCall[origin: MutOrigin](Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, outputs, self.arena, ProgressArguments()}
 
-    def conclude(deinit self, outputs: DenseSaveBufferOutputs) -> Self.Result:
-        return {outputs.data, Int(outputs.length)}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: DenseSaveBufferOutputs, viewing: ArenaRead) -> Self.Result:
+        return {outputs.data, Int(outputs.length), viewing}
 
 
 @fieldwise_init
@@ -1654,8 +1696,11 @@ struct _GeospatialCursorNextCall[origin: MutOrigin](Call):
             c_size_t(self.wanted),
         }
 
-    def conclude(deinit self, outputs: DenseCursorNextOutputs) -> Self.Result:
-        return {outputs.keys, self.links, outputs.links, Int(outputs.written)}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: DenseCursorNextOutputs, viewing: ArenaRead) -> Self.Result:
+        return {outputs.keys, self.links, outputs.links, Int(outputs.written), viewing}
 
 
 # endregion Calls
@@ -2736,7 +2781,8 @@ struct GeospatialIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         return {self.index[].library, _GeospatialCountCall(key), self.index[].address, self.executor}
 
     def get(self, key: Key, mut arena: Arena) -> Deferred[_GeospatialGetCall[origin_of(arena)], Self.origin]:
-        """Submits `GeospatialVerbs.get`; the arena must stay allocated and unchanged until final. Calls `usearch_geospatial_get`."""
+        """Submits `GeospatialVerbs.get`; the arena must stay allocated and unchanged until final. Calls `usearch_geospatial_get`.
+        """
         return {
             self.index[].library,
             _GeospatialGetCall[origin_of(arena)](key, arena._address),
@@ -2749,7 +2795,8 @@ struct GeospatialIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
     ](self, path: StringSlice[path_origin]) -> Deferred[
         _GeospatialSaveCall, ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[path_origin]()))
     ]:
-        """Submits `GeospatialVerbs.save`; the path must stay allocated and unchanged until final. Calls `usearch_geospatial_save`."""
+        """Submits `GeospatialVerbs.save`; the path must stay allocated and unchanged until final. Calls `usearch_geospatial_save`.
+        """
         return {
             self.index[].library,
             _GeospatialSaveCall(BytesView.of(path).arguments()),
@@ -2843,7 +2890,9 @@ struct GeospatialCursor[origin: ImmOrigin]:
         Raises:
             `Error` if the engine refuses the copy.
         """
-        return self._next(_GeospatialCursorNextCall[origin_of(arena)](self.address, False, wanted, arena._address), NULL_ADDRESS)
+        return self._next(
+            _GeospatialCursorNextCall[origin_of(arena)](self.address, False, wanted, arena._address), NULL_ADDRESS
+        )
 
     def next_links(self, wanted: Int, mut arena: Arena) raises Error -> DenseBatch[origin_of(arena)]:
         """Copies up to `wanted` next keys into a passed arena, each with the keys it links to.
@@ -2859,7 +2908,9 @@ struct GeospatialCursor[origin: ImmOrigin]:
         Raises:
             `Error` if the engine refuses the copy.
         """
-        return self._next(_GeospatialCursorNextCall[origin_of(arena)](self.address, True, wanted, arena._address), NULL_ADDRESS)
+        return self._next(
+            _GeospatialCursorNextCall[origin_of(arena)](self.address, True, wanted, arena._address), NULL_ADDRESS
+        )
 
     def on(ref self, ref executor: Executor) -> GeospatialCursorOn[Self.origin, ImmOrigin(origin_of(self, executor))]:
         """The receiver whose pulls block on `executor`, named again for every pull. Binding-only.
@@ -2920,7 +2971,8 @@ struct GeospatialCursorOn[cursor_origin: ImmOrigin, origin: ImmOrigin]:
             `Error` if the engine refuses the copy.
         """
         return self.cursor[]._next(
-            _GeospatialCursorNextCall[origin_of(arena)](self.cursor[].address, False, wanted, arena._address), self.executor
+            _GeospatialCursorNextCall[origin_of(arena)](self.cursor[].address, False, wanted, arena._address),
+            self.executor,
         )
 
     def next_links(self, wanted: Int, mut arena: Arena) raises Error -> DenseBatch[origin_of(arena)]:
@@ -2938,7 +2990,8 @@ struct GeospatialCursorOn[cursor_origin: ImmOrigin, origin: ImmOrigin]:
             `Error` if the engine refuses the copy.
         """
         return self.cursor[]._next(
-            _GeospatialCursorNextCall[origin_of(arena)](self.cursor[].address, True, wanted, arena._address), self.executor
+            _GeospatialCursorNextCall[origin_of(arena)](self.cursor[].address, True, wanted, arena._address),
+            self.executor,
         )
 
 

@@ -94,7 +94,7 @@ The [benchmark tables](https://github.com/unum-cloud/USearch/blob/main/bench/REA
 pip install usearch
 ```
 
-Index ten thousand vectors, then search the first hundred of them on an executor, with the results landing in an arena:
+Index ten thousand vectors, then search the first hundred of them on an executor, into memory the results own:
 
 ```python
 import numpy as np
@@ -113,8 +113,7 @@ index.reserve(len(vectors))  # Optional capacity hint; inserts grow on demand
 index.insert(np.arange(len(vectors)), vectors)  # On the calling thread
 
 pool = usearch.Executor.for_ram()  # The workers a receiver names
-arena = usearch.Arena(pool)  # The memory results land in, made where the pool computes
-matches = index.on(pool).search(vectors[:100], 10, arena)  # Blocking, on the pool
+matches = index.on(pool).search(vectors[:100], 10)  # Blocking, on the pool; pass an Arena to reuse memory
 assert len(index) == 10_000
 assert np.asarray(matches.distances).shape == (100, 10)
 key, distance = matches[0][0]

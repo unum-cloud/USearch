@@ -139,6 +139,7 @@ from usearch.shapes import (
 )
 from usearch.types import (
     ArenaDescribe,
+    ArenaGeneration,
     ArenaInit,
     CPUClass,
     GPUClass,
@@ -265,6 +266,12 @@ struct Symbols:
     """`usearch_arena_init`."""
     var arena_free: StatusRelease
     """`usearch_arena_free`."""
+    var arena_export_open: StatusRelease
+    """`usearch_arena_export_open`."""
+    var arena_export_close: Release
+    """`usearch_arena_export_close`."""
+    var arena_generation: ArenaGeneration
+    """`usearch_arena_generation`."""
     var arena_describe: ArenaDescribe
     """`usearch_arena_describe`."""
     var executor_for_ram: ExecutorForRam
@@ -579,6 +586,9 @@ struct Symbols:
 
         self.arena_init = _resolve[ArenaInit](handle, "usearch_arena_init")
         self.arena_free = _resolve[StatusRelease](handle, "usearch_arena_free")
+        self.arena_export_open = _resolve[StatusRelease](handle, "usearch_arena_export_open")
+        self.arena_export_close = _resolve[Release](handle, "usearch_arena_export_close")
+        self.arena_generation = _resolve[ArenaGeneration](handle, "usearch_arena_generation")
         self.arena_describe = _resolve[ArenaDescribe](handle, "usearch_arena_describe")
         self.executor_for_ram = _resolve[ExecutorForRam](handle, "usearch_executor_for_ram")
         self.executor_for_nvme = _resolve[ExecutorForNvme](handle, "usearch_executor_for_nvme")

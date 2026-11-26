@@ -326,16 +326,78 @@ def test_host_reads_follow_the_description(host_access: HostAccess, refused: boo
         _refuse_host_read(description)
 
 
-@pytest.mark.parametrize(("arena", "failure"), [(None, InvalidArgumentError), (0, TypeError)])
-def test_output_verbs_require_an_arena(executor, arena, failure: type, seed: int):
-    """No output verb allocates on its own: the library refuses one handed no arena, and anything else is no arena."""
+def test_output_verbs_make_their_own_arena(executor, seed: int):
+    """A call naming no arena makes one its result owns, so that result outlives every later call."""
     index, vectors = build_index(8, 8, executor, seed=seed)
+    first = index.on(executor).search(vectors[:1], 1)
+    for _ in range(3):
+        index.on(executor).search(vectors[1:2], 1)
+    assert keys_to_integers(first.keys)[0, 0] == 0
+    assert keys_to_integers(index.search(vectors[:1], 1, None).keys)[0, 0] == 0
+    assert len(index.cursor().next(1)) == 1
     with pytest.raises(TypeError):
-        index.search(vectors[:1], 1)
-    with pytest.raises(failure):
-        index.search(vectors[:1], 1, arena)
-    with pytest.raises(failure):
-        index.cursor().next(1, arena)
+        index.search(vectors[:1], 1, 0)
+
+
+def test_reusing_an_arena_under_a_live_view_raises(executor, seed: int):
+    """A NumPy view pins its arena against the next call, while a copy leaves it free to reuse."""
+    index, vectors = build_index(8, 8, executor, seed=seed)
+    arena = Arena(executor)
+    viewed = np.asarray(index.on(executor).search(vectors[:1], 1, arena).distances)
+    with pytest.raises(ContendedError) as raised:
+        index.on(executor).search(vectors[1:2], 1, arena)
+    assert isinstance(raised.value, BufferError)
+    del viewed
+    copied = np.array(index.on(executor).search(vectors[:1], 1, arena).distances)
+    index.on(executor).search(vectors[1:2], 1, arena)
+    assert copied.shape == (1, 1)
+
+
+def test_a_result_of_a_rewound_arena_raises(executor, seed: int):
+    """A result made before its arena served a later call refuses every read rather than show that call's data."""
+    index, vectors = build_index(8, 8, executor, seed=seed)
+    arena = Arena(executor)
+    stale = index.on(executor).search(vectors[:1], 1, arena)
+    index.on(executor).search(vectors[1:2], 1, arena)
+    for read in (lambda: stale[0], lambda: stale.keys, lambda: stale.distances, lambda: stale.__arrow_c_array__()):
+        with pytest.raises(ValueError):
+            read()
+
+
+def test_a_deferred_call_answered_after_a_later_rewind_raises(executor, seed: int):
+    """A deferred call final but unanswered when a later call rewinds its arena answers `ValueError`, not that call's data."""
+    index, vectors = build_index(8, 8, executor, seed=seed)
+    arena = Arena(executor)
+    earlier = index.deferred(executor).search(vectors[:1], 1, arena)
+    while earlier.status is Status.DEFERRED:
+        pass
+    later = index.deferred(executor).search(vectors[1:2], 1, arena)
+    assert keys_to_integers(later.wait().keys)[0, 0] == 1
+    with pytest.raises(ValueError):
+        earlier.wait()
+
+
+def test_closing_an_executor_stops_its_verbs_and_keeps_results(seed: int):
+    """Leaving an executor's block, even on an exception, stops its verbs, and results over it stay readable."""
+    index, vectors = build_index(8, 8, Executor.for_ram(threads=1), seed=seed)
+    pool = Executor.for_ram(threads=1)
+    matches = index.on(pool).search(vectors[:1], 1)
+    assert pool.__exit__(None, None, None) is None
+    assert pool.__exit__(KeyError, KeyError(1), None) is None
+    assert keys_to_integers(matches.keys)[0, 0] == 0
+    with pytest.raises(UninitializedError):
+        index.on(pool)
+
+
+def test_a_deferred_call_naming_the_arena_makes_earlier_results_stale(executor, seed: int):
+    """A deferred call takes its arena as it is submitted, so an earlier result over the arena reads as stale at once."""
+    index, vectors = build_index(8, 8, executor, seed=seed)
+    arena = Arena(executor)
+    earlier = index.on(executor).search(vectors[:1], 1, arena)
+    pending = index.deferred(executor).search(vectors[1:2], 1, arena)
+    with pytest.raises(ValueError):
+        earlier[0]
+    assert keys_to_integers(pending.wait().keys)[0, 0] == 1
 
 
 # endregion Executors

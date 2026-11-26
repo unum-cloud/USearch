@@ -1652,6 +1652,11 @@ USEARCH_EXPORT usearch_status_t usearch_arena_export_open(usearch_arena_t arena)
  *  @c NULL arena or one counting none is left alone. */
 USEARCH_EXPORT void usearch_arena_export_close(usearch_arena_t arena);
 
+/** The arena's generation: every successful call naming the arena advances it exactly once, when
+ *  it takes the arena and finds no export open, before it writes. An output made under @c g is
+ *  current while this answers @c g. @c NULL answers 0. */
+USEARCH_EXPORT uint64_t usearch_arena_generation(usearch_arena_t arena);
+
 /** Whether host code may read an arena's pages. */
 typedef enum usearch_host_access_t {
 

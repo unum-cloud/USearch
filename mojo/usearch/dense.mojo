@@ -44,6 +44,7 @@ from usearch.library import Library
 from usearch.types import (
     Address,
     Arena,
+    ArenaRead,
     BytesView,
     Call,
     CallHead,
@@ -491,6 +492,9 @@ struct DenseVectors[dtype: DType, origin: MutOrigin](Movable, Sized):
     var rows: Int
     """Rows written; zero when the key is absent."""
 
+    var viewing: ArenaRead
+    """The arena the result reads and the generation the call that wrote it brought it to."""
+
     def __len__(self) -> Int:
         """The rows written.
 
@@ -499,7 +503,7 @@ struct DenseVectors[dtype: DType, origin: MutOrigin](Movable, Sized):
         """
         return self.rows
 
-    def __getitem__(ref self, row: Int) -> Span[Scalar[Self.dtype], origin_of(self)]:
+    def __getitem__(ref self, row: Int) raises Error -> Span[Scalar[Self.dtype], origin_of(self)]:
         """One row, viewed from the arena this result reads. Binding-only.
 
         Args:
@@ -508,10 +512,13 @@ struct DenseVectors[dtype: DType, origin: MutOrigin](Movable, Sized):
         Returns:
             The row's elements - `columns` of them, or its packed bytes for a sub-byte kind.
         """
-        return _in_arena[Scalar[Self.dtype], origin_of(self)](
+        self.viewing.open("DenseVectors.__getitem__")
+        var viewed = _in_arena[Scalar[Self.dtype], origin_of(self)](
             self.view.data + row * Int(self.view.stride),
             self.view.scalar.bytes_for_columns(Int(self.view.columns)) // size_of[Scalar[Self.dtype]](),
         )
+        self.viewing.close()
+        return viewed
 
     def columns(self) -> Int:
         """Values in each row, as the engine reported them.
@@ -539,6 +546,9 @@ struct DenseBatch[origin: MutOrigin](Movable, Sized):
     var written: Int
     """Entries the pull wrote; zero when the walk is exhausted."""
 
+    var viewing: ArenaRead
+    """The arena the result reads and the generation the call that wrote it brought it to."""
+
     def __len__(self) -> Int:
         """The entries the pull wrote.
 
@@ -547,13 +557,16 @@ struct DenseBatch[origin: MutOrigin](Movable, Sized):
         """
         return self.written
 
-    def keys(ref self) -> Span[Key, origin_of(self)]:
+    def keys(ref self) raises Error -> Span[Key, origin_of(self)]:
         """Every entry's key, in walk order.
 
         Returns:
             The keys, viewed from the arena this result reads.
         """
-        return _in_arena[Key, origin_of(self)](self.keys_address, self.written)
+        self.viewing.open("DenseBatch.keys")
+        var viewed = _in_arena[Key, origin_of(self)](self.keys_address, self.written)
+        self.viewing.close()
+        return viewed
 
     def links(ref self, entry: Int) raises Error -> Span[Key, origin_of(self)]:
         """The keys one entry links to, as the graph stored them when the pull ran. Binding-only.
@@ -569,11 +582,14 @@ struct DenseBatch[origin: MutOrigin](Movable, Sized):
         """
         if not self.linked or entry < 0 or entry >= self.written:
             raise Error(Status.INVALID_ARGUMENT, "DenseBatch.links")
+        self.viewing.open("DenseBatch.links")
         var offsets = _in_arena[c_size_t, origin_of(self)](self.links_view.offsets, self.written + 1)
         var begin = Int(offsets[entry])
-        return _in_arena[Key, origin_of(self)](
+        var viewed = _in_arena[Key, origin_of(self)](
             self.links_view.keys + begin * size_of[Key](), Int(offsets[entry + 1]) - begin
         )
+        self.viewing.close()
+        return viewed
 
 
 @fieldwise_init
@@ -588,6 +604,9 @@ struct DenseDraws[origin: MutOrigin](Movable, Sized):
     var outputs: DenseSampleOutputs
     """Where the engine wrote every output, inside the arena."""
 
+    var viewing: ArenaRead
+    """The arena the result reads and the generation the call that wrote it brought it to."""
+
     def __len__(self) -> Int:
         """The draws written.
 
@@ -596,21 +615,27 @@ struct DenseDraws[origin: MutOrigin](Movable, Sized):
         """
         return Int(self.outputs.written)
 
-    def keys(ref self) -> Span[Key, origin_of(self)]:
+    def keys(ref self) raises Error -> Span[Key, origin_of(self)]:
         """Every draw's key.
 
         Returns:
             The keys, viewed from the arena this result reads.
         """
-        return _in_arena[Key, origin_of(self)](self.outputs.keys, len(self))
+        self.viewing.open("DenseDraws.keys")
+        var viewed = _in_arena[Key, origin_of(self)](self.outputs.keys, len(self))
+        self.viewing.close()
+        return viewed
 
-    def entry_ordinals(ref self) -> Span[c_size_t, origin_of(self)]:
+    def entry_ordinals(ref self) raises Error -> Span[c_size_t, origin_of(self)]:
         """Which of its key's entries each draw is, in the order `get` writes them.
 
         Returns:
             The entry ordinals, viewed from the arena this result reads.
         """
-        return _in_arena[c_size_t, origin_of(self)](self.outputs.entry_ordinals, len(self))
+        self.viewing.open("DenseDraws.entry_ordinals")
+        var viewed = _in_arena[c_size_t, origin_of(self)](self.outputs.entry_ordinals, len(self))
+        self.viewing.close()
+        return viewed
 
     def parents(self) -> Matches[Self.origin]:
         """Each draw's parent and its distance, one column per draw, a root holding none.
@@ -618,7 +643,7 @@ struct DenseDraws[origin: MutOrigin](Movable, Sized):
         Returns:
             The parents, read in place from the same arena.
         """
-        return {self.outputs.parents, len(self)}
+        return {self.outputs.parents, len(self), self.viewing}
 
     def coordinates(self) -> DenseVectors[DType.float32, Self.origin]:
         """Where each draw is placed, one row of three values apiece.
@@ -626,7 +651,7 @@ struct DenseDraws[origin: MutOrigin](Movable, Sized):
         Returns:
             The places, read in place from the same arena.
         """
-        return {self.outputs.coordinates, len(self)}
+        return {self.outputs.coordinates, len(self), self.viewing}
 
 
 @fieldwise_init
@@ -649,29 +674,41 @@ struct DenseProducts[origin: MutOrigin](Movable):
     """Pairs the walks scored, or keys the queries scored for `maxsim`, before `wanted` cut any;
     above `pairs` means some lists were truncated."""
 
-    def offsets(ref self) -> Span[c_size_t, origin_of(self)]:
+    var viewing: ArenaRead
+    """The arena the result reads and the generation the call that wrote it brought it to."""
+
+    def offsets(ref self) raises Error -> Span[c_size_t, origin_of(self)]:
         """One more offset than queries, as Apache Arrow lays a ragged batch out.
 
         Returns:
             The offsets into `keys()` and `scores()`, viewed from the arena this result reads.
         """
-        return _in_arena[c_size_t, origin_of(self)](self.view.offsets, self.queries + 1)
+        self.viewing.open("DenseProducts.offsets")
+        var viewed = _in_arena[c_size_t, origin_of(self)](self.view.offsets, self.queries + 1)
+        self.viewing.close()
+        return viewed
 
-    def keys(ref self) -> Span[Key, origin_of(self)]:
+    def keys(ref self) raises Error -> Span[Key, origin_of(self)]:
         """Each pair's indexed entry, viewed from the arena this result reads.
 
         Returns:
             One key per pair.
         """
-        return _in_arena[Key, origin_of(self)](self.view.keys, self.pairs)
+        self.viewing.open("DenseProducts.keys")
+        var viewed = _in_arena[Key, origin_of(self)](self.view.keys, self.pairs)
+        self.viewing.close()
+        return viewed
 
-    def scores(ref self) -> Span[Distance, origin_of(self)]:
+    def scores(ref self) raises Error -> Span[Distance, origin_of(self)]:
         """Each pair's product, positionally paired with `keys()`.
 
         Returns:
             One score per pair.
         """
-        return _in_arena[Distance, origin_of(self)](self.view.scores, self.pairs)
+        self.viewing.open("DenseProducts.scores")
+        var viewed = _in_arena[Distance, origin_of(self)](self.view.scores, self.pairs)
+        self.viewing.close()
+        return viewed
 
 
 # endregion Configuration
@@ -1744,7 +1781,7 @@ struct _DenseReserveCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, c_size_t(self.capacity)}
 
-    def conclude(deinit self, outputs: Unwritten) -> NoneType:
+    def conclude(deinit self, outputs: Unwritten, viewing: ArenaRead) -> NoneType:
         return None
 
 
@@ -1764,7 +1801,7 @@ struct _DenseClearCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion}
 
-    def conclude(deinit self, outputs: Unwritten) -> NoneType:
+    def conclude(deinit self, outputs: Unwritten, viewing: ArenaRead) -> NoneType:
         return None
 
 
@@ -1784,7 +1821,7 @@ struct _DenseDescribeCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, outputs}
 
-    def conclude(deinit self, outputs: DenseIndexDescription) -> DenseIndexDescription:
+    def conclude(deinit self, outputs: DenseIndexDescription, viewing: ArenaRead) -> DenseIndexDescription:
         return outputs
 
 
@@ -1812,7 +1849,7 @@ struct _DenseCountCall(Call):
             Pointer(to=outputs[].value),
         }
 
-    def conclude(deinit self, outputs: DenseCountOutputs) -> Int:
+    def conclude(deinit self, outputs: DenseCountOutputs, viewing: ArenaRead) -> Int:
         return Int(outputs.value)
 
 
@@ -1844,8 +1881,11 @@ struct _DenseGetCall[dtype: DType, kind: ScalarKind, origin: MutOrigin](Call):
             Self.kind,
         }
 
-    def conclude(deinit self, outputs: DenseGetOutputs) -> Self.Result:
-        return {outputs.vectors, Int(outputs.written)}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: DenseGetOutputs, viewing: ArenaRead) -> Self.Result:
+        return {outputs.vectors, Int(outputs.written), viewing}
 
 
 @fieldwise_init
@@ -1885,7 +1925,7 @@ struct _DenseInsertCall(Call):
     def lengths_agree(self) -> Bool:
         return self.keys_count == self.count
 
-    def conclude(deinit self, outputs: Unwritten) -> NoneType:
+    def conclude(deinit self, outputs: Unwritten, viewing: ArenaRead) -> NoneType:
         return None
 
 
@@ -1921,7 +1961,7 @@ struct _DenseRefineCall(Call):
             self.phase,
         }
 
-    def conclude(deinit self, outputs: DenseRefineReport) -> DenseRefineReport:
+    def conclude(deinit self, outputs: DenseRefineReport, viewing: ArenaRead) -> DenseRefineReport:
         return outputs
 
 
@@ -1942,7 +1982,7 @@ struct _DenseRefinePlanFinishCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, self.plan, outputs}
 
-    def conclude(deinit self, outputs: DenseRefineReport) -> DenseRefineReport:
+    def conclude(deinit self, outputs: DenseRefineReport, viewing: ArenaRead) -> DenseRefineReport:
         return outputs
 
 
@@ -1962,7 +2002,7 @@ struct _DenseHealthCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, outputs}
 
-    def conclude(deinit self, outputs: DenseReachability) -> DenseReachability:
+    def conclude(deinit self, outputs: DenseReachability, viewing: ArenaRead) -> DenseReachability:
         return outputs
 
 
@@ -2045,7 +2085,7 @@ struct _DenseReshardCall(Call):
             self.phase,
         }
 
-    def conclude(deinit self, outputs: DenseRefineReport) -> DenseRefineReport:
+    def conclude(deinit self, outputs: DenseRefineReport, viewing: ArenaRead) -> DenseRefineReport:
         return outputs
 
 
@@ -2066,7 +2106,7 @@ struct _DenseReshardPlanFinishCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.executor, head.outcome, head.completion, self.plan, outputs}
 
-    def conclude(deinit self, outputs: DenseRefineReport) -> DenseRefineReport:
+    def conclude(deinit self, outputs: DenseRefineReport, viewing: ArenaRead) -> DenseRefineReport:
         return outputs
 
 
@@ -2120,8 +2160,11 @@ struct _DenseSampleCall[origin: MutOrigin](Call):
     def lengths_agree(self) -> Bool:
         return self.shown_coordinates_count == 3 * self.shown_count
 
-    def conclude(deinit self, outputs: DenseSampleOutputs) -> Self.Result:
-        return {outputs}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: DenseSampleOutputs, viewing: ArenaRead) -> Self.Result:
+        return {outputs, viewing}
 
 
 @fieldwise_init
@@ -2165,8 +2208,11 @@ struct _DenseSearchCall[origin: MutOrigin](Call):
             self.stats,
         }
 
-    def conclude(deinit self, outputs: MatchesViewArguments) -> Self.Result:
-        return {outputs, self.count}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: MatchesViewArguments, viewing: ArenaRead) -> Self.Result:
+        return {outputs, self.count, viewing}
 
 
 @fieldwise_init
@@ -2216,9 +2262,12 @@ struct _DenseMaxsimCall[origin: MutOrigin](Call):
     def lengths_agree(self) -> Bool:
         return self.rows_per_query > 0 and self.rows % self.rows_per_query == 0
 
-    def conclude(deinit self, outputs: DenseMultiplyOutputs) -> Self.Result:
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: DenseMultiplyOutputs, viewing: ArenaRead) -> Self.Result:
         var queries = self.rows // self.rows_per_query if self.rows_per_query > 0 else 0
-        return {outputs.products, queries, Int(outputs.written), Int(outputs.required)}
+        return {outputs.products, queries, Int(outputs.written), Int(outputs.required), viewing}
 
 
 @fieldwise_init
@@ -2261,8 +2310,11 @@ struct _DenseMultiplyCall[origin: MutOrigin](Call):
             self.stats,
         }
 
-    def conclude(deinit self, outputs: DenseMultiplyOutputs) -> Self.Result:
-        return {outputs.products, self.count, Int(outputs.written), Int(outputs.required)}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: DenseMultiplyOutputs, viewing: ArenaRead) -> Self.Result:
+        return {outputs.products, self.count, Int(outputs.written), Int(outputs.required), viewing}
 
 
 @fieldwise_init
@@ -2317,8 +2369,12 @@ struct _DenseAttendCall[dtype: DType, kind: ScalarKind, origin: MutOrigin](Call)
         # The carry crosses as a bare pointer, so only this side can see it fall short of the rows.
         return not self.carry or self.carry_count >= self.count
 
-    def conclude(deinit self, outputs: DenseAttendOutputs) -> Self.Result:
-        return {outputs.outputs, self.count}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: DenseAttendOutputs, viewing: ArenaRead) -> Self.Result:
+        var written = outputs
+        return {written.outputs, self.count, viewing}
 
 
 @fieldwise_init
@@ -2338,7 +2394,7 @@ struct _DenseSaveCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, self.path, ProgressArguments()}
 
-    def conclude(deinit self, outputs: Unwritten) -> NoneType:
+    def conclude(deinit self, outputs: Unwritten, viewing: ArenaRead) -> NoneType:
         return None
 
 
@@ -2359,8 +2415,11 @@ struct _DenseSaveBufferCall[origin: MutOrigin](Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, outputs, self.arena, ProgressArguments()}
 
-    def conclude(deinit self, outputs: DenseSaveBufferOutputs) -> Self.Result:
-        return {outputs.data, Int(outputs.length)}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: DenseSaveBufferOutputs, viewing: ArenaRead) -> Self.Result:
+        return {outputs.data, Int(outputs.length), viewing}
 
 
 @fieldwise_init
@@ -2394,8 +2453,11 @@ struct _DenseCursorNextCall[origin: MutOrigin](Call):
             c_size_t(self.wanted),
         }
 
-    def conclude(deinit self, outputs: DenseCursorNextOutputs) -> Self.Result:
-        return {outputs.keys, self.links, outputs.links, Int(outputs.written)}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: DenseCursorNextOutputs, viewing: ArenaRead) -> Self.Result:
+        return {outputs.keys, self.links, outputs.links, Int(outputs.written), viewing}
 
 
 @fieldwise_init
@@ -2426,8 +2488,11 @@ struct _DenseSearchStreamNextCall[origin: MutOrigin](Call):
             c_size_t(self.wanted),
         }
 
-    def conclude(deinit self, outputs: MatchesViewArguments) -> Self.Result:
-        return {outputs, 1}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: MatchesViewArguments, viewing: ArenaRead) -> Self.Result:
+        return {outputs, 1, viewing}
 
 
 # endregion Calls
@@ -3750,7 +3815,8 @@ struct DenseIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
     def get[
         dtype: DType, kind: ScalarKind = ScalarKind.of[dtype]()
     ](self, key: Key, mut arena: Arena) -> Deferred[_DenseGetCall[dtype, kind, origin_of(arena)], Self.origin]:
-        """Submits `DenseVerbs.get`; the arena must stay allocated and unchanged until final. Calls `usearch_dense_get`."""
+        """Submits `DenseVerbs.get`; the arena must stay allocated and unchanged until final. Calls `usearch_dense_get`.
+        """
         comptime assert kind.stores[dtype](), "the element type must store the kind whole"
         return {
             self.index[].library,
@@ -3764,7 +3830,8 @@ struct DenseIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
     ](self, path: StringSlice[path_origin]) -> Deferred[
         _DenseSaveCall, ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[path_origin]()))
     ]:
-        """Submits `DenseVerbs.save`; the path must stay allocated and unchanged until final. Calls `usearch_dense_save`."""
+        """Submits `DenseVerbs.save`; the path must stay allocated and unchanged until final. Calls `usearch_dense_save`.
+        """
         return {
             self.index[].library,
             _DenseSaveCall(BytesView.of(path).arguments()),
@@ -3773,7 +3840,8 @@ struct DenseIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         }
 
     def save_buffer(self, mut arena: Arena) -> Deferred[_DenseSaveBufferCall[origin_of(arena)], Self.origin]:
-        """Submits `DenseVerbs.save_buffer`; the arena must stay allocated and unchanged until final. Calls `usearch_dense_save_buffer`."""
+        """Submits `DenseVerbs.save_buffer`; the arena must stay allocated and unchanged until final. Calls `usearch_dense_save_buffer`.
+        """
         return {
             self.index[].library,
             _DenseSaveBufferCall[origin_of(arena)](arena._address),
@@ -3937,7 +4005,9 @@ struct DenseCursor[origin: ImmOrigin]:
         Raises:
             `Error` if the engine refuses the copy.
         """
-        return self._next(_DenseCursorNextCall[origin_of(arena)](self.address, False, wanted, arena._address), NULL_ADDRESS)
+        return self._next(
+            _DenseCursorNextCall[origin_of(arena)](self.address, False, wanted, arena._address), NULL_ADDRESS
+        )
 
     def next_links(self, wanted: Int, mut arena: Arena) raises Error -> DenseBatch[origin_of(arena)]:
         """Copies up to `wanted` next keys into a passed arena, each with the keys it links to.
@@ -3953,7 +4023,9 @@ struct DenseCursor[origin: ImmOrigin]:
         Raises:
             `Error` if the engine refuses the copy.
         """
-        return self._next(_DenseCursorNextCall[origin_of(arena)](self.address, True, wanted, arena._address), NULL_ADDRESS)
+        return self._next(
+            _DenseCursorNextCall[origin_of(arena)](self.address, True, wanted, arena._address), NULL_ADDRESS
+        )
 
     def on(ref self, ref executor: Executor) -> DenseCursorOn[Self.origin, ImmOrigin(origin_of(self, executor))]:
         """The receiver whose pulls block on `executor`, named again for every pull. Binding-only.

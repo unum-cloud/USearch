@@ -2401,20 +2401,29 @@ struct usearch_arena_handle_t {
      *  while any is open, no call rewinds the arena and its free frees nothing. */
     util::u32_t exports = 0;
 
+    /** Calls that took the arena and found no export open, each advancing it once before it
+     *  writes, through the standard reference; @c usearch_arena_generation reads it. */
+    util::u64_t generation = 0;
+
     /** Where the memory lives: host pages, or a device's VRAM. */
     arena_residency_t residency() const noexcept {
         return device_memory ? vram_residency(static_cast<std::size_t>(device_memory.device())) : ram_residency_k;
     }
 };
 
-/** Holds @p arena for the call whose outcome is @p call, answering whether it was free or already
- *  that call's; a null arena holds nothing, left for the verb to refuse. */
-inline bool hold_arena(usearch_arena_t arena, usearch_outcome_t const* call) noexcept {
-    if (!arena) return true;
+/** How a call stands with an arena it names: refused by another holder, newly taken, or taken
+ *  before by itself. */
+enum class arena_hold_t { refused_k, taken_k, retaken_k };
+
+/** Holds @p arena for the call whose outcome is @p call ; a null arena holds nothing, left for the
+ *  verb to refuse, and has no generation to advance. */
+inline arena_hold_t hold_arena(usearch_arena_t arena, usearch_outcome_t const* call) noexcept {
+    if (!arena) return arena_hold_t::retaken_k;
     usearch_outcome_t const* holder = nullptr;
-    return fu::standard_atomic_ref<usearch_outcome_t const*>(arena->holder)
-               .compare_exchange_strong(holder, call, std::memory_order_seq_cst, std::memory_order_acquire) ||
-           holder == call;
+    if (fu::standard_atomic_ref<usearch_outcome_t const*> {arena->holder}.compare_exchange_strong(
+            holder, call, std::memory_order_seq_cst, std::memory_order_acquire))
+        return arena_hold_t::taken_k;
+    return holder == call ? arena_hold_t::retaken_k : arena_hold_t::refused_k;
 }
 
 /** Whether a consumer still holds an export of @p arena 's outputs; a null arena has none. A call
@@ -2509,12 +2518,18 @@ inline usearch_arena_handle_t* claim_arena(usearch_arena_t arena, usearch_outcom
         return propagate_error(usearch_status_device_k, outcome,
                                "A device arena serves calls on the executor that made it"),
                nullptr;
-    if (!hold_arena(arena, call))
+    // A call on an executor took the arena at its entry, which checked the exports and advanced it
+    arena_hold_t const hold = hold_arena(arena, call);
+    if (hold == arena_hold_t::refused_k)
         return propagate_error(usearch_status_contended_k, outcome, "The arena serves another call"), nullptr;
-    if (exported(arena))
-        return release_arena(arena, call),
-               propagate_error(usearch_status_contended_k, outcome, "An export of the arena's outputs is open"),
-               nullptr;
+    if (hold == arena_hold_t::taken_k) {
+        if (exported(arena))
+            return release_arena(arena, call),
+                   propagate_error(usearch_status_contended_k, outcome, "An export of the arena's outputs is open"),
+                   nullptr;
+        // Relaxed, as the arena hold's release and the export handshake order it for readers
+        fu::standard_atomic_ref<util::u64_t> {arena->generation}.fetch_add(1, std::memory_order_relaxed);
+    }
     for (void const* input : inputs)
         if (input && arena_contains(*arena, input))
             return propagate_error(usearch_status_invalid_argument_k, outcome,
@@ -2965,6 +2980,21 @@ inline bool submitted(arguments_type_* arguments) noexcept {
     holding_call_t& call = executor->holding_call;
     if (host_outcome_verbs().take_claim(&call.claim) == call_claim_t::held_k)
         return propagate_error(usearch_status_contended_k, arguments->outcome, "Another call holds the executor"), true;
+    usearch_arena_t const arena = arena_of(*arguments);
+    arena_hold_t const hold = hold_arena(arena, arguments->outcome);
+    // An export opened since the check above sees the hold and backs out, or this load sees it
+    bool const export_open = hold == arena_hold_t::taken_k && exported(arena);
+    if (hold == arena_hold_t::refused_k || export_open) {
+        if (export_open) release_arena(arena, arguments->outcome);
+        host_outcome_verbs().release_claim(&call.claim);
+        return propagate_error(
+                   usearch_status_contended_k, arguments->outcome,
+                   export_open ? "An export of the arena's outputs is open" : "The arena serves another call"),
+               true;
+    }
+    // Relaxed, as the arena hold's release and the export handshake order it for readers
+    if (hold == arena_hold_t::taken_k)
+        fu::standard_atomic_ref<util::u64_t> {arena->generation}.fetch_add(1, std::memory_order_relaxed);
     await_delegated_call(*executor);
     call.outcome = arguments->outcome;
     call.named_calls = raise_named_calls(*arguments);
@@ -2985,9 +3015,11 @@ inline bool submitted(arguments_type_* arguments) noexcept {
         verb_(delegated);
         end_call(held);
     };
-    if (util::failed(threads_of(*executor)->unsafe_for_threads(delegated_body, executor)))
-        return call.recorded = {usearch_status_contended_k, "The pool runs another dispatch"}, end_call(*executor),
-               true;
+    if (util::failed(threads_of(*executor)->unsafe_for_threads(delegated_body, executor))) {
+        // No body runs to let go of the arena the entry took
+        release_arena(arena, arguments->outcome);
+        call.recorded = {usearch_status_contended_k, "The pool runs another dispatch"}, end_call(*executor);
+    }
     return true;
 }
 

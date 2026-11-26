@@ -1190,13 +1190,16 @@ public final class DenseIndex implements AutoCloseable {
         private final long columns;
         private final long strideBytes;
         private final Scalar scalar;
+        private final Types.Stamp stamp;
 
-        private DenseVectors(MemorySegment data, long rows, long columns, long strideBytes, Scalar scalar) {
+        private DenseVectors(
+                MemorySegment data, long rows, long columns, long strideBytes, Scalar scalar, Types.Stamp stamp) {
             this.data = data;
             this.rows = rows;
             this.columns = columns;
             this.strideBytes = strideBytes;
             this.scalar = scalar;
+            this.stamp = stamp;
         }
 
         /** Lifts the {@code usearch_rows_view_t} of {@code rows} rows a call wrote into its arena. */
@@ -1209,7 +1212,8 @@ public final class DenseIndex implements AutoCloseable {
                     rows,
                     (long) Library.ROWS_COLUMNS.get(view, 0L),
                     stride,
-                    Scalar.of((int) Library.ROWS_SCALAR.get(view, 0L)));
+                    Scalar.of((int) Library.ROWS_SCALAR.get(view, 0L)),
+                    call.stamp());
         }
 
         /** How many rows the call wrote; zero when a key holds none. */
@@ -1232,9 +1236,13 @@ public final class DenseIndex implements AutoCloseable {
             return scalar;
         }
 
-        /** The rows in place, in native byte order. */
+        /**
+         * The rows in place, in native byte order, valid until the arena's next call.
+         *
+         * @throws USearchException CONTENDED once a later call took the arena.
+         */
         public MemorySegment segment() {
-            return data;
+            return stamp.read(() -> data);
         }
     }
 
@@ -1250,14 +1258,21 @@ public final class DenseIndex implements AutoCloseable {
         private final MemorySegment keys;
         private final MemorySegment scores;
         private final long required;
+        private final Types.Stamp stamp;
 
         private DenseProducts(
-                MemorySegment offsets, int queries, MemorySegment keys, MemorySegment scores, long required) {
+                MemorySegment offsets,
+                int queries,
+                MemorySegment keys,
+                MemorySegment scores,
+                long required,
+                Types.Stamp stamp) {
             this.offsets = offsets;
             this.queries = queries;
             this.keys = keys;
             this.scores = scores;
             this.required = required;
+            this.stamp = stamp;
         }
 
         /** Lifts the {@code usearch_matches_tape_view_t} a call over {@code queries} wrote into its arena. */
@@ -1267,7 +1282,8 @@ public final class DenseIndex implements AutoCloseable {
                     queries,
                     call.reach((MemorySegment) Library.TAPE_KEYS.get(view, 0L), pairs * Key.BYTES),
                     call.reach((MemorySegment) Library.TAPE_SCORES.get(view, 0L), pairs * Double.BYTES),
-                    required);
+                    required,
+                    call.stamp());
         }
 
         /** Left rows the call multiplied, or queries it scored. */
@@ -1292,8 +1308,8 @@ public final class DenseIndex implements AutoCloseable {
             if (query < 0 || query >= queries) {
                 throw new USearchException(Status.SHAPE_MISMATCH, "the query is outside the batch");
             }
-            return offsets.getAtIndex(ValueLayout.JAVA_LONG, query + 1)
-                    - offsets.getAtIndex(ValueLayout.JAVA_LONG, query);
+            return stamp.read(() -> offsets.getAtIndex(ValueLayout.JAVA_LONG, query + 1)
+                    - offsets.getAtIndex(ValueLayout.JAVA_LONG, query));
         }
 
         /**
@@ -1303,7 +1319,7 @@ public final class DenseIndex implements AutoCloseable {
          *     its pairs.
          */
         public Key key(int query, long rank) {
-            return Key.read(keys, pairOf(query, rank) * Key.BYTES);
+            return stamp.read(() -> Key.read(keys, pairOf(query, rank) * Key.BYTES));
         }
 
         /**
@@ -1313,7 +1329,7 @@ public final class DenseIndex implements AutoCloseable {
          *     its pairs.
          */
         public double score(int query, long rank) {
-            return scores.getAtIndex(ValueLayout.JAVA_DOUBLE, pairOf(query, rank));
+            return stamp.read(() -> scores.getAtIndex(ValueLayout.JAVA_DOUBLE, pairOf(query, rank)));
         }
 
         private long pairOf(int query, long rank) {
@@ -1321,7 +1337,7 @@ public final class DenseIndex implements AutoCloseable {
             if (rank < 0 || rank >= pairs) {
                 throw new USearchException(Status.SHAPE_MISMATCH, "the query holds " + pairs + " pairs");
             }
-            return offsets.getAtIndex(ValueLayout.JAVA_LONG, query) + rank;
+            return stamp.read(() -> offsets.getAtIndex(ValueLayout.JAVA_LONG, query) + rank);
         }
     }
 
@@ -1337,18 +1353,21 @@ public final class DenseIndex implements AutoCloseable {
         private final Matches parents;
         private final MemorySegment coordinates;
         private final long written;
+        private final Types.Stamp stamp;
 
         private Sample(
                 MemorySegment keys,
                 MemorySegment entryOrdinals,
                 Matches parents,
                 MemorySegment coordinates,
-                long written) {
+                long written,
+                Types.Stamp stamp) {
             this.keys = keys;
             this.entryOrdinals = entryOrdinals;
             this.parents = parents;
             this.coordinates = coordinates;
             this.written = written;
+            this.stamp = stamp;
         }
 
         /** Lifts the outputs of a {@code usearch_dense_sample} that wrote {@code written} draws. */
@@ -1370,7 +1389,8 @@ public final class DenseIndex implements AutoCloseable {
                     call.reach(
                             (MemorySegment) Library.ROWS_DATA.get(coordinates, 0L),
                             Types.Extents.product(written, 3 * Float.BYTES, "the coordinates")),
-                    written);
+                    written,
+                    call.stamp());
         }
 
         /** How many draws the call wrote; fewer than wanted only once the region is exhausted. */
@@ -1384,7 +1404,7 @@ public final class DenseIndex implements AutoCloseable {
          * @throws USearchException SHAPE_MISMATCH when the draw is past the sample.
          */
         public Key key(long draw) {
-            return Key.read(keys, checked(draw) * Key.BYTES);
+            return stamp.read(() -> Key.read(keys, checked(draw) * Key.BYTES));
         }
 
         /**
@@ -1393,7 +1413,7 @@ public final class DenseIndex implements AutoCloseable {
          * @throws USearchException the statuses {@link #key(long)} names.
          */
         public long entryOrdinal(long draw) {
-            return entryOrdinals.getAtIndex(ValueLayout.JAVA_LONG, checked(draw));
+            return stamp.read(() -> entryOrdinals.getAtIndex(ValueLayout.JAVA_LONG, checked(draw)));
         }
 
         /** The one shown or earlier draw each draw hangs from and its distance, one query per draw. */
@@ -1411,7 +1431,7 @@ public final class DenseIndex implements AutoCloseable {
             if (axis < 0 || axis >= 3) {
                 throw new USearchException(Status.SHAPE_MISMATCH, "a draw is placed in three dimensions");
             }
-            return coordinates.getAtIndex(ValueLayout.JAVA_FLOAT, checked(draw) * 3 + axis);
+            return stamp.read(() -> coordinates.getAtIndex(ValueLayout.JAVA_FLOAT, checked(draw) * 3 + axis));
         }
 
         private long checked(long draw) {
@@ -1433,18 +1453,21 @@ public final class DenseIndex implements AutoCloseable {
         private final long written;
         private final @Nullable MemorySegment linkOffsets;
         private final MemorySegment linkKeys;
+        private final Types.Stamp stamp;
 
         private DenseBatch(
                 MemorySegment keys,
                 long keysStride,
                 long written,
                 @Nullable MemorySegment linkOffsets,
-                MemorySegment linkKeys) {
+                MemorySegment linkKeys,
+                Types.Stamp stamp) {
             this.keys = keys;
             this.keysStride = keysStride;
             this.written = written;
             this.linkOffsets = linkOffsets;
             this.linkKeys = linkKeys;
+            this.stamp = stamp;
         }
 
         /** How many entries the pull wrote; zero once the walk is exhausted. */
@@ -1461,7 +1484,7 @@ public final class DenseIndex implements AutoCloseable {
             if (entry < 0 || entry >= written) {
                 throw new USearchException(Status.SHAPE_MISMATCH, "the batch holds " + written + " entries");
             }
-            return Key.read(keys, entry * keysStride);
+            return stamp.read(() -> Key.read(keys, entry * keysStride));
         }
 
         /**
@@ -1472,8 +1495,8 @@ public final class DenseIndex implements AutoCloseable {
          */
         public long linkCount(long entry) {
             MemorySegment offsets = linked(entry);
-            return offsets.getAtIndex(ValueLayout.JAVA_LONG, entry + 1)
-                    - offsets.getAtIndex(ValueLayout.JAVA_LONG, entry);
+            return stamp.read(() -> offsets.getAtIndex(ValueLayout.JAVA_LONG, entry + 1)
+                    - offsets.getAtIndex(ValueLayout.JAVA_LONG, entry));
         }
 
         /**
@@ -1483,11 +1506,11 @@ public final class DenseIndex implements AutoCloseable {
          *     the rank is past the entry's links.
          */
         public Key link(long entry, long rank) {
-            long begin = linked(entry).getAtIndex(ValueLayout.JAVA_LONG, entry);
+            long begin = stamp.read(() -> linked(entry).getAtIndex(ValueLayout.JAVA_LONG, entry));
             if (rank < 0 || rank >= linkCount(entry)) {
                 throw new USearchException(Status.SHAPE_MISMATCH, "the entry links to " + linkCount(entry) + " keys");
             }
-            return Key.read(linkKeys, (begin + rank) * Key.BYTES);
+            return stamp.read(() -> Key.read(linkKeys, (begin + rank) * Key.BYTES));
         }
 
         private MemorySegment linked(long entry) {
@@ -1619,7 +1642,8 @@ public final class DenseIndex implements AutoCloseable {
                         stride,
                         count,
                         offsets,
-                        linkKeys);
+                        linkKeys,
+                        call.stamp());
             };
         });
     }

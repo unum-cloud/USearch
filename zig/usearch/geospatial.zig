@@ -34,6 +34,7 @@ const QueryMatches = types.QueryMatches;
 const Status = types.Status;
 const Traversal = types.Traversal;
 const outputSlice = types.outputSlice;
+const ArenaWrite = types.ArenaWrite;
 const refuseInto = types.refuseInto;
 const Deferred = dense.Deferred;
 const DenseCursorBatch = dense.DenseCursorBatch;
@@ -673,7 +674,6 @@ const usearch_geospatial_cursor_init_t = extern struct {
     cursor: *?*anyopaque,
 };
 
-
 const usearch_geospatial_cursor_next_t = extern struct {
     index: ?*anyopaque,
     executor: ?*anyopaque,
@@ -803,7 +803,7 @@ extern fn usearch_geospatial_describe(arguments: *usearch_geospatial_describe_t)
 /// var arena = try usearch.Arena.init(null);
 /// defer arena.deinit();
 /// const nearby = try index.within(stops[0..1], 500, &arena, .{}); // every stop within 500 metres
-/// const first = nearby.query(0).keys;
+/// const first = (try nearby.query(0)).keys;
 /// ```
 pub const GeospatialIndex = extern struct {
     /// The opaque `usearch_geospatial_index_t` the ABI hands back.
@@ -1264,6 +1264,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub fn get(self: Self, key: Key, arena: *Arena) Answer(GeospatialObservations) {
             var local: Deferred(GeospatialObservations) = undefined;
             const held = self.hold(&local, .{});
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_geospatial_get_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1350,6 +1351,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub fn search(self: Self, queries: []const GeospatialObservation, wanted: usize, arena: *Arena, config: GeospatialSearchConfig) Answer(Matches) {
             var local: Deferred(Matches) = undefined;
             const held = self.hold(&local, .{ .queries = queries.len });
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_geospatial_search_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1376,6 +1378,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub fn within(self: Self, queries: []const GeospatialObservation, metres: f64, arena: *Arena, config: GeospatialWithinConfig) Answer(GeospatialMatches) {
             var local: Deferred(GeospatialMatches) = undefined;
             const held = self.hold(&local, .{ .queries = queries.len });
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_geospatial_within_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1444,6 +1447,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
             if (config.shown.len != config.shown_coordinates.len) return self.refused(.shape_mismatch, "The shown keys and coordinates disagree in length");
             var local: Deferred(DenseDraws) = undefined;
             const held = self.hold(&local, .{});
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_geospatial_sample_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1474,6 +1478,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub fn cursorNext(self: Self, cursor: GeospatialCursor, wanted: usize, links: bool, arena: *Arena) Answer(DenseCursorBatch) {
             var local: Deferred(DenseCursorBatch) = undefined;
             const held = self.hold(&local, .{});
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_geospatial_cursor_next_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1510,6 +1515,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub fn saveBuffer(self: Self, arena: *Arena, config: DenseSaveBufferConfig) Answer(Monolith) {
             var local: Deferred(Monolith) = undefined;
             const held = self.hold(&local, .{});
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_geospatial_save_buffer_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1528,12 +1534,15 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
 /// The observations a `get` wrote into an arena, in insertion order, readable until the arena's
 /// next call.
 pub const GeospatialObservations = struct {
+    write: ArenaWrite = .{},
     view: ?[*]const GeospatialObservation = null,
     /// Observations written; zero for an absent key.
     written: usize = 0,
 
     /// The observations, within the rounding the index stores them at.
-    pub fn observations(self: GeospatialObservations) []const GeospatialObservation {
+    pub fn observations(self: GeospatialObservations) Error![]const GeospatialObservation {
+        try self.write.open();
+        defer self.write.close();
         return outputSlice(GeospatialObservation, self.view, 0, self.written);
     }
 };
@@ -1542,6 +1551,7 @@ pub const GeospatialObservations = struct {
 /// `i` spans matches `offsets[i]` up to `offsets[i + 1]` of `keys` and `scores`, readable until the
 /// arena's next call. Mirrors `usearch_matches_tape_view_t`.
 pub const GeospatialMatches = struct {
+    write: ArenaWrite = .{},
     view: usearch_matches_tape_view_t = .{},
     /// Queries the call resolved.
     queries: usize,
@@ -1549,25 +1559,33 @@ pub const GeospatialMatches = struct {
     written: usize = 0,
 
     /// The matches of one query in chord metres, in no promised order, `position` below `queries`.
-    pub fn query(self: GeospatialMatches, position: usize) QueryMatches {
-        const tape = self.offsets();
+    pub fn query(self: GeospatialMatches, position: usize) Error!QueryMatches {
+        try self.write.open();
+        defer self.write.close();
+        const tape = try self.offsets();
         const begin = tape[position];
         const length = tape[position + 1] - begin;
         return .{ .keys = outputSlice(Key, self.view.keys, begin, length), .scores = outputSlice(Distance, self.view.scores, begin, length) };
     }
 
     /// The `queries + 1` offsets.
-    pub fn offsets(self: GeospatialMatches) []const usize {
+    pub fn offsets(self: GeospatialMatches) Error![]const usize {
+        try self.write.open();
+        defer self.write.close();
         return outputSlice(usize, self.view.offsets, 0, self.queries + 1);
     }
 
     /// Every match's key, end to end.
-    pub fn keys(self: GeospatialMatches) []const Key {
+    pub fn keys(self: GeospatialMatches) Error![]const Key {
+        try self.write.open();
+        defer self.write.close();
         return outputSlice(Key, self.view.keys, 0, self.written);
     }
 
     /// Every match's chord metres, positionally paired with `keys`.
-    pub fn scores(self: GeospatialMatches) []const Distance {
+    pub fn scores(self: GeospatialMatches) Error![]const Distance {
+        try self.write.open();
+        defer self.write.close();
         return outputSlice(Distance, self.view.scores, 0, self.written);
     }
 };
@@ -1664,8 +1682,8 @@ test "observations cross as the library's own structs, and a search finds each a
     defer arena.deinit();
     const matches = try index.on(executor).search(&cities, 1, &arena, .{ .relation = .near });
     for (keys, 0..) |key, query| {
-        try std.testing.expectEqual(key, matches.query(query).keys[0]);
-        try std.testing.expectEqual(@as(f64, 0), matches.query(query).scores[0]);
+        try std.testing.expectEqual(key, (try matches.query(query)).keys[0]);
+        try std.testing.expectEqual(@as(f64, 0), (try matches.query(query)).scores[0]);
     }
     // A handle without terrain refuses a line of sight.
     try std.testing.expectError(Error.Unsupported, index.search(cities[0..1], 1, &arena, .{ .relation = .visible }));
@@ -1673,7 +1691,7 @@ test "observations cross as the library's own structs, and a search finds each a
     try std.testing.expectEqual(GeospatialKeyStats{ .entries = 1 }, try index.on(executor).count(keys[1]));
     try std.testing.expectEqual(true, try index.contains(keys[1]));
     try std.testing.expectEqual(false, try index.on(executor).contains(.fromInteger(99)));
-    const stored = (try index.on(executor).get(keys[1], &arena)).observations();
+    const stored = try (try index.on(executor).get(keys[1], &arena)).observations();
     try std.testing.expectEqual(@as(usize, 1), stored.len);
     try std.testing.expectApproxEqAbs(@as(f64, 52.52), stored[0].latitude_degrees, 1e-6);
     try std.testing.expect(std.math.isNan(stored[0].heading_degrees));
@@ -1681,10 +1699,10 @@ test "observations cross as the library's own structs, and a search finds each a
 
     var walk = try GeospatialCursor.init(index, &.{});
     defer walk.deinit();
-    try std.testing.expectEqualSlices(Key, &keys, (try index.on(executor).cursorNext(walk, 4, false, &arena)).keys());
+    try std.testing.expectEqualSlices(Key, &keys, try (try index.on(executor).cursorNext(walk, 4, false, &arena)).keys());
     try std.testing.expectEqual(@as(usize, 0), (try index.cursorNext(walk, 4, false, &arena)).written);
 
-    const monolith = (try index.on(executor).saveBuffer(&arena, .{})).bytes();
+    const monolith = try (try index.on(executor).saveBuffer(&arena, .{})).bytes();
     try std.testing.expectEqual(description.metadata, try GeospatialIndex.metadataReadBuffer(monolith, .{ .executor = executor }));
     var copy = try GeospatialIndex.loadRamBuffer(monolith, .{ .executor = executor });
     defer copy.deinit();
@@ -1706,7 +1724,7 @@ test "observations cross as the library's own structs, and a search finds each a
     const reachability = try index.on(executor).health();
     try std.testing.expectEqual([2]usize{ 3, 3 }, [2]usize{ reachability.audited, reachability.reachable });
     const draws = try index.on(executor).sample(2, &arena, .{ .seed = 42 });
-    try std.testing.expectEqual(draws.written, draws.coordinates().len);
+    try std.testing.expectEqual(draws.written, (try draws.coordinates()).len);
 }
 
 test "within reports every entry inside the radius, and refuses a zero one" {
@@ -1720,11 +1738,11 @@ test "within reports every entry inside the radius, and refuses a zero one" {
     defer arena.deinit();
     const nearby = try index.within(places[0..1], 2000, &arena, .{});
     var found: [2]u64 = undefined;
-    try std.testing.expectEqual(@as(usize, 2), nearby.query(0).keys.len);
-    for (nearby.query(0).keys, &found) |key, *integer| integer.* = key.asInteger().?;
+    try std.testing.expectEqual(@as(usize, 2), (try nearby.query(0)).keys.len);
+    for ((try nearby.query(0)).keys, &found) |key, *integer| integer.* = key.asInteger().?;
     std.mem.sort(u64, &found, {}, std.sort.asc(u64));
     try std.testing.expectEqual([2]u64{ 1, 2 }, found);
-    try std.testing.expectEqual(nearby.written, nearby.offsets()[1]);
+    try std.testing.expectEqual(nearby.written, (try nearby.offsets())[1]);
     try std.testing.expectError(Error.InvalidArgument, index.within(places[0..1], 0, &arena, .{}));
 
     // A deferred call is the same verb, final once waited on.
@@ -1735,7 +1753,7 @@ test "within reports every entry inside the radius, and refuses a zero one" {
     var call: Deferred(GeospatialMatches) = undefined;
     try index.deferred(executor, &call).within(places[2..3], 2000, &other, .{});
     defer call.deinit();
-    try std.testing.expectEqualSlices(Key, keys[2..3], (try call.wait()).query(0).keys);
+    try std.testing.expectEqualSlices(Key, keys[2..3], (try (try call.wait()).query(0)).keys);
 }
 
 test "a geospatial refine keeps a stopped round in a plan, and a reshard refuses what it cannot move" {

@@ -285,7 +285,7 @@ public struct GeospatialWithinConfig {
 /// next call.
 public struct GeospatialObservations: RandomAccessCollection {
     /// The arena the observations live in, held so they outlive no release of it.
-    let arena: Arena
+    let arena: ArenaWrite
     /// The observations the call wrote.
     var observations: UnsafePointer<usearch_geospatial_observation_t>?
     /// One past the last observation the call wrote.
@@ -296,8 +296,9 @@ public struct GeospatialObservations: RandomAccessCollection {
 
     /// The observation at a position.
     public subscript(position: Int) -> GeospatialObservation {
-        boundsCheck(position, below: endIndex, in: arena)
-        return GeospatialObservation(raw: observations![position])
+        arena.read(position, below: endIndex) {
+            return GeospatialObservation(raw: observations![position])
+        }
     }
 }
 
@@ -1116,7 +1117,7 @@ struct GeospatialCall {
     }
 
     func get(_ key: Key, arena: Arena) throws(USearchError) -> Submission<GeospatialObservations> {
-        let entries = callState.slots(GeospatialObservations(arena: arena, endIndex: 0))
+        let entries = callState.slots(GeospatialObservations(arena: ArenaWrite(arena), endIndex: 0))
         var arguments = usearch_geospatial_get_t(
             index: index.raw,
             executor: executor?.raw,
@@ -1219,7 +1220,7 @@ struct GeospatialCall {
         config: DenseSearchConfig
     ) throws(USearchError) -> Submission<Matches> {
         callState.anchor(config.stats)
-        let matches = callState.slots(Matches(arena: arena, endIndex: queries.count))
+        let matches = callState.slots(Matches(arena: ArenaWrite(arena), endIndex: queries.count))
         try callState.pass(queries) { (passedQueries) throws(USearchError) in
             var arguments = usearch_geospatial_search_t(
                 index: index.raw,
@@ -1252,7 +1253,7 @@ struct GeospatialCall {
         config: GeospatialWithinConfig
     ) throws(USearchError) -> Submission<DenseProducts> {
         callState.anchor(config.stats)
-        let products = callState.slots(DenseProducts(arena: arena, endIndex: queries.count))
+        let products = callState.slots(DenseProducts(arena: ArenaWrite(arena), endIndex: queries.count))
         try callState.pass(queries) { (passedQueries) throws(USearchError) in
             var arguments = usearch_geospatial_within_t(
                 index: index.raw,
@@ -1326,7 +1327,7 @@ struct GeospatialCall {
             throw USearchError(status: .shapeMismatch, message: "the shown keys need three coordinates apiece")
         }
         callState.anchor(config.stats)
-        let draws = callState.slots(DenseDraws(arena: arena))
+        let draws = callState.slots(DenseDraws(arena: ArenaWrite(arena)))
         let progress = callState.pass(config.progress, steps: config.progressSteps)
         try callState.pass(config.shown) { (shown) throws(USearchError) in
             try callState.pass(config.focus) { (focus) throws(USearchError) in
@@ -1377,7 +1378,7 @@ struct GeospatialCall {
     }
 
     func saveBuffer(arena: Arena, config: DenseSaveBufferConfig) throws(USearchError) -> Submission<Monolith> {
-        let monolith = callState.slots(Monolith(arena: arena))
+        let monolith = callState.slots(Monolith(arena: ArenaWrite(arena)))
         var arguments = usearch_geospatial_save_buffer_t(
             index: index.raw,
             executor: executor?.raw,
@@ -1433,7 +1434,7 @@ public final class GeospatialCursor {
     /// Copies up to `wanted` next keys into `arena`, each with the keys it links to.
     public func nextLinks(wanted: Int, arena: Arena) throws(USearchError) -> (keys: DenseKeys, links: DenseLinks) {
         let (keys, links) = try pull(wanted, true, arena, nil)
-        return (keys, DenseLinks(arena: arena, links: links, endIndex: keys.count))
+        return (keys, DenseLinks(arena: ArenaWrite(arena), links: links, endIndex: keys.count))
     }
 
     /// The receiver whose pulls block on `executor`, named again for every pull. Binding-only.
@@ -1448,7 +1449,7 @@ public final class GeospatialCursor {
         _ executor: Executor?
     ) throws(USearchError) -> (keys: DenseKeys, links: usearch_keys_tape_view_t) {
         let callState = CallState()
-        let keys = callState.slots(DenseKeys(arena: arena, endIndex: 0))
+        let keys = callState.slots(DenseKeys(arena: ArenaWrite(arena), endIndex: 0))
         let links = callState.slots(usearch_keys_tape_view_t())
         var arguments = usearch_geospatial_cursor_next_t(
             index: index.raw,
@@ -1484,6 +1485,6 @@ public struct GeospatialCursorOn {
     /// Copies up to `wanted` next keys into `arena` on the executor, with the keys each links to.
     public func nextLinks(wanted: Int, arena: Arena) throws(USearchError) -> (keys: DenseKeys, links: DenseLinks) {
         let (keys, links) = try cursor.pull(wanted, true, arena, executor)
-        return (keys, DenseLinks(arena: arena, links: links, endIndex: keys.count))
+        return (keys, DenseLinks(arena: ArenaWrite(arena), links: links, endIndex: keys.count))
     }
 }

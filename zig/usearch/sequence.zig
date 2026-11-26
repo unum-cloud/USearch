@@ -564,7 +564,6 @@ const usearch_sequence_cursor_init_t = extern struct {
     cursor: *?*anyopaque,
 };
 
-
 const usearch_sequence_cursor_next_t = extern struct {
     index: ?*anyopaque,
     executor: ?*anyopaque,
@@ -694,7 +693,7 @@ extern fn usearch_sequence_describe(arguments: *usearch_sequence_describe_t) voi
 /// defer arena.deinit();
 /// const query = [_]u64{ 0, 6 };
 /// const matches = try index.search(try .of(u8, u64, "sittin", &query), 1, &arena, .{});
-/// const nearest = matches.query(0).keys[0];
+/// const nearest = (try matches.query(0)).keys[0];
 /// ```
 pub const SequenceIndex = extern struct {
     /// The opaque `usearch_sequence_index_t` the ABI hands back.
@@ -1159,6 +1158,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub fn get(self: Self, key: Key, arena: *Arena) Answer(TapeEntries(u8)) {
             var local: Deferred(TapeEntries(u8)) = undefined;
             const held = self.hold(&local, .{});
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_sequence_get_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1245,6 +1245,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub fn search(self: Self, queries: TapeView, wanted: usize, arena: *Arena, config: SequenceSearchConfig) Answer(Matches) {
             var local: Deferred(Matches) = undefined;
             const held = self.hold(&local, .{ .queries = queries.entries });
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_sequence_search_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1312,6 +1313,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
             if (config.shown.len != config.shown_coordinates.len) return self.refused(.shape_mismatch, "The shown keys and coordinates disagree in length");
             var local: Deferred(DenseDraws) = undefined;
             const held = self.hold(&local, .{});
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_sequence_sample_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1342,6 +1344,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub fn cursorNext(self: Self, cursor: SequenceCursor, wanted: usize, links: bool, arena: *Arena) Answer(DenseCursorBatch) {
             var local: Deferred(DenseCursorBatch) = undefined;
             const held = self.hold(&local, .{});
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_sequence_cursor_next_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1378,6 +1381,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub fn saveBuffer(self: Self, arena: *Arena, config: DenseSaveBufferConfig) Answer(Monolith) {
             var local: Deferred(Monolith) = undefined;
             const held = self.hold(&local, .{});
+            held.result.write = .stamp(arena.handle);
             var arguments: usearch_sequence_save_buffer_t = .{
                 .index = self.index,
                 .executor = self.executor,
@@ -1484,13 +1488,13 @@ test "sequences cross as one tape, and each search finds its own entry first" {
     defer arena.deinit();
     const matches = try index.on(executor).search(try .of(u8, u64, words, &offsets), 1, &arena, .{});
     for (keys, 0..) |key, query| {
-        try std.testing.expectEqual(key, matches.query(query).keys[0]);
-        try std.testing.expectEqual(@as(f64, 0), matches.query(query).scores[0]);
+        try std.testing.expectEqual(key, (try matches.query(query)).keys[0]);
+        try std.testing.expectEqual(@as(f64, 0), (try matches.query(query)).scores[0]);
     }
     const nearly = [_]u64{ 0, 6 };
     const near = try index.search(try .of(u8, u64, "sittin", &nearly), 1, &arena, .{});
-    try std.testing.expectEqual(keys[1], near.query(0).keys[0]);
-    try std.testing.expectEqual(@as(f64, 1), near.query(0).scores[0]);
+    try std.testing.expectEqual(keys[1], (try near.query(0)).keys[0]);
+    try std.testing.expectEqual(@as(f64, 1), (try near.query(0)).scores[0]);
 
     const stats = try index.on(executor).count(keys[1]);
     try std.testing.expectEqual(SequenceKeyStats{ .entries = 1, .total_bytes = 7, .largest_bytes = 7 }, stats);
@@ -1498,26 +1502,26 @@ test "sequences cross as one tape, and each search finds its own entry first" {
     try std.testing.expectEqual(false, try index.on(executor).contains(.fromInteger(99)));
     const stored = try index.on(executor).get(keys[1], &arena);
     try std.testing.expectEqual(@as(usize, 1), stored.written);
-    try std.testing.expectEqualStrings("sitting", stored.entry(0));
+    try std.testing.expectEqualStrings("sitting", try stored.entry(0));
     const absent = try index.get(.fromInteger(99), &arena);
     try std.testing.expectEqual(@as(usize, 0), absent.written);
-    try std.testing.expectEqual(@as(usize, 0), absent.elements().len);
+    try std.testing.expectEqual(@as(usize, 0), (try absent.elements()).len);
 
     // A cursor walks every key once, `wanted` at a time.
     var walk = try SequenceCursor.init(index, &.{});
     defer walk.deinit();
-    try std.testing.expectEqualSlices(Key, keys[0..2], (try index.on(executor).cursorNext(walk, 2, false, &arena)).keys());
-    try std.testing.expectEqualSlices(Key, keys[2..3], (try index.cursorNext(walk, 2, false, &arena)).keys());
+    try std.testing.expectEqualSlices(Key, keys[0..2], try (try index.on(executor).cursorNext(walk, 2, false, &arena)).keys());
+    try std.testing.expectEqualSlices(Key, keys[2..3], try (try index.cursorNext(walk, 2, false, &arena)).keys());
     try std.testing.expectEqual(@as(usize, 0), (try index.cursorNext(walk, 2, false, &arena)).written);
 
     // A monolith round-trips through memory, and its metadata reads without loading it.
-    const monolith = (try index.on(executor).saveBuffer(&arena, .{})).bytes();
+    const monolith = try (try index.on(executor).saveBuffer(&arena, .{})).bytes();
     const frozen = (try index.describe()).metadata;
     try std.testing.expectEqual(frozen, try SequenceIndex.metadataReadBuffer(monolith, .{ .executor = executor }));
     var copy = try SequenceIndex.loadRamBuffer(monolith, .{ .executor = executor });
     defer copy.deinit();
     try std.testing.expectEqual(@as(usize, 3), (try copy.describe()).size);
-    try std.testing.expectEqualStrings("mitten", (try copy.get(keys[2], &arena)).entry(0));
+    try std.testing.expectEqualStrings("mitten", try (try copy.get(keys[2], &arena)).entry(0));
 
     // So does a file, which a mapping serves read-only.
     const checkpoint = ".zig-cache/usearch-zig-sequence.safegraphs";
@@ -1537,7 +1541,7 @@ test "sequences cross as one tape, and each search finds its own entry first" {
     try std.testing.expectEqual([2]usize{ 3, 3 }, [2]usize{ reachability.audited, reachability.reachable });
     const draws = try index.on(executor).sample(2, &arena, .{ .seed = 42 });
     try std.testing.expect(draws.written <= 2);
-    try std.testing.expectEqual(draws.written, draws.coordinates().len);
+    try std.testing.expectEqual(draws.written, (try draws.coordinates()).len);
 }
 
 test "a sequence refine keeps a stopped round in a plan, and a reshard refuses what it cannot move" {

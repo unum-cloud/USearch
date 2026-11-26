@@ -117,10 +117,13 @@ class SearchStats:
         return self.count_matches / self.count_queries
 
 
-def index_keys(index: DenseIndex, arena: Arena, executor: Executor | None = None) -> npt.NDArray[np.uint8]:
-    """Every identity the index holds, as a (size, 16) matrix, walked through one cursor writing into *arena*.
+def index_keys(
+    index: DenseIndex, arena: Arena | None = None, executor: Executor | None = None
+) -> npt.NDArray[np.uint8]:
+    """Every identity the index holds, as a (size, 16) matrix, walked through one cursor.
 
-    Each pull runs on *executor* when one is named, else on the calling thread.
+    Each pull writes into *arena*, or into a fresh one when None, and runs on *executor* when one is named,
+    else on the calling thread.
     """
     cursor, batches = index.cursor(), [np.zeros((0, 16), dtype=np.uint8)]
     puller = cursor if executor is None else cursor.on(executor)
@@ -131,7 +134,7 @@ def index_keys(index: DenseIndex, arena: Arena, executor: Executor | None = None
 
 def self_recall(
     index: DenseIndex,
-    arena: Arena,
+    arena: Arena | None = None,
     sample: float | int = 1.0,
     count: int = 1,
     *,
@@ -147,7 +150,7 @@ def self_recall(
     ``exact_matches`` when the question is how the index ranks against the exact answer.
 
     Every call runs on *executor* when one is named, else on the calling thread, and every output
-    lands in *arena*, made by that executor or by none. The *sample* is a share when a float and a count when an integer, and *count*
+    lands in *arena*, made by that executor or by none, or in memory each result owns when None. The *sample* is a share when a float and a count when an integer, and *count*
     is how many matches each query retrieves. The *keys* and *vectors* default to everything the
     index holds, and the *stats* given here is what the returned telemetry reads off.
     """

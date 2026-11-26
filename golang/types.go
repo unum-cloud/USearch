@@ -42,6 +42,12 @@ import (
 #cgo nocallback usearch_arena_init
 #cgo noescape usearch_arena_describe
 #cgo nocallback usearch_arena_describe
+#cgo noescape usearch_arena_export_open
+#cgo nocallback usearch_arena_export_open
+#cgo noescape usearch_arena_export_close
+#cgo nocallback usearch_arena_export_close
+#cgo noescape usearch_arena_generation
+#cgo nocallback usearch_arena_generation
 #cgo noescape usearch_status_from_name
 #cgo nocallback usearch_status_from_name
 #cgo noescape usearch_scalar_from_name
@@ -500,7 +506,7 @@ func (call *call) rows(matrix RowsView) C.usearch_rows_view_t {
 type MatchesView struct {
 	raw     C.usearch_matches_view_t
 	queries uint
-	arena   *Arena
+	arena   arenaWrite
 }
 
 // Queries reports how many queries the call resolved.
@@ -513,9 +519,10 @@ func (matches MatchesView) Columns() uint { return uint(matches.raw.columns) }
 // refused with StatusDevice when the arena is memory the host may not read; query must be below
 // Queries.
 func (matches MatchesView) Query(query uint) ([]Key, []Distance, error) {
-	if err := matches.arena.readable(); err != nil {
+	if err := matches.arena.open(); err != nil {
 		return nil, nil, err
 	}
+	defer matches.arena.close()
 	columns := matches.Columns()
 	count := min(unsafe.Slice((*uint)(unsafe.Pointer(matches.raw.counts)), matches.queries)[query], columns)
 	from := query * columns
@@ -532,7 +539,7 @@ type MatchesTape struct {
 	queries  uint
 	required uint
 	written  uint
-	arena    *Arena
+	arena    arenaWrite
 }
 
 // Queries reports how many left rows the call multiplied, or how many queries it scored.
@@ -548,9 +555,10 @@ func (matches MatchesTape) Written() uint { return matches.written }
 // Query views one query's keys and scores from the arena, a left row's pairs for Multiply; query
 // must be below Queries; refused with StatusDevice when the arena is memory the host may not read.
 func (matches MatchesTape) Query(query uint) ([]Key, []Distance, error) {
-	if err := matches.arena.readable(); err != nil {
+	if err := matches.arena.open(); err != nil {
 		return nil, nil, err
 	}
+	defer matches.arena.close()
 	offsets := unsafe.Slice((*uint)(unsafe.Pointer(matches.raw.offsets)), matches.queries+1)
 	keys := unsafe.Slice((*Key)(unsafe.Pointer(matches.raw.keys)), offsets[matches.queries])
 	scores := unsafe.Slice((*Distance)(unsafe.Pointer(matches.raw.scores)), offsets[matches.queries])
@@ -1127,12 +1135,13 @@ func (executor *Executor) Drain(mood Mood) error {
 // Arena is memory the library writes every output whose length scales with a call into - matches,
 // rows, products, monoliths, cursor and stream batches alike - reused so a steady loop allocates once.
 //
-// Every call given an arena rewinds and refills it, so the views of its previous call and every
-// slice they handed out end there, as they do once it is closed; to keep one call's views past the
-// next, give that call another arena. An arena serves one call at a time, and a second overlapping
-// it fails with StatusContended. Deferred verbs view it as blocking ones do, since Close waits for
-// every deferred call naming it. Views over device memory no Go code may read, as Describe reports
-// it, refuse with StatusDevice; Arrow exports of them stay open.
+// Every call given an arena rewinds and refills it, so the views of its previous call end there,
+// as they do once it is closed: their accessors fail with StatusContended, while a slice already
+// handed out is plain memory the next call overwrites, so it is valid only until then. To keep one
+// call's views past the next, give that call another arena. An arena serves one call at a time,
+// and a second overlapping it fails with StatusContended. Deferred verbs view it as blocking ones
+// do, since Close waits for every deferred call naming it. Views over device memory no Go code may
+// read, as Describe reports it, refuse with StatusDevice; Arrow exports of them stay open.
 type Arena struct {
 	handle C.usearch_arena_t
 	// description is where the outputs live, read once as the arena is made, so a view checks it
@@ -1232,14 +1241,45 @@ func (description ArenaDescription) host() error {
 	return nil
 }
 
-// readable refuses a view of a closed arena's outputs, or of ones the host may not read, without
-// crossing into the library.
-func (arena *Arena) readable() error {
-	if _, err := arena.lower(); err != nil {
+// arenaWrite is the arena a result reads, and the generation the call that wrote it brought the
+// arena to.
+type arenaWrite struct {
+	arena      *Arena
+	generation uint64
+}
+
+// stamp names the arena a call about to take it writes into, at the generation the call brings it
+// to. The call pins the arena with its other pointers, since its frame holds the result.
+func (call *call) stamp(arena *Arena, handle C.usearch_arena_t) arenaWrite {
+	if arena != nil {
+		call.pinner.Pin(arena)
+	}
+	return arenaWrite{arena: arena, generation: uint64(C.usearch_arena_generation(handle)) + 1}
+}
+
+// open holds an export of the arena, so no call takes it until close, after refusing a closed
+// arena, memory the host may not read, and with [StatusContended] a result a later call overwrote
+// or a call holds the arena for.
+func (write arenaWrite) open() error {
+	handle, err := write.arena.lower()
+	if err != nil {
 		return err
 	}
-	return arena.description.host()
+	if err := write.arena.description.host(); err != nil {
+		return err
+	}
+	if C.usearch_arena_export_open(handle) != C.usearch_status_success_k {
+		return fail(StatusContended, "a call holds the arena")
+	}
+	if uint64(C.usearch_arena_generation(handle)) != write.generation {
+		C.usearch_arena_export_close(handle)
+		return fail(StatusContended, "a later call took the arena since this result was written")
+	}
+	return nil
 }
+
+// close ends the export open took.
+func (write arenaWrite) close() { C.usearch_arena_export_close(write.arena.handle) }
 
 // endregion: Arenas
 
@@ -1276,6 +1316,22 @@ type call struct {
 type callWithResult[Result any] struct {
 	call
 	result *Result
+	// answer is the result once settled, kept outside the frame so a settled frame holds no Go
+	// pointer.
+	answer Result
+}
+
+// settle settles the call, then moves its result out of the frame, where a Go pointer would
+// outlive the pin that covers it.
+func (request *callWithResult[Result]) settle() error {
+	err := request.call.settle()
+	if request.result != nil {
+		request.answer = *request.result
+		var none Result
+		*request.result = none
+		request.result = nil
+	}
+	return err
 }
 
 // open pins a fresh frame and hands back its argument structure, which a verb fills and passes to
@@ -1323,7 +1379,7 @@ func block[Result any](call *callWithResult[Result], refusal error) (Result, err
 	if err := call.settle(); err != nil {
 		return none, err
 	}
-	return *call.result, nil
+	return call.answer, nil
 }
 
 // configOf reads a nil config as the zero one, by value, so generic verbs allocate nothing for it.
@@ -1720,7 +1776,7 @@ type TapeView struct {
 	raw     C.usearch_tape_view_t
 	written uint
 	width   uint
-	arena   *Arena
+	arena   arenaWrite
 }
 
 // Written reports how many entries the call wrote; zero when the key is absent.
@@ -1744,9 +1800,10 @@ func (tape TapeView) span(entry uint) (uint, uint) {
 // type they were written as, and with StatusDevice when the arena is memory the host may not read;
 // entry must be below Written.
 func TapeEntry[Value Element](tape TapeView, entry uint) ([]Value, error) {
-	if err := tape.arena.readable(); err != nil {
+	if err := tape.arena.open(); err != nil {
 		return nil, err
 	}
+	defer tape.arena.close()
 	if scalar := scalarOf[Value](); scalar != tape.Scalar() {
 		return nil, fail(StatusInvalidArgument, "elements written as "+tape.Scalar().String()+" cannot be read as "+scalar.String())
 	}

@@ -842,8 +842,9 @@ static PyObject* ShapesIndex_refine(PyObject* self, PyObject* const* args, Py_ss
 #pragma region Search
 
 static char const doc_ShapesIndex_search[] =                                                     //
-    "``search(queries, wanted, arena, /, *, expansion_factor=0, traversal=Traversal.WALK,\n"     //
-    "dtype=None, predicate=None, progress=None, progress_steps=0, stats=None) -> Matches``\n"    //
+    "``search(queries, wanted, /, arena=None, *, expansion_factor=0,\n"                          //
+    "traversal=Traversal.WALK, dtype=None, predicate=None, progress=None,\n"                     //
+    "progress_steps=0, stats=None) -> Matches``\n"                                               //
     "\n"                                                                                         //
     "Finds the `wanted` nearest entries for every query shape; one query is a batch of one.\n"   //
     "Query point counts need not match any entry's. Never writes to the graph, so any number\n"  //
@@ -853,7 +854,8 @@ static char const doc_ShapesIndex_search[] =                                    
     "Args:\n"                                                                                    //
     "  queries (Sequence[buffer] | buffer): The query shapes, `(points, 3)` matrices.\n"         //
     "  wanted (int): Upper bound on matches per query, the 'k' in 'kANN'.\n"                     //
-    "  arena (Arena): Where the matches land, rewound by the call.\n"                            //
+    "  arena (Arena, optional): Where the matches land, rewound by the call; None makes one\n"   //
+    "    the result owns.\n"                                                                     //
     "  expansion_factor (int, optional): Breadth of the candidates; 0 derives it.\n"             //
     "  traversal (Traversal, optional): `Traversal.WALK`, the default, walks the graph;\n"       //
     "    `Traversal.SCAN` scores every entry exactly.\n"                                         //
@@ -893,7 +895,7 @@ static PyObject* ShapesIndex_search(PyObject* self, PyObject* const* args, Py_ss
     usearch_scalar_t dtype = usearch_scalar_unknown_k;
     usearch_py_call_t stack;
     usearch_py_call_t* call = NULL;
-    if (usearch_py_arguments_parse("search", args, positional_args_count, args_names_tuple, 3, 3, arguments,
+    if (usearch_py_arguments_parse("search", args, positional_args_count, args_names_tuple, 2, 3, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
         receiver_from_object(self, &receiver, &handle) != 0 ||
         usearch_py_size_from_object(wanted_object, "wanted", &wanted) != 0 ||
@@ -911,7 +913,7 @@ static PyObject* ShapesIndex_search(PyObject* self, PyObject* const* args, Py_ss
     if (shapes_from_object(queries_object, dtype, &call->blocks[0], &count, &queries) != 0 ||
         usearch_py_predicate_from_object(predicate_object, &call->holds[callback_slot_k]) != 0 ||
         walk_parse(call, progress_object, stats_object) != 0 ||
-        !(matches = usearch_py_call_arena(call, arena_object, &MatchesType)))
+        !(matches = usearch_py_call_arena(&receiver, call, arena_object, &MatchesType)))
         return usearch_py_call_discard(&receiver, call);
 
     matches->queries = count;
@@ -993,7 +995,7 @@ static int ShapesIndex_contains(PyObject* self, PyObject* key_object) {
 }
 
 static char const doc_ShapesIndex_get[] =                                                            //
-    "``get(key, arena, /, *, outputs_dtype=Scalar.F32) -> tuple[buffer, buffer]``\n"                 //
+    "``get(key, /, arena=None, *, outputs_dtype=Scalar.F32) -> tuple[buffer, buffer]``\n"            //
     "\n"                                                                                             //
     "Every shape stored under `key`, in insertion order and in the pose it was inserted in, as an\n" //
     "Apache Arrow tape in the arena: the `(count + 1,)` point offsets and a `(points, 3)` matrix\n"  //
@@ -1003,7 +1005,8 @@ static char const doc_ShapesIndex_get[] =                                       
     "\n"                                                                                             //
     "Args:\n"                                                                                        //
     "  key (Key | int | str): The identity to retrieve.\n"                                           //
-    "  arena (Arena): Where the tape lands, rewound by the call.\n"                                  //
+    "  arena (Arena, optional): Where the tape lands, rewound by the call; None makes one the\n"     //
+    "    result owns.\n"                                                                             //
     "  outputs_dtype (Scalar, optional): The scalar type to export as; converted from storage.";
 
 /** A @c usearch_shapes_get call and the tape it lands, inside the record's arguments. */
@@ -1028,13 +1031,13 @@ static PyObject* get_answer(usearch_py_call_t* call) {
     size_t const row_bytes = usearch_py_scalar_row_bytes(scalar, 3);
     Py_ssize_t const offsets_shape[1] = {offsets ? (Py_ssize_t)get->written + 1 : 0};
     Py_ssize_t const points_shape[2] = {(Py_ssize_t)(last - first), format ? 3 : (Py_ssize_t)row_bytes};
-    PyObject* const offsets_object = usearch_py_arena_buffer(&ArenaBufferType, call->arena, offsets, narrow ? "I" : "Q",
-                                                             narrow ? 4 : 8, offsets_shape, 1);
-    PyObject* const points_object = offsets_object
-                                        ? usearch_py_arena_buffer(
-                                              &ArenaBufferType, call->arena, tape->data, format ? format : "B",
-                                              format ? (Py_ssize_t)(row_bytes / 3) : 1, points_shape, 2)
-                                        : NULL;
+    PyObject* const offsets_object = usearch_py_arena_buffer(&ArenaBufferType, call->arena, call->generation, offsets,
+                                                             narrow ? "I" : "Q", narrow ? 4 : 8, offsets_shape, 1);
+    PyObject* const points_object = offsets_object ? usearch_py_arena_buffer(
+                                                         &ArenaBufferType, call->arena, call->generation, tape->data,
+                                                         format ? format : "B",
+                                                         format ? (Py_ssize_t)(row_bytes / 3) : 1, points_shape, 2)
+                                                   : NULL;
     PyObject* const pair = points_object ? PyTuple_Pack(2, offsets_object, points_object) : NULL;
     Py_XDECREF(points_object);
     Py_XDECREF(offsets_object);
@@ -1053,14 +1056,14 @@ static PyObject* ShapesIndex_get(PyObject* self, PyObject* const* args, Py_ssize
     usearch_key_t key;
     usearch_py_call_t stack;
     usearch_py_call_t* call = NULL;
-    if (usearch_py_arguments_parse("get", args, positional_args_count, args_names_tuple, 2, 2, arguments,
+    if (usearch_py_arguments_parse("get", args, positional_args_count, args_names_tuple, 1, 2, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
         receiver_from_object(self, &receiver, &handle) != 0 ||
         usearch_py_scalar_from_object(outputs_dtype_object, "outputs_dtype", &outputs_kind) != 0 ||
         usearch_py_key_from_object(key_object, &key) != 0 || !(call = usearch_py_call_open(&receiver, &stack)))
         return NULL;
 
-    if (usearch_py_call_hold_arena(call, arena_object) != 0) return usearch_py_call_discard(&receiver, call);
+    if (usearch_py_call_hold_arena(&receiver, call, arena_object) != 0) return usearch_py_call_discard(&receiver, call);
     get_call_t* const get = (get_call_t*)call->arguments;
     call->answer = get_answer;
     get->arguments = (usearch_shapes_get_t) {
@@ -1433,14 +1436,15 @@ static PyObject* ShapesIndex_save(PyObject* self, PyObject* const* args, Py_ssiz
 }
 
 static char const doc_ShapesIndex_save_buffer[] =                                             //
-    "``save_buffer(arena, /, *, progress=None, progress_steps=0) -> Monolith``\n"             //
+    "``save_buffer(arena=None, *, progress=None, progress_steps=0) -> Monolith``\n"           //
     "\n"                                                                                      //
     "Serializes the index into the arena: one monolith for a handle of one shard, the very\n" //
     "bytes `save` writes, or a manifest leading one part per shard.\n"                        //
     "Calls `usearch_shapes_save_buffer`.\n"                                                   //
     "\n"                                                                                      //
     "Args:\n"                                                                                 //
-    "  arena (Arena): Where the checkpoint lands, rewound by the call.\n"                     //
+    "  arena (Arena, optional): Where the checkpoint lands, rewound by the call; None\n"      //
+    "    makes one the result owns.\n"                                                        //
     "  progress (callable, optional): Called with (completed, total) parts; returning\n"      //
     "    False stops the write and raises `CancelledError`, None continues.\n"                //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"   //
@@ -1457,7 +1461,7 @@ typedef struct save_buffer_call_t {
 static PyObject* save_buffer_answer(usearch_py_call_t* call) {
     usearch_bytes_view_t const monolith = ((save_buffer_call_t const*)call->arguments)->monolith;
     Py_ssize_t const shape[1] = {(Py_ssize_t)monolith.length};
-    return usearch_py_arena_buffer(&MonolithType, call->arena, monolith.data, "B", 1, shape, 1);
+    return usearch_py_arena_buffer(&MonolithType, call->arena, call->generation, monolith.data, "B", 1, shape, 1);
 }
 
 static PyObject* ShapesIndex_save_buffer(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
@@ -1471,7 +1475,7 @@ static PyObject* ShapesIndex_save_buffer(PyObject* self, PyObject* const* args, 
     size_t progress_steps = 0;
     usearch_py_call_t stack;
     usearch_py_call_t* call = NULL;
-    if (usearch_py_arguments_parse("save_buffer", args, positional_args_count, args_names_tuple, 1, 1, arguments,
+    if (usearch_py_arguments_parse("save_buffer", args, positional_args_count, args_names_tuple, 0, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
         receiver_from_object(self, &receiver, &handle) != 0 ||
         usearch_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0 ||
@@ -1479,7 +1483,7 @@ static PyObject* ShapesIndex_save_buffer(PyObject* self, PyObject* const* args, 
         return NULL;
 
     if (usearch_py_callable_from_object(progress_object, "progress", &call->holds[progress_slot_k]) != 0 ||
-        usearch_py_call_hold_arena(call, arena_object) != 0)
+        usearch_py_call_hold_arena(&receiver, call, arena_object) != 0)
         return usearch_py_call_discard(&receiver, call);
     save_buffer_call_t* const save = (save_buffer_call_t*)call->arguments;
     call->answer = save_buffer_answer;

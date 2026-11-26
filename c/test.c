@@ -1689,6 +1689,57 @@ void test_count_and_get(size_t const dimensions) {
     usearch_dense_free(index);
 }
 
+/** Every successful call naming an arena advances its generation once, on an executor or without,
+ *  deferred or blocking; a call refused over an open export leaves it, and @c NULL answers 0. */
+void test_arena_generation(size_t const dimensions) {
+    usearch_outcome_t outcome = {0};
+    usearch_dense_index_t const index = create_index(dimensions);
+    usearch_executor_t const executor = create_executor(2);
+    usearch_arena_t const arena = create_arena(executor);
+    float* const data = create_vectors(2, dimensions);
+    usearch_key_t const keys[2] = {key_of(7), key_of(8)};
+    size_t const row_bytes = dimensions * sizeof(float);
+    usearch_dense_reserve(
+        &(usearch_dense_reserve_t) {.index = index, .executor = executor, .outcome = &outcome, .capacity = 2});
+    expect_at(!outcome.message, __FILE__, __LINE__, outcome.message);
+    usearch_dense_insert(&(usearch_dense_insert_t) {.index = index,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .count = 2,
+                                                    .keys = {keys, sizeof(usearch_key_t)},
+                                                    .vectors = {data, row_bytes, dimensions, usearch_scalar_f32_k}});
+    expect_at(!outcome.message, __FILE__, __LINE__, outcome.message);
+    expect_(usearch_arena_generation(NULL) == 0 && usearch_arena_generation(arena) == 0);
+
+    usearch_matches_view_t matches = {0};
+    usearch_dense_search_t search = {.index = index,
+                                     .executor = executor,
+                                     .outcome = &outcome,
+                                     .count = 1,
+                                     .queries = {data, row_bytes, dimensions, usearch_scalar_f32_k},
+                                     .matches = &matches,
+                                     .wanted = 2,
+                                     .arena = arena};
+    usearch_dense_search(&search);
+    expect_(outcome.status == usearch_status_success_k && usearch_arena_generation(arena) == 1);
+    search.completion = usearch_completion_deferred_k;
+    usearch_dense_search(&search);
+    expect_(usearch_outcome_wait(&outcome) == usearch_status_success_k && usearch_arena_generation(arena) == 2);
+    search.executor = NULL;
+    usearch_dense_search(&search);
+    expect_(outcome.status == usearch_status_success_k && usearch_arena_generation(arena) == 3);
+    expect_(usearch_arena_export_open(arena) == usearch_status_success_k);
+    search.executor = executor, search.completion = usearch_completion_blocking_k;
+    usearch_dense_search(&search);
+    expect_(outcome.status == usearch_status_contended_k && usearch_arena_generation(arena) == 3);
+    usearch_arena_export_close(arena);
+
+    expect_(usearch_arena_free(arena) == usearch_status_success_k);
+    free(data);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
+    usearch_dense_free(index);
+}
+
 /** An executor refuses to be freed while an arena made with it lives, a RAM one included, and
  *  frees once that arena is gone. */
 void test_executor_free_with_live_arena(void) {
@@ -6499,6 +6550,9 @@ int main(int argc, char* argv[]) {
     }
     start_test_case("test_arenas");
     test_arenas(dimension_counts[0]);
+    finish_test_case(NULL);
+    start_test_case("test_arena_generation");
+    test_arena_generation(dimension_counts[0]);
     finish_test_case(NULL);
     start_test_case("test_executor_free_with_live_arena");
     test_executor_free_with_live_arena();

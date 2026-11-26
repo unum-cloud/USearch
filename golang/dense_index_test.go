@@ -535,10 +535,10 @@ func TestHostReadsOfDeviceMemoryAreRefused(t *testing.T) {
 	if description.HostAccess == HostAccessReadable {
 		t.Skip("this GPU's arena is memory the host may read")
 	}
-	if _, _, err := (MatchesView{arena: arena}).Query(0); !errors.Is(err, StatusDevice) {
+	if _, _, err := (MatchesView{arena: arenaWrite{arena: arena}}).Query(0); !errors.Is(err, StatusDevice) {
 		t.Errorf("a host read of device matches answered %v", err)
 	}
-	if _, err := (Monolith{arena: arena}).Bytes(); !errors.Is(err, StatusDevice) {
+	if _, err := (Monolith{arena: arenaWrite{arena: arena}}).Bytes(); !errors.Is(err, StatusDevice) {
 		t.Errorf("a host read of a device monolith answered %v", err)
 	}
 }
@@ -810,6 +810,42 @@ func TestCursorsWalkEveryEntryOnce(t *testing.T) {
 }
 
 // A stream pulls one query of a search at a time, so its first pull is the nearest match.
+func TestADroppedCallSettlesAfterItsArenaClosed(t *testing.T) {
+	t.Parallel()
+	const dimensions = 8
+	index, _, slab := populated(t, angularBF16(dimensions), 6)
+	executor := pool(t)
+	arena := newArena(t, executor)
+	if _, err := index.Deferred(executor).Search(RowsOf(slab[:dimensions], dimensions), 2, arena, nil); err != nil {
+		t.Fatalf("the deferred search must submit: %v", err)
+	}
+	if err := arena.Close(); err != nil {
+		t.Fatalf("the arena must close: %v", err)
+	}
+	runtime.GC()
+	runtime.GC()
+}
+
+func TestALaterCallEndsEarlierResults(t *testing.T) {
+	t.Parallel()
+	const dimensions = 8
+	index, _, slab := populated(t, angularBF16(dimensions), 6)
+	arena := newArena(t, nil)
+	first, err := index.Search(RowsOf(slab[:dimensions], dimensions), 2, arena, nil)
+	if err != nil {
+		t.Fatalf("the first search must run: %v", err)
+	}
+	if _, _, err := first.Query(0); err != nil {
+		t.Fatalf("a result reads while its call is the latest: %v", err)
+	}
+	if _, err := index.Search(RowsOf(slab[:dimensions], dimensions), 2, arena, nil); err != nil {
+		t.Fatalf("the second search must run: %v", err)
+	}
+	if _, _, err := first.Query(0); !errors.Is(err, StatusContended) {
+		t.Errorf("a result read after a later call answered %v", err)
+	}
+}
+
 func TestSearchStreamsYieldNearestFirst(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8

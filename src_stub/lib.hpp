@@ -81,6 +81,10 @@ struct usearch_arena_handle_t {
     /** Exports of the arena's outputs a consumer still holds; while any is open, no call rewinds
      *  the arena and its free frees nothing. Touched through @c serial_atomic_ref. */
     util::u32_t exports = 0;
+
+    /** Calls that took the arena and found no export open, each advancing it once before writing.
+     *  Touched through @c serial_atomic_ref . */
+    util::u64_t generation = 0;
 };
 
 /** What @c src/arrow.cpp asks of an arena, as @c src/lib.hpp answers it: whether it holds an
@@ -448,6 +452,7 @@ inline usearch_arena_handle_t* claim_arena(usearch_arena_t arena, usearch_outcom
         return propagate_error(usearch_status_contended_k, outcome, "An export of the arena's outputs is open"),
                nullptr;
     }
+    serial_atomic_ref<util::u64_t>(arena->generation).fetch_add(1, std::memory_order_relaxed);
     for (void const* input : inputs)
         if (reject_if(input && arena->memory.contains(input), usearch_status_invalid_argument_k,
                       "An input lies inside the arena it rewinds", outcome))

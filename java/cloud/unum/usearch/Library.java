@@ -306,6 +306,15 @@ final class Library {
         }
     }
 
+    /** Calls {@code usearch_arena_generation}. */
+    static long generation(MethodHandle query, MemorySegment arena) {
+        try {
+            return (long) query.invokeExact(arena);
+        } catch (Throwable failure) {
+            throw rethrow(failure);
+        }
+    }
+
     /** Reads the static string a name query answers. */
     static String text(MethodHandle query) {
         try {

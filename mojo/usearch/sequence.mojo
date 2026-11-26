@@ -48,6 +48,7 @@ from usearch.library import Library
 from usearch.types import (
     Address,
     Arena,
+    ArenaRead,
     BytesView,
     Call,
     CallHead,
@@ -700,7 +701,7 @@ struct _SequenceReserveCall(Call):
             c_size_t(self.payload_bytes),
         }
 
-    def conclude(deinit self, outputs: Unwritten) -> NoneType:
+    def conclude(deinit self, outputs: Unwritten, viewing: ArenaRead) -> NoneType:
         return None
 
 
@@ -720,7 +721,7 @@ struct _SequenceClearCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion}
 
-    def conclude(deinit self, outputs: Unwritten) -> NoneType:
+    def conclude(deinit self, outputs: Unwritten, viewing: ArenaRead) -> NoneType:
         return None
 
 
@@ -740,7 +741,7 @@ struct _SequenceDescribeCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, outputs}
 
-    def conclude(deinit self, outputs: SequenceIndexDescription) -> SequenceIndexDescription:
+    def conclude(deinit self, outputs: SequenceIndexDescription, viewing: ArenaRead) -> SequenceIndexDescription:
         return outputs
 
 
@@ -761,7 +762,7 @@ struct _SequenceCountCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, KeyBytes.of(self.key), outputs}
 
-    def conclude(deinit self, outputs: SequenceKeyStats) -> SequenceKeyStats:
+    def conclude(deinit self, outputs: SequenceKeyStats, viewing: ArenaRead) -> SequenceKeyStats:
         return outputs
 
 
@@ -805,8 +806,11 @@ struct _SequenceGetCall[origin: MutOrigin](Call):
             self.arena,
         }
 
-    def conclude(deinit self, outputs: SequenceGetOutputs) -> Self.Result:
-        return {outputs.sequences, Int(outputs.written)}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: SequenceGetOutputs, viewing: ArenaRead) -> Self.Result:
+        return {outputs.sequences, Int(outputs.written), viewing}
 
 
 @fieldwise_init
@@ -846,7 +850,7 @@ struct _SequenceInsertCall(Call):
     def lengths_agree(self) -> Bool:
         return self.keys_count == self.count
 
-    def conclude(deinit self, outputs: Unwritten) -> NoneType:
+    def conclude(deinit self, outputs: Unwritten, viewing: ArenaRead) -> NoneType:
         return None
 
 
@@ -882,7 +886,7 @@ struct _SequenceRefineCall(Call):
             self.phase,
         }
 
-    def conclude(deinit self, outputs: DenseRefineReport) -> DenseRefineReport:
+    def conclude(deinit self, outputs: DenseRefineReport, viewing: ArenaRead) -> DenseRefineReport:
         return outputs
 
 
@@ -903,7 +907,7 @@ struct _SequenceRefinePlanFinishCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, self.plan, outputs}
 
-    def conclude(deinit self, outputs: DenseRefineReport) -> DenseRefineReport:
+    def conclude(deinit self, outputs: DenseRefineReport, viewing: ArenaRead) -> DenseRefineReport:
         return outputs
 
 
@@ -923,7 +927,7 @@ struct _SequenceHealthCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, outputs}
 
-    def conclude(deinit self, outputs: DenseReachability) -> DenseReachability:
+    def conclude(deinit self, outputs: DenseReachability, viewing: ArenaRead) -> DenseReachability:
         return outputs
 
 
@@ -988,7 +992,7 @@ struct _SequenceReshardCall(Call):
             self.phase,
         }
 
-    def conclude(deinit self, outputs: DenseRefineReport) -> DenseRefineReport:
+    def conclude(deinit self, outputs: DenseRefineReport, viewing: ArenaRead) -> DenseRefineReport:
         return outputs
 
 
@@ -1009,7 +1013,7 @@ struct _SequenceReshardPlanFinishCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.executor, head.outcome, head.completion, self.plan, outputs}
 
-    def conclude(deinit self, outputs: DenseRefineReport) -> DenseRefineReport:
+    def conclude(deinit self, outputs: DenseRefineReport, viewing: ArenaRead) -> DenseRefineReport:
         return outputs
 
 
@@ -1063,8 +1067,11 @@ struct _SequenceSampleCall[origin: MutOrigin](Call):
     def lengths_agree(self) -> Bool:
         return self.shown_coordinates_count == 3 * self.shown_count
 
-    def conclude(deinit self, outputs: DenseSampleOutputs) -> Self.Result:
-        return {outputs}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: DenseSampleOutputs, viewing: ArenaRead) -> Self.Result:
+        return {outputs, viewing}
 
 
 @fieldwise_init
@@ -1107,8 +1114,11 @@ struct _SequenceSearchCall[origin: MutOrigin](Call):
             self.stats,
         }
 
-    def conclude(deinit self, outputs: MatchesViewArguments) -> Self.Result:
-        return {outputs, self.count}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: MatchesViewArguments, viewing: ArenaRead) -> Self.Result:
+        return {outputs, self.count, viewing}
 
 
 @fieldwise_init
@@ -1128,7 +1138,7 @@ struct _SequenceSaveCall(Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, self.path, ProgressArguments()}
 
-    def conclude(deinit self, outputs: Unwritten) -> NoneType:
+    def conclude(deinit self, outputs: Unwritten, viewing: ArenaRead) -> NoneType:
         return None
 
 
@@ -1149,8 +1159,11 @@ struct _SequenceSaveBufferCall[origin: MutOrigin](Call):
     def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
         return {head.index, head.executor, head.outcome, head.completion, outputs, self.arena, ProgressArguments()}
 
-    def conclude(deinit self, outputs: DenseSaveBufferOutputs) -> Self.Result:
-        return {outputs.data, Int(outputs.length)}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: DenseSaveBufferOutputs, viewing: ArenaRead) -> Self.Result:
+        return {outputs.data, Int(outputs.length), viewing}
 
 
 @fieldwise_init
@@ -1184,8 +1197,11 @@ struct _SequenceCursorNextCall[origin: MutOrigin](Call):
             c_size_t(self.wanted),
         }
 
-    def conclude(deinit self, outputs: DenseCursorNextOutputs) -> Self.Result:
-        return {outputs.keys, self.links, outputs.links, Int(outputs.written)}
+    def arena_handle(self) -> Address:
+        return self.arena
+
+    def conclude(deinit self, outputs: DenseCursorNextOutputs, viewing: ArenaRead) -> Self.Result:
+        return {outputs.keys, self.links, outputs.links, Int(outputs.written), viewing}
 
 
 # endregion Calls
@@ -2206,7 +2222,8 @@ struct SequenceIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         return {self.index[].library, _SequenceCountCall(key), self.index[].address, self.executor}
 
     def get(self, key: Key, mut arena: Arena) -> Deferred[_SequenceGetCall[origin_of(arena)], Self.origin]:
-        """Submits `SequenceVerbs.get`; the arena must stay allocated and unchanged until final. Calls `usearch_sequence_get`."""
+        """Submits `SequenceVerbs.get`; the arena must stay allocated and unchanged until final. Calls `usearch_sequence_get`.
+        """
         return {
             self.index[].library,
             _SequenceGetCall[origin_of(arena)](key, arena._address),
@@ -2219,7 +2236,8 @@ struct SequenceIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
     ](self, path: StringSlice[path_origin]) -> Deferred[
         _SequenceSaveCall, ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[path_origin]()))
     ]:
-        """Submits `SequenceVerbs.save`; the path must stay allocated and unchanged until final. Calls `usearch_sequence_save`."""
+        """Submits `SequenceVerbs.save`; the path must stay allocated and unchanged until final. Calls `usearch_sequence_save`.
+        """
         return {
             self.index[].library,
             _SequenceSaveCall(BytesView.of(path).arguments()),
@@ -2313,7 +2331,9 @@ struct SequenceCursor[origin: ImmOrigin]:
         Raises:
             `Error` if the engine refuses the copy.
         """
-        return self._next(_SequenceCursorNextCall[origin_of(arena)](self.address, False, wanted, arena._address), NULL_ADDRESS)
+        return self._next(
+            _SequenceCursorNextCall[origin_of(arena)](self.address, False, wanted, arena._address), NULL_ADDRESS
+        )
 
     def next_links(self, wanted: Int, mut arena: Arena) raises Error -> DenseBatch[origin_of(arena)]:
         """Copies up to `wanted` next keys into a passed arena, each with the keys it links to.
@@ -2329,7 +2349,9 @@ struct SequenceCursor[origin: ImmOrigin]:
         Raises:
             `Error` if the engine refuses the copy.
         """
-        return self._next(_SequenceCursorNextCall[origin_of(arena)](self.address, True, wanted, arena._address), NULL_ADDRESS)
+        return self._next(
+            _SequenceCursorNextCall[origin_of(arena)](self.address, True, wanted, arena._address), NULL_ADDRESS
+        )
 
     def on(ref self, ref executor: Executor) -> SequenceCursorOn[Self.origin, ImmOrigin(origin_of(self, executor))]:
         """The receiver whose pulls block on `executor`, named again for every pull. Binding-only.
@@ -2390,7 +2412,8 @@ struct SequenceCursorOn[cursor_origin: ImmOrigin, origin: ImmOrigin]:
             `Error` if the engine refuses the copy.
         """
         return self.cursor[]._next(
-            _SequenceCursorNextCall[origin_of(arena)](self.cursor[].address, False, wanted, arena._address), self.executor
+            _SequenceCursorNextCall[origin_of(arena)](self.cursor[].address, False, wanted, arena._address),
+            self.executor,
         )
 
     def next_links(self, wanted: Int, mut arena: Arena) raises Error -> DenseBatch[origin_of(arena)]:
@@ -2408,7 +2431,8 @@ struct SequenceCursorOn[cursor_origin: ImmOrigin, origin: ImmOrigin]:
             `Error` if the engine refuses the copy.
         """
         return self.cursor[]._next(
-            _SequenceCursorNextCall[origin_of(arena)](self.cursor[].address, True, wanted, arena._address), self.executor
+            _SequenceCursorNextCall[origin_of(arena)](self.cursor[].address, True, wanted, arena._address),
+            self.executor,
         )
 
 

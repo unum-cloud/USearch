@@ -840,6 +840,27 @@ def test_deferred_calls_wait_until_final() raises:
     assert_true(call.wait().query_keys(0)[0] == Key(integer=1), "and the same answer when asked again")
 
 
+def test_a_later_call_ends_earlier_results() raises:
+    """A result reads until a later call takes its arena, after which its accessors raise `CONTENDED`."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
+        return
+    var library = Library()
+    var executor = Executor.for_ram(library, threads=2)
+    var index = _basis(library)
+    var query = [Float32(0), 1]
+    var arena = Arena(executor)
+    var first = index.on(executor).search(RowsView.of(query, 2), 1, arena)
+    assert_true(first.query_keys(0)[0] == Key(integer=1), "the latest call's result reads")
+    _ = index.on(executor).search(RowsView.of(query, 2), 1, arena)
+    var raised = False
+    try:
+        _ = first.query_keys(0)
+    except error:
+        raised = error.status == Status.CONTENDED
+    assert_true(raised, "an earlier result raises CONTENDED")
+
+
 def test_deferred_failures_repeat() raises:
     """A deferred call the engine refuses raises the same failure on every wait."""
     if not _library_is_present():
@@ -1793,6 +1814,7 @@ def main() raises:
     suite.test[test_shapes_search_get_and_count]()
     suite.test[test_shapes_checkpoints_refine_and_reshard]()
     suite.test[test_geospatial_index_starts_empty_and_refuses_what_it_lacks]()
+    suite.test[test_a_later_call_ends_earlier_results]()
     suite.test[test_geospatial_search_within_get_and_count]()
     suite.test[test_geospatial_checkpoints_refine_and_reshard]()
     suite.test[test_readme_quickstart]()

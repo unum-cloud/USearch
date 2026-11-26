@@ -20,8 +20,8 @@ hooks_directory=$(cd "$(dirname "$0")" && pwd)
 # sibling lacks prints `absent`, and any difference exits nonzero. It also compares the `Shared Core` region of
 # `cpp/<prefix>/types.hpp`, the `Calls` and `Receivers` regions of `golang/types.go`, every region named from
 # `Shared VRAM` in the GPU runtime and the vendor device headers, with each project's prefix and name read as one,
-# and the vendored DLPack and Arrow C interface headers byte for byte. With `--sync`, writes each shared hook region over the
-# sibling's instead.
+# and the vendored DLPack and Arrow C interface headers and the shared arena model byte for byte. With `--sync`,
+# writes each shared hook region over the sibling's instead.
 if [ "${1:-}" = --siblings ] || [ "${1:-}" = --sync ]; then
     mode=$1
     project_name=$(sed -n 's/^project_name="\(.*\)"$/\1/p' "$hooks_directory/pre-commit")
@@ -35,7 +35,7 @@ if [ "${1:-}" = --siblings ] || [ "${1:-}" = --sync ]; then
     strict_region_projects='usearch|uform|ustore'
     # Prints one `path|opener|closer` line per compared source region: the fixed ones, then every region whose name
     # starts with `Shared VRAM` in either project's copy of each GPU file, or `Shared VRAM` itself while neither has
-    # one, and last the vendored headers, whose opener is empty.
+    # one, and last the vendored headers and the shared model, whose opener is empty.
     source_regions() { # source_regions <own-root> <own-lowercase-name> <sibling-root> <sibling-lowercase-name>
         local source_path region_names
         printf '%s\n' "cpp/@name@/types.hpp|#pragma region Shared Core|#pragma endregion Shared Core" \
@@ -46,7 +46,7 @@ if [ "${1:-}" = --siblings ] || [ "${1:-}" = --sync ]; then
             printf '%s\n' "${region_names:-Shared VRAM}" |
                 awk -v path="$source_path" '{ print path "|#pragma region " $0 "|#pragma endregion " $0 }'
         done
-        printf '%s\n' "c/@name@/arrow_abi.h||" "python/dlpack.h||"
+        printf '%s\n' "c/@name@/arrow_abi.h||" "python/dlpack.h||" "verification/arena_lifetime.pml||"
     }
     # Succeeds when the file holds the opener line, or exists at all when the opener is empty, as a vendored file.
     carries_region() { # carries_region <opener> <file>
@@ -5503,24 +5503,10 @@ inline int probe(int &count) noexcept {
 }
 FIXTURE
 
-assert_accepts "live-arena count on the Python executor" python/probe.c <<'FIXTURE'
+assert_rejects "live-arena count on the Python executor" "counts references in a binding" python/probe.c <<'FIXTURE'
 typedef struct probe_executor_t {
     probe_handle_t handle;
     atomic_size_t arenas;
-} probe_executor_t;
-FIXTURE
-
-assert_rejects "live-arena count outside the Python binding" "counts references in a binding" javascript/probe.c <<'FIXTURE'
-typedef struct probe_executor_t {
-    probe_handle_t handle;
-    atomic_size_t arenas;
-} probe_executor_t;
-FIXTURE
-
-assert_rejects "live-arena count as a plain integer" "counts references in a binding" python/probe.c <<'FIXTURE'
-typedef struct probe_executor_t {
-    probe_handle_t handle;
-    Py_ssize_t arenas;
 } probe_executor_t;
 FIXTURE
 

@@ -1006,6 +1006,9 @@ struct Matches[origin: MutOrigin](Movable, Sized):
     var queries: Int
     """Queries the call answered."""
 
+    var viewing: ArenaRead
+    """The arena the result reads and the generation the call that wrote it brought it to."""
+
     def __len__(self) -> Int:
         """The queries the call answered.
 
@@ -1014,7 +1017,7 @@ struct Matches[origin: MutOrigin](Movable, Sized):
         """
         return self.queries
 
-    def query_keys(ref self, query: Int) -> Span[Key, origin_of(self)]:
+    def query_keys(ref self, query: Int) raises Error -> Span[Key, origin_of(self)]:
         """One query's keys, nearest first, trimmed to the matches that query found.
 
         Args:
@@ -1023,10 +1026,13 @@ struct Matches[origin: MutOrigin](Movable, Sized):
         Returns:
             The keys, viewed from the arena this result reads.
         """
+        self.viewing.open("Matches.query_keys")
         var start = self.view.keys + query * Int(self.view.columns) * size_of[Key]()
-        return _in_arena[Key, origin_of(self)](start, self._found(query))
+        var viewed = _in_arena[Key, origin_of(self)](start, self._found(query))
+        self.viewing.close()
+        return viewed
 
-    def query_distances(ref self, query: Int) -> Span[Distance, origin_of(self)]:
+    def query_distances(ref self, query: Int) raises Error -> Span[Distance, origin_of(self)]:
         """One query's scores, paired positionally with `query_keys`.
 
         Args:
@@ -1035,8 +1041,11 @@ struct Matches[origin: MutOrigin](Movable, Sized):
         Returns:
             The scores, viewed from the arena this result reads.
         """
+        self.viewing.open("Matches.query_distances")
         var start = self.view.scores + query * Int(self.view.columns) * size_of[Distance]()
-        return _in_arena[Distance, origin_of(self)](start, self._found(query))
+        var viewed = _in_arena[Distance, origin_of(self)](start, self._found(query))
+        self.viewing.close()
+        return viewed
 
     def _found(self, query: Int) -> Int:
         """The matches written for one query; a pull with nothing to report left the counts null."""
@@ -1069,6 +1078,9 @@ comptime Release = def(Address) thin abi("C") -> None
 
 comptime StatusRelease = def(Address) thin abi("C") -> c_int
 """The arena and executor `_free`: `contended`, with nothing freed, while an export is open or an arena lives."""
+
+comptime ArenaGeneration = def(Address) thin abi("C") -> UInt64
+"""`usearch_arena_generation`: the calls the engine took on an arena, advanced once by each that names it."""
 
 comptime OutcomeStatus = def(Pointer[Outcome, MutAnyOrigin]) thin abi("C") -> c_int
 """`usearch_outcome_wait` and `usearch_outcome_status`: an outcome's status, the first once it is final."""
@@ -1751,13 +1763,19 @@ struct Monolith[origin: MutOrigin](Movable):
     var length: Int
     """Bytes the monolith spans."""
 
-    def bytes(ref self) -> Span[UInt8, origin_of(self)]:
+    var viewing: ArenaRead
+    """The arena the result reads and the generation the call that wrote it brought it to."""
+
+    def bytes(ref self) raises Error -> Span[UInt8, origin_of(self)]:
         """The monolith, viewed from the arena this result reads.
 
         Returns:
             The bytes, valid until the arena's next call.
         """
-        return _in_arena[UInt8, origin_of(self)](self.data, self.length)
+        self.viewing.open("Monolith.bytes")
+        var viewed = _in_arena[UInt8, origin_of(self)](self.data, self.length)
+        self.viewing.close()
+        return viewed
 
 
 # endregion Arenas
@@ -1797,6 +1815,41 @@ struct CallHead(ImplicitlyCopyable):
     var completion: Completion
 
 
+@fieldwise_init
+struct ArenaRead(ImplicitlyCopyable):
+    """The arena a result reads, and the generation the call that wrote it brought the arena to."""
+
+    var library: Library
+    """The loaded engine, held so a read can still reach the arena's export count."""
+    var address: Address
+    """The `usearch_arena_t` the call wrote into; null for a call that named none."""
+    var generation: Int
+    """The arena's generation once the call took it, which a later call advances."""
+
+    @staticmethod
+    def stamp(library: Library, address: Address) -> Self:
+        """Names the arena a call took, at the generation it brought it to."""
+        if address == NULL_ADDRESS:
+            return Self(library, address, 0)
+        return Self(library, address, Int(library.symbols().arena_generation(address)))
+
+    def open(self, detail: StaticString) raises Error:
+        """Opens an export on the arena, so no call takes it until `close`, refusing a result a later call
+        rewound, or one a call holds the arena for, as `CONTENDED`."""
+        if self.address == NULL_ADDRESS:
+            return
+        if self.library.symbols().arena_export_open(self.address) != 0:
+            raise Error(Status.CONTENDED, detail)
+        if Int(self.library.symbols().arena_generation(self.address)) != self.generation:
+            self.library.symbols().arena_export_close(self.address)
+            raise Error(Status.CONTENDED, detail)
+
+    def close(self):
+        """Closes the export `open` opened."""
+        if self.address != NULL_ADDRESS:
+            self.library.symbols().arena_export_close(self.address)
+
+
 trait Call(Deinitable, Movable):
     """One verb crossing into the engine: what it passes until final, and how its outputs become a result.
 
@@ -1827,7 +1880,11 @@ trait Call(Deinitable, Movable):
         the call as `SHAPE_MISMATCH` otherwise, as only it sees both lengths."""
         return True
 
-    def conclude(deinit self, outputs: Self.Outputs) -> Self.Result:
+    def arena_handle(self) -> Address:
+        """The `usearch_arena_t` the call writes into, which stamps its result; null for a call with none."""
+        return NULL_ADDRESS
+
+    def conclude(deinit self, outputs: Self.Outputs, viewing: ArenaRead) -> Self.Result:
         """Adopts what the final call wrote, success or not, and builds the result around its arena."""
         ...
 
@@ -1864,7 +1921,8 @@ def _block[C: Call](library: Library, var call: C, index: Address, executor: Add
         Pointer(to=mutable_slots[unsafe_offset=0].outputs).unsafe_origin_cast[MutUntrackedOrigin](),
     )
     var written = mutable_slots[unsafe_offset=0]
-    var result = call^.conclude(written.outputs)
+    var viewing = ArenaRead.stamp(library, call.arena_handle())
+    var result = call^.conclude(written.outputs, viewing)
     library._check(written.outcome, C.symbol)
     return result^
 
@@ -1899,6 +1957,8 @@ struct Deferred[C: Call, origin: ImmOrigin]:
     """The result, once a wait found the call succeeded."""
     var failure: Optional[Error]
     """The failure, once a wait found the call failed."""
+    var viewing: ArenaRead
+    """The arena the call took and the generation it brought it to, which its result reads."""
 
     def __init__(out self, library: Library, var call: Self.C, index: Address, executor: Address):
         """Submits `call` deferred, on the receiver's executor."""
@@ -1907,6 +1967,7 @@ struct Deferred[C: Call, origin: ImmOrigin]:
         self.call = call^
         self.answer = None
         self.failure = None
+        self.viewing = ArenaRead(library, NULL_ADDRESS, 0)
         var slots = self._slots()
         _submit(
             self.library,
@@ -1919,6 +1980,7 @@ struct Deferred[C: Call, origin: ImmOrigin]:
             ),
             Pointer(to=slots[].outputs).unsafe_origin_cast[MutUntrackedOrigin](),
         )
+        self.viewing = ArenaRead.stamp(self.library, self.call.value().arena_handle())
 
     def __deinit__(deinit self):
         """Waits until the call is final, then frees what it passed. Calls `usearch_outcome_wait`."""
@@ -1927,7 +1989,7 @@ struct Deferred[C: Call, origin: ImmOrigin]:
                 unsafe_from_address=Int(Pointer(to=self.slots))
             )
             _ = self.library.symbols().outcome_wait(Pointer(to=slots[].outcome))
-            _ = self.call.take().conclude(slots[].outputs)
+            _ = self.call.take().conclude(slots[].outputs, self.viewing)
         _ = self.library^
 
     def _slots(self) -> Pointer[CallSlots[Self.C.Outputs], MutAnyOrigin]:
@@ -1952,7 +2014,7 @@ struct Deferred[C: Call, origin: ImmOrigin]:
             var slots = self._slots()
             _ = self.library.symbols().outcome_wait(Pointer(to=slots[].outcome))
             var written = slots[]
-            var result = self.call.take().conclude(written.outputs)
+            var result = self.call.take().conclude(written.outputs, self.viewing)
             if written.outcome.status == c_int(0):
                 self.answer = result^
             else:
