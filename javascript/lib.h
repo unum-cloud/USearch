@@ -124,6 +124,16 @@ typedef struct usearch_js_arena_t {
 
     /** The strong reference keeping @c executor's wrapper alive alongside it. */
     napi_ref executor_reference;
+
+    /** Weak references to the @c ArrayBuffer of every view over the last call's outputs, detached
+     *  once the next call rewinds them or @c free releases them. */
+    napi_ref* views;
+
+    /** How many of @c views are held. */
+    size_t views_count;
+
+    /** How many @c views fit before it grows. */
+    size_t views_capacity;
 } usearch_js_arena_t;
 
 /** An owned index handle, one per instance of a modality's compiled index class. */
@@ -507,16 +517,17 @@ bool usearch_js_executor_from_value(napi_env env, napi_value value, usearch_exec
 /** Defines the @c Arena class; the module glue keeps the reference. */
 napi_value usearch_js_arena_define(napi_env env);
 
-/** Unwraps the @c arena a verb's outputs land in; a freed one reads as @c NULL, for the library to
- *  refuse. */
+/** Unwraps the @c arena a verb's outputs land in, detaching every view over its previous call's
+ *  outputs, which this call rewinds; a freed one reads as @c NULL, for the library to refuse. */
 bool usearch_js_arena_from_value(napi_env env, napi_value value, usearch_arena_t* handle);
 
 /**
  *  @brief Views @p bytes an arena holds as a @c TypedArray of @p type, without copying.
  *
  *  The backing @c ArrayBuffer references @p arena, so the collector keeps the memory for as long as
- *  any view of it lives; the view ends at the arena's next call, and reads device memory as is for
- *  a VRAM arena, which @c Arena.describe names.
+ *  any view of it lives, and the arena remembers it, so its next call or its @c free detaches the
+ *  view rather than leaving it dangling. An arena whose memory the host cannot read, as
+ *  @c Arena.describe names, is refused with @c usearch_status_device_k.
  *
  *  @return The view, or @c NULL with an exception pending.
  */

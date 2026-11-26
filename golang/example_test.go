@@ -68,8 +68,14 @@ func TestQuickstart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	found, _ := matches.Query(0)
-	foundLocally, _ := local.Query(0)
+	found, _, err := matches.Query(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundLocally, _, err := local.Query(0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	const expected = "00000000-0000-0000-0000-00000000002a 00000000-0000-0000-0000-00000000002a\n"
 	if printed := fmt.Sprintln(found[0], foundLocally[0]); printed != expected {
 		t.Fatalf("the Quickstart printed %q", printed)
@@ -120,7 +126,10 @@ func ExampleDenseIndex() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	found, _ := matches.Query(0) // valid until the next call given arena
+	found, _, err := matches.Query(0) // valid until the next call given arena
+	if err != nil {
+		log.Fatal(err)
+	}
 	fmt.Println(found[0])
 	// Output: 00000000-0000-0000-0000-000000000002
 }
@@ -163,7 +172,10 @@ func ExampleDenseIndexOn_Deferred() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	found, _ := matches.Query(0)
+	found, _, err := matches.Query(0)
+	if err != nil {
+		log.Fatal(err)
+	}
 	fmt.Println(found[0])
 	// Output: 00000000-0000-0000-0000-000000000003
 }
@@ -192,7 +204,10 @@ func ExampleSequenceIndex() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	found, distances := matches.Query(0)
+	found, distances, err := matches.Query(0)
+	if err != nil {
+		log.Fatal(err)
+	}
 	fmt.Println(found[0], distances[0])
 	// Output: 00000000-0000-0000-0000-000000000002 1
 }
@@ -222,7 +237,10 @@ func ExampleShapesIndex() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	found, _ := matches.Query(0)
+	found, _, err := matches.Query(0)
+	if err != nil {
+		log.Fatal(err)
+	}
 	fmt.Println(found[0])
 	// Output: 00000000-0000-0000-0000-000000000001
 }
@@ -255,7 +273,10 @@ func ExampleGeospatialIndex() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	found, _ := nearby.Query(0) // every entry within 500 metres, with its chord metres
+	found, _, err := nearby.Query(0) // every entry within 500 metres, with its chord metres
+	if err != nil {
+		log.Fatal(err)
+	}
 	fmt.Println(len(found))
 	// Output: 2
 }

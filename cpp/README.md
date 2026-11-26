@@ -143,7 +143,7 @@ Each call rewinds its arena, so the previous call's views die and a steady loop 
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own.
 Nothing in C++ retires a stale view at compile time, so a view read after its arena's next call reads whatever that call wrote.
-An arena from a VRAM executor holds device memory, which host code must not read; `arena.describe()` answers where an arena's outputs live.
+An arena from a VRAM executor holds device memory; `arena.describe()` answers where its outputs live, and its `host_access` decides whether host code may read them: refused for CUDA and HIP device memory, readable for Apple's shared memory.
 It grows, fills and frees on that executor's first stream, so it serves only calls on that executor, any other refused with `status_code_t::device_k`.
 Destroy every arena before the executor that made it.
 

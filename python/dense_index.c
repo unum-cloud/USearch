@@ -2175,6 +2175,7 @@ static char const doc_DenseBatch[] =                                            
 /** The (offsets, keys) pair of the @p written entries' links in @p arena; a new reference, or NULL
  *  with an exception set. */
 static PyObject* links_answer(PyObject* arena, usearch_keys_tape_view_t const* links, size_t written) {
+    if (usearch_py_refuse_host_read(arena) != 0) return NULL;
     Py_ssize_t const offsets_shape[1] = {(Py_ssize_t)written + 1};
     Py_ssize_t const linked_shape[2] = {(Py_ssize_t)links->offsets[written], (Py_ssize_t)sizeof(usearch_key_t)};
     PyObject* const offsets = usearch_py_arena_buffer(&ArenaBufferType, arena, links->offsets, "N", sizeof(size_t),

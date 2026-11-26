@@ -900,10 +900,31 @@ static void usearch_js_arena_unbind(napi_env env, usearch_js_arena_t* arena) {
     arena->executor = NULL;
 }
 
+/** Lets go of every view handed out so far, leaving them as they are. */
+static void usearch_js_arena_forget(napi_env env, usearch_js_arena_t* arena) {
+    for (size_t view_index = 0; view_index != arena->views_count; ++view_index)
+        napi_delete_reference(env, arena->views[view_index]);
+    arena->views_count = 0;
+}
+
+/** Detaches every view still alive over the arena's outputs, which a rewind or a free is about to
+ *  end, so an old view throws on use rather than reading memory that changed. */
+static void usearch_js_arena_detach(napi_env env, usearch_js_arena_t* arena) {
+    for (size_t view_index = 0; view_index != arena->views_count; ++view_index) {
+        napi_value buffer = NULL;
+        if (napi_get_reference_value(env, arena->views[view_index], &buffer) == napi_ok && buffer)
+            napi_detach_arraybuffer(env, buffer);
+    }
+    usearch_js_arena_forget(env, arena);
+}
+
 static void usearch_js_arena_finalize(napi_env env, void* data, void* hint) {
     usearch_js_arena_t* const arena = (usearch_js_arena_t*)data;
     (void)hint;
     if (!arena) return;
+    usearch_js_arena_forget(env, arena);
+    free(arena->views);
+    // JavaScript opens no export and no view outlives its wrapper, so this free is never refused.
     usearch_arena_free(arena->handle);
     usearch_js_arena_unbind(env, arena);
     free(arena);
@@ -936,7 +957,7 @@ static napi_value usearch_js_arena_construct(napi_env env, napi_callback_info in
         free(arena);
         return NULL;
     }
-    usearch_arena_description_t description = {usearch_residency_ram_k, 0};
+    usearch_arena_description_t description = {.residency = usearch_residency_ram_k, .device = -1};
     usearch_arena_describe_t describe = {.arena = arena->handle, .outcome = &outcome, .description = &description};
     usearch_arena_describe(&describe);
     if (!usearch_js_succeeded(env, &outcome)) {
@@ -965,48 +986,83 @@ static napi_value usearch_js_arena_construct(napi_env env, napi_callback_info in
     return self;
 }
 
-/** @c describe() → @c {residency, device}: the canonical residency name and the device ordinal,
- *  @c null for host pages. */
+/** @c describe() → @c {residency, device, vendor, vendorOrdinal, hostAccess}: the canonical
+ *  residency name, the device's USearch and vendor ordinals, each @c null for host pages, its
+ *  vendor, "unknown" for host pages, and whether host code may read the outputs. */
 static napi_value usearch_js_arena_describe(napi_env env, napi_callback_info info) {
     usearch_js_arena_t const* const arena = (usearch_js_arena_t const*)usearch_js_self(env, info, NULL, NULL, NULL);
     if (!arena) return NULL;
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
-    usearch_arena_description_t description = {usearch_residency_ram_k, 0};
+    usearch_arena_description_t description = {.residency = usearch_residency_ram_k, .device = -1};
     usearch_arena_describe_t describe = {.arena = arena->handle, .outcome = &outcome, .description = &description};
     usearch_arena_describe(&describe);
     if (!usearch_js_succeeded(env, &outcome)) return NULL;
-    napi_value object = NULL, device = NULL;
+    napi_value object = NULL, device = NULL, vendor_ordinal = NULL;
     if (napi_create_object(env, &object) != napi_ok) {
         usearch_js_throw(env, usearch_status_internal_k, "Could not publish the arena description");
         return NULL;
     }
-    if (description.residency != usearch_residency_vram_k) napi_get_null(env, &device);
-    else device = usearch_js_number(env, description.device);
+    if (description.device < 0) napi_get_null(env, &device);
+    else device = usearch_js_number(env, (size_t)description.device);
+    if (description.vendor_ordinal < 0) napi_get_null(env, &vendor_ordinal);
+    else vendor_ordinal = usearch_js_number(env, (size_t)description.vendor_ordinal);
     napi_set_named_property(env, object, "residency",
                             usearch_js_static_string(env, usearch_residency_name(description.residency)));
     napi_set_named_property(env, object, "device", device);
+    napi_set_named_property(env, object, "vendor",
+                            usearch_js_static_string(env, usearch_gpu_vendor_name(description.vendor)));
+    napi_set_named_property(env, object, "vendorOrdinal", vendor_ordinal);
+    napi_set_named_property(env, object, "hostAccess",
+                            usearch_js_static_string(env, usearch_host_access_name(description.host_access)));
     return object;
 }
 
-/** @c free() - releases the memory now, once every deferred call writing it is final; a second call
- *  is a no-op. */
+/** @c free() - detaches every view still held over the outputs, then releases the memory once every
+ *  deferred call writing it is final; a second call is a no-op. */
 static napi_value usearch_js_arena_release(napi_env env, napi_callback_info info) {
     usearch_js_arena_t* const arena = (usearch_js_arena_t*)usearch_js_self(env, info, NULL, NULL, NULL);
     if (!arena) return NULL;
-    usearch_arena_free(arena->handle);
+    if (!arena->handle) return usearch_js_undefined(env);
+    usearch_js_arena_detach(env, arena);
+    usearch_status_t const status = usearch_arena_free(arena->handle);
+    if (status != usearch_status_success_k) {
+        usearch_js_throw(env, status, "an export of the arena's outputs is still open");
+        return NULL;
+    }
     usearch_js_arena_unbind(env, arena);
     arena->handle = NULL;
     return usearch_js_undefined(env);
 }
 
-bool usearch_js_arena_from_value(napi_env env, napi_value value, usearch_arena_t* handle) {
+/** Unwraps an @c Arena, leaving its views alone; @c NULL with an exception pending. */
+static usearch_js_arena_t* usearch_js_arena_unwrap(napi_env env, napi_value value) {
     usearch_js_addon_t* const addon = usearch_js_addon(env);
-    usearch_js_arena_t const* const arena = addon ? (usearch_js_arena_t const*)usearch_js_unwrap_instance(
-                                                        env, value, addon->arena_class, "arena", "must be an Arena")
-                                                  : NULL;
+    return addon ? (usearch_js_arena_t*)usearch_js_unwrap_instance(env, value, addon->arena_class, "arena",
+                                                                   "must be an Arena")
+                 : NULL;
+}
+
+bool usearch_js_arena_from_value(napi_env env, napi_value value, usearch_arena_t* handle) {
+    usearch_js_arena_t* const arena = usearch_js_arena_unwrap(env, value);
     if (!arena) return false;
+    usearch_js_arena_detach(env, arena);
     *handle = arena->handle;
     return true;
+}
+
+/** Whether host code may read @p arena's outputs, as @c usearch_arena_describe reports; throws
+ *  @c usearch_status_device_k and answers @c false over memory the host may not read. */
+static bool usearch_js_arena_host(napi_env env, napi_value arena) {
+    usearch_js_arena_t const* const unwrapped = usearch_js_arena_unwrap(env, arena);
+    if (!unwrapped) return false;
+    usearch_outcome_t outcome = {usearch_status_success_k, NULL};
+    usearch_arena_description_t description = {.residency = usearch_residency_ram_k, .device = -1};
+    usearch_arena_describe_t describe = {.arena = unwrapped->handle, .outcome = &outcome, .description = &description};
+    usearch_arena_describe(&describe);
+    if (!usearch_js_succeeded(env, &outcome)) return false;
+    if (description.host_access == usearch_host_access_readable_k) return true;
+    usearch_js_throw(env, usearch_status_device_k, "the outputs are memory the host may not read");
+    return false;
 }
 
 /** Views @p buffer as @p elements of @p type; half-precision rows read as their bits on a runtime
@@ -1024,6 +1080,7 @@ static napi_status usearch_js_typedarray(napi_env env, napi_typedarray_type type
 napi_value usearch_js_arena_view(napi_env env, napi_value arena, napi_typedarray_type type, void* data, size_t bytes,
                                  size_t elements) {
     napi_value buffer = NULL, array = NULL;
+    if (!usearch_js_arena_host(env, arena)) return NULL;
     // The non-enumerable `arena` property is what keeps the memory alive while any view of it is.
     napi_property_descriptor const owner = {"arena", NULL, NULL, NULL, NULL, arena, napi_default, NULL};
     bool const empty = !data || !bytes;
@@ -1034,6 +1091,23 @@ napi_value usearch_js_arena_view(napi_env env, napi_value arena, napi_typedarray
         usearch_js_throw(env, usearch_status_internal_k, "Could not view the arena");
         return NULL;
     }
+    // Remember the buffer, empty ones included, so the arena's next call or free detaches it.
+    usearch_js_arena_t* const held = usearch_js_arena_unwrap(env, arena);
+    if (!held) return NULL;
+    if (held->views_count == held->views_capacity) {
+        size_t const capacity = held->views_capacity ? held->views_capacity * 2 : 8;
+        napi_ref* const grown = (napi_ref*)realloc(held->views, capacity * sizeof(napi_ref));
+        if (!grown) {
+            usearch_js_throw(env, usearch_status_out_of_memory_k, "Could not remember the arena's view");
+            return NULL;
+        }
+        held->views = grown, held->views_capacity = capacity;
+    }
+    if (napi_create_reference(env, buffer, 0, &held->views[held->views_count]) != napi_ok) {
+        usearch_js_throw(env, usearch_status_internal_k, "Could not remember the arena's view");
+        return NULL;
+    }
+    ++held->views_count;
     return array;
 }
 
@@ -1041,6 +1115,8 @@ napi_value usearch_js_finish_tape(napi_env env, usearch_js_call_t* call, napi_va
     usearch_js_index_call_t const* const index_call = (usearch_js_index_call_t const*)call;
     usearch_tape_view_t const* const tape = &index_call->tape;
     napi_value const arena = slots[usearch_js_slot_arena_k];
+    // The total length below is read from the arena itself, so the host must be able to.
+    if (!usearch_js_arena_host(env, arena)) return NULL;
     size_t const entries = index_call->written;
     bool const wide = tape->layout == usearch_tape_u64_k;
     void const* const offsets = wide ? (void const*)tape->offsets.u64 : (void const*)tape->offsets.u32;

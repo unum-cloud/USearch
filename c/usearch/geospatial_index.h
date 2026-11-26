@@ -202,6 +202,9 @@ typedef enum usearch_geospatial_relation_t {
     usearch_geospatial_relation_seen_k = 4,
 } usearch_geospatial_relation_t;
 
+/** The canonical spelling of a relation, as @c usearch_geospatial_relation_sees_k spells "sees". */
+USEARCH_EXPORT char const* usearch_geospatial_relation_name(usearch_geospatial_relation_t relation);
+
 /** Fills @p rows × @p columns heights of a terrain, in metres above the WGS-84 ellipsoid, starting
  *  at row @p first_row and column @p first_column, with @p heights_stride bytes between rows; a
  *  cell the source does not have stays NaN, which never blocks a sight line. Called concurrently

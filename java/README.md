@@ -169,7 +169,7 @@ Each call rewinds its arena, so a view ends at the arena's next call and a stead
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own.
 Reading a view after the arena's next call reads whatever that call left; closing the arena closes every view's segments, so reading one then throws `IllegalStateException`.
-`arena.describe()` reports where the outputs live, and an arena from a VRAM executor holds device memory, which is the caller's to hand to device code rather than read from the host.
+`arena.describe()` reports where the outputs live; every result is a host view, so `new Arena(executor)` refuses with `Status.DEVICE` an executor whose memory the host may not read, as CUDA and ROCm device memory, before any call runs, while Apple's shared memory passes.
 It grows, fills and frees on that executor's first stream, so it serves only calls on that executor, keeps it reachable, and must be closed before it; free every arena before its executor, while one made without an executor lives until it is freed.
 
 ```java

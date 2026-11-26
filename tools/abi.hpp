@@ -2476,13 +2476,13 @@ inline st::vector<usearch_scalar_t> compiled_scalars(usearch_residency_t residen
 
 /** The CPU classes this machine dispatches as when each is the ceiling, from the portable floor to
  *  the last class the header declares, since a value past it is no @c usearch_cpu_class_t, and a
- *  gap in between spells its name "unknown"; a class the machine lacks narrows to another one, so
- *  the sweep leaves it out. */
+ *  gap in between spells its name "unrecognized"; a class the machine lacks narrows to another
+ *  one, so the sweep leaves it out. */
 inline st::vector<usearch_cpu_class_t> admitted_classes(usearch_executor_t executor) noexcept {
     st::vector<usearch_cpu_class_t> classes;
     for (int code = usearch_cpu_class_serial_k; code <= usearch_cpu_class_wasm64_extended_k; ++code) {
         usearch_cpu_class_t const cpu_class = static_cast<usearch_cpu_class_t>(code);
-        if (std::string_view(usearch_cpu_class_name(cpu_class)) != "unknown" &&
+        if (std::string_view(usearch_cpu_class_name(cpu_class)) != "unrecognized" &&
             picked_class(executor, cpu_class) == cpu_class &&
             st::failed(classes.push_back(usearch_cpu_class_t {cpu_class})))
             exit_out_of_memory("the CPU classes");

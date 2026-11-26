@@ -826,7 +826,7 @@ public struct DenseVectors<Value: ScalarValue>: RandomAccessCollection {
 
     /// One row's stored values, packed at their natural width.
     public subscript(row: Int) -> Row {
-        boundsCheck(row, below: endIndex)
+        boundsCheck(row, below: endIndex, in: arena)
         let perValue = Value.scalarKind.dimensionsPerValue
         return Row(
             arena: arena,
@@ -849,7 +849,7 @@ public struct DenseVectors<Value: ScalarValue>: RandomAccessCollection {
 
         /// The value at a position.
         public subscript(position: Int) -> Value {
-            boundsCheck(position, below: endIndex)
+            boundsCheck(position, below: endIndex, in: arena)
             return base.load(fromByteOffset: position * MemoryLayout<Value>.stride, as: Value.self)
         }
     }
@@ -869,7 +869,7 @@ public struct DenseKeys: RandomAccessCollection {
 
     /// The key at a position.
     public subscript(position: Int) -> Key {
-        boundsCheck(position, below: endIndex)
+        boundsCheck(position, below: endIndex, in: arena)
         return Key(
             raw: UnsafeRawPointer(keys.data!).load(fromByteOffset: position * keys.stride, as: usearch_key_t.self)
         )
@@ -903,7 +903,7 @@ public struct DenseDraws {
 
     /// Which of its key's entries one draw is, in the order `get` writes them.
     public func entryOrdinal(_ draw: Int) -> Int {
-        boundsCheck(draw, below: count)
+        boundsCheck(draw, below: count, in: arena)
         return entryOrdinals![draw]
     }
 }
@@ -923,7 +923,7 @@ public struct DenseLinks: RandomAccessCollection {
 
     /// The keys one entry links to, as the graph stored them when the pull ran.
     public subscript(entry: Int) -> [Key] {
-        boundsCheck(entry, below: endIndex)
+        boundsCheck(entry, below: endIndex, in: arena)
         guard let offsets = links.offsets, let keys = links.keys else { return [] }
         return (offsets[entry] ..< offsets[entry + 1]).map { Key(raw: keys[$0]) }
     }
@@ -948,7 +948,7 @@ public struct DenseProducts: RandomAccessCollection {
 
     /// One left row's pairs, in traversal order, or one query's keys, largest score first.
     public subscript(query: Int) -> QueryMatches {
-        boundsCheck(query, below: endIndex)
+        boundsCheck(query, below: endIndex, in: arena)
         let cells = products.offsets[query] ..< products.offsets[query + 1]
         return QueryMatches(arena: arena, keys: products.keys, scores: products.scores, cells: cells)
     }
@@ -968,7 +968,8 @@ public struct Monolith {
     public func withUnsafeBytes<Result, Failure: Swift.Error>(
         _ body: (UnsafeRawBufferPointer) throws(Failure) -> Result
     ) throws(Failure) -> Result {
-        try body(UnsafeRawBufferPointer(start: monolith.data, count: monolith.length))
+        precondition(arena.hostAccess == .readable, hostRefusal)
+        return try body(UnsafeRawBufferPointer(start: monolith.data, count: monolith.length))
     }
 }
 

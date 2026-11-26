@@ -139,9 +139,11 @@ from usearch.shapes import (
 )
 from usearch.types import (
     ArenaDescribe,
+    ArenaFree,
     ArenaInit,
     CPUClass,
     GPUClass,
+    HostAccess,
     BytesView,
     CString,
     Error,
@@ -232,6 +234,8 @@ struct Symbols:
     """`usearch_residency_name`."""
     var residency_from_name: FromName
     """`usearch_residency_from_name`."""
+    var host_access_name: NameOf
+    """`usearch_host_access_name`."""
     var traversal_name: NameOf
     """`usearch_traversal_name`."""
     var traversal_from_name: FromName
@@ -259,7 +263,7 @@ struct Symbols:
 
     var arena_init: ArenaInit
     """`usearch_arena_init`."""
-    var arena_free: Release
+    var arena_free: ArenaFree
     """`usearch_arena_free`."""
     var arena_describe: ArenaDescribe
     """`usearch_arena_describe`."""
@@ -559,6 +563,7 @@ struct Symbols:
         self.scalar_from_name = _resolve[FromName](handle, "usearch_scalar_from_name")
         self.residency_name = _resolve[NameOf](handle, "usearch_residency_name")
         self.residency_from_name = _resolve[FromName](handle, "usearch_residency_from_name")
+        self.host_access_name = _resolve[NameOf](handle, "usearch_host_access_name")
         self.traversal_name = _resolve[NameOf](handle, "usearch_traversal_name")
         self.traversal_from_name = _resolve[FromName](handle, "usearch_traversal_from_name")
         self.mood_name = _resolve[NameOf](handle, "usearch_mood_name")
@@ -573,7 +578,7 @@ struct Symbols:
         self.dense_metric_from_name = _resolve[FromName](handle, "usearch_dense_metric_from_name")
 
         self.arena_init = _resolve[ArenaInit](handle, "usearch_arena_init")
-        self.arena_free = _resolve[Release](handle, "usearch_arena_free")
+        self.arena_free = _resolve[ArenaFree](handle, "usearch_arena_free")
         self.arena_describe = _resolve[ArenaDescribe](handle, "usearch_arena_describe")
         self.executor_for_ram = _resolve[ExecutorForRam](handle, "usearch_executor_for_ram")
         self.executor_for_nvme = _resolve[ExecutorForNvme](handle, "usearch_executor_for_nvme")
@@ -836,6 +841,10 @@ struct Library(ImplicitlyCopyable):
     def residency_from_name(self, name: StringSlice) raises Error -> Residency:
         """Reads a spelling back, raising `INVALID_ARGUMENT` for one it refuses. Calls `usearch_residency_from_name`."""
         return Residency(self._read_named(self.symbols().residency_from_name, name, "usearch_residency_from_name"))
+
+    def host_access_name(self, host_access: HostAccess) -> String:
+        """The engine's spelling of a host access, as `READABLE` spells "readable". Calls `usearch_host_access_name`."""
+        return text_at(self.symbols().host_access_name(host_access.code))
 
     def traversal_name(self, traversal: Traversal) -> String:
         """The engine's spelling of a traversal, as `SCAN` spells "scan". Calls `usearch_traversal_name`."""

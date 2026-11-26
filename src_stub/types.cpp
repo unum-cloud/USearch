@@ -153,9 +153,34 @@ void usearch_arena_init(usearch_arena_init_t* arguments) {
     *arguments->arena = arena;
 }
 
-void usearch_arena_free(usearch_arena_t arena) {
+usearch_status_t usearch_arena_free(usearch_arena_t arena) {
     wait_for_calls_using(arena);
+    if (exported(arena)) return usearch_status_contended_k;
     delete arena;
+    return usearch_status_success_k;
+}
+
+usearch_status_t usearch_arena_export_open(usearch_arena_t arena) {
+    if (!arena) return usearch_status_invalid_argument_k;
+    serial_atomic_ref<util::u32_t> exports {arena->exports};
+    util::u32_t counted = exports.load(std::memory_order_relaxed);
+    do
+        if (counted == (std::numeric_limits<util::u32_t>::max)()) return usearch_status_overflow_k;
+    while (!exports.compare_exchange_weak(counted, counted + 1, std::memory_order_seq_cst, std::memory_order_relaxed));
+    // Counted first, then the holder read, so a call taking the arena meanwhile sees this export.
+    if (!serial_atomic_ref<usearch_outcome_t const*>(arena->holder).load(std::memory_order_seq_cst))
+        return usearch_status_success_k;
+    usearch_arena_export_close(arena);
+    return usearch_status_contended_k;
+}
+
+void usearch_arena_export_close(usearch_arena_t arena) {
+    if (!arena) return;
+    serial_atomic_ref<util::u32_t> exports {arena->exports};
+    util::u32_t counted = exports.load(std::memory_order_relaxed);
+    do
+        if (!counted) return;
+    while (!exports.compare_exchange_weak(counted, counted - 1, std::memory_order_release, std::memory_order_relaxed));
 }
 
 void usearch_arena_describe(usearch_arena_describe_t* arguments) {
@@ -163,7 +188,8 @@ void usearch_arena_describe(usearch_arena_describe_t* arguments) {
     if (reject_if(!arguments->arena || !arguments->description, usearch_status_invalid_argument_k,
                   "The arena and description must not be NULL", outcome))
         return;
-    *arguments->description = {usearch_residency_ram_k, 0};
+    *arguments->description = {usearch_residency_ram_k, -1, usearch_gpu_vendor_unknown_k, -1,
+                               usearch_host_access_readable_k};
 }
 
 void usearch_executor_for_ram(usearch_executor_for_ram_t* arguments) {
@@ -279,13 +305,15 @@ char const* usearch_scalar_name(usearch_scalar_t scalar_kind) {
     case usearch_scalar_u8_k: return "u8";
     case usearch_scalar_u4x2_k: return "u4x2";
     case usearch_scalar_u1x8_k: return "u1x8";
-    default: return "unknown";
+    case usearch_scalar_unknown_k: return "unknown";
+    default: return "unrecognized";
     }
 }
 
 usearch_status_t usearch_scalar_from_name(usearch_bytes_view_t name, usearch_scalar_t* scalar) {
-    // The enumerators jump over the gaps their families leave, and every gap spells "unknown", so
-    // a counted walk would read that spelling back as a code naming no scalar.
+    if (named(name, "unknown")) return *scalar = usearch_scalar_unknown_k, usearch_status_success_k;
+    // The enumerators jump over the gaps their families leave, and every gap spells "unrecognized",
+    // so a counted walk would read that spelling back as a code naming no scalar.
     usearch_scalar_t const kinds[] = {
         usearch_scalar_f64_k,  usearch_scalar_f32_k,  usearch_scalar_bf16_k, usearch_scalar_f16_k,
         usearch_scalar_e5m2_k, usearch_scalar_e4m3_k, usearch_scalar_e3m2_k, usearch_scalar_e2m3_k,
@@ -302,26 +330,38 @@ char const* usearch_residency_name(usearch_residency_t residency) {
     case usearch_residency_ram_k: return "ram";
     case usearch_residency_vram_k: return "vram";
     case usearch_residency_nvme_k: return "nvme";
-    default: return "unknown";
+    case usearch_residency_unknown_k: return "unknown";
+    default: return "unrecognized";
     }
 }
 
 usearch_status_t usearch_residency_from_name(usearch_bytes_view_t name, usearch_residency_t* residency) {
+    if (named(name, "unknown")) return *residency = usearch_residency_unknown_k, usearch_status_success_k;
     for (int code = usearch_residency_ram_k; code <= usearch_residency_nvme_k; ++code)
         if (named(name, usearch_residency_name(static_cast<usearch_residency_t>(code))))
             return *residency = static_cast<usearch_residency_t>(code), usearch_status_success_k;
     return usearch_status_invalid_argument_k;
 }
 
+char const* usearch_host_access_name(usearch_host_access_t host_access) {
+    switch (host_access) {
+    case usearch_host_access_refused_k: return "refused";
+    case usearch_host_access_readable_k: return "readable";
+    default: return "unrecognized";
+    }
+}
+
 char const* usearch_traversal_name(usearch_traversal_t traversal) {
     switch (traversal) {
     case usearch_traversal_walk_k: return "walk";
     case usearch_traversal_scan_k: return "scan";
-    default: return "unknown";
+    case usearch_traversal_unknown_k: return "unknown";
+    default: return "unrecognized";
     }
 }
 
 usearch_status_t usearch_traversal_from_name(usearch_bytes_view_t name, usearch_traversal_t* traversal) {
+    if (named(name, "unknown")) return *traversal = usearch_traversal_unknown_k, usearch_status_success_k;
     if (named(name, "walk")) return *traversal = usearch_traversal_walk_k, usearch_status_success_k;
     if (named(name, "scan")) return *traversal = usearch_traversal_scan_k, usearch_status_success_k;
     return usearch_status_invalid_argument_k;
@@ -332,7 +372,7 @@ char const* usearch_load_path_name(usearch_load_path_t load_path) {
     case usearch_load_path_none_k: return "none";
     case usearch_load_path_host_copy_k: return "host-copy";
     case usearch_load_path_cufile_k: return "cufile";
-    default: return "unknown";
+    default: return "unrecognized";
     }
 }
 
@@ -340,7 +380,7 @@ char const* usearch_mood_name(usearch_mood_t mood) {
     switch (mood) {
     case usearch_mood_parked_k: return "parked";
     case usearch_mood_spinning_k: return "spinning";
-    default: return "unknown";
+    default: return "unrecognized";
     }
 }
 
@@ -354,7 +394,7 @@ char const* usearch_predicate_cost_name(usearch_predicate_cost_t cost) {
     switch (cost) {
     case usearch_predicate_cost_cheap_k: return "cheap";
     case usearch_predicate_cost_expensive_k: return "expensive";
-    default: return "unknown";
+    default: return "unrecognized";
     }
 }
 
@@ -371,7 +411,7 @@ char const* usearch_refine_verdict_name(usearch_refine_verdict_t verdict) {
     case usearch_refine_converged_k: return "converged";
     case usearch_refine_stalled_k: return "stalled";
     case usearch_refine_stopped_k: return "stopped";
-    default: return "unknown";
+    default: return "unrecognized";
     }
 }
 
@@ -398,7 +438,7 @@ char const* usearch_phase_name(usearch_phase_t phase) {
     case usearch_phase_restitch_k: return "restitch";
     case usearch_phase_write_k: return "write";
     case usearch_phase_done_k: return "done";
-    default: return "unknown";
+    default: return "unrecognized";
     }
 }
 
@@ -439,11 +479,13 @@ char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class) {
     case usearch_cpu_class_wasm32_v128_k: return "wasm32-v128";
     case usearch_cpu_class_wasm64_extended_k: return "wasm64-extended";
     case usearch_cpu_class_monoversioned_k: return "monoversioned";
-    default: return "unknown";
+    case usearch_cpu_class_unknown_k: return "unknown";
+    default: return "unrecognized";
     }
 }
 
 usearch_status_t usearch_cpu_class_from_name(usearch_bytes_view_t name, usearch_cpu_class_t* cpu_class) {
+    if (named(name, "unknown")) return *cpu_class = usearch_cpu_class_unknown_k, usearch_status_success_k;
     for (usearch_cpu_class_t const listed_class : cpu_classes_k)
         if (named(name, usearch_cpu_class_name(listed_class)))
             return *cpu_class = listed_class, usearch_status_success_k;
@@ -464,15 +506,27 @@ char const* usearch_gpu_class_name(usearch_gpu_class_t gpu_class) {
     case usearch_gpu_class_apple_metal7_k: return "apple-metal7";
     case usearch_gpu_class_apple_metal9_k: return "apple-metal9";
     case usearch_gpu_class_apple_metal10_k: return "apple-metal10";
-    default: return "unknown";
+    case usearch_gpu_class_unknown_k: return "unknown";
+    default: return "unrecognized";
     }
 }
 
 usearch_status_t usearch_gpu_class_from_name(usearch_bytes_view_t name, usearch_gpu_class_t* gpu_class) {
+    if (named(name, "unknown")) return *gpu_class = usearch_gpu_class_unknown_k, usearch_status_success_k;
     for (usearch_gpu_class_t const listed_class : gpu_classes_k)
         if (named(name, usearch_gpu_class_name(listed_class)))
             return *gpu_class = listed_class, usearch_status_success_k;
     return usearch_status_invalid_argument_k;
+}
+
+char const* usearch_gpu_vendor_name(usearch_gpu_vendor_t vendor) {
+    switch (vendor) {
+    case usearch_gpu_vendor_unknown_k: return "unknown";
+    case usearch_gpu_vendor_nvidia_k: return "nvidia";
+    case usearch_gpu_vendor_amd_k: return "amd";
+    case usearch_gpu_vendor_apple_k: return "apple";
+    default: return "unrecognized";
+    }
 }
 
 char const* usearch_nvme_class_name(usearch_nvme_class_t nvme_class) {
@@ -483,11 +537,13 @@ char const* usearch_nvme_class_name(usearch_nvme_class_t nvme_class) {
     case usearch_nvme_class_linux_uring_passthrough_k: return "linux-uring-passthrough";
     case usearch_nvme_class_linux_spdk_k: return "linux-spdk";
     case usearch_nvme_class_windows_ioring_k: return "windows-ioring";
-    default: return "unknown";
+    case usearch_nvme_class_unknown_k: return "unknown";
+    default: return "unrecognized";
     }
 }
 
 usearch_status_t usearch_nvme_class_from_name(usearch_bytes_view_t name, usearch_nvme_class_t* nvme_class) {
+    if (named(name, "unknown")) return *nvme_class = usearch_nvme_class_unknown_k, usearch_status_success_k;
     for (usearch_nvme_class_t const listed_class : nvme_classes_k)
         if (named(name, usearch_nvme_class_name(listed_class)))
             return *nvme_class = listed_class, usearch_status_success_k;

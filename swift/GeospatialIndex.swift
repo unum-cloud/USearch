@@ -296,7 +296,7 @@ public struct GeospatialObservations: RandomAccessCollection {
 
     /// The observation at a position.
     public subscript(position: Int) -> GeospatialObservation {
-        boundsCheck(position, below: endIndex)
+        boundsCheck(position, below: endIndex, in: arena)
         return GeospatialObservation(raw: observations![position])
     }
 }

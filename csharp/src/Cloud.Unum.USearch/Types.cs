@@ -154,6 +154,12 @@ public static partial class Names
     /// <returns>The canonical spelling.</returns>
     public static string Name(this Residency residency) => Spelled(usearch_residency_name(residency));
 
+    /// <summary>Spells a host access, as <see cref="HostAccess.Readable"/> spells "readable". Calls
+    /// <c>usearch_host_access_name</c>.</summary>
+    /// <param name="hostAccess">The host access to spell.</param>
+    /// <returns>The canonical spelling.</returns>
+    public static string Name(this HostAccess hostAccess) => Spelled(usearch_host_access_name(hostAccess));
+
     /// <summary>Spells a traversal, as <see cref="Traversal.Scan"/> spells "scan". Calls
     /// <c>usearch_traversal_name</c>.</summary>
     /// <param name="traversal">The traversal to spell.</param>
@@ -870,16 +876,19 @@ public readonly struct RowsView
 /// </summary>
 /// <remarks>
 /// A view by value over the arena, readable until that arena's next call or disposal; over device
-/// memory, which <see cref="Arena.Describe"/> reports, it is for device code alone.
+/// memory, which <see cref="Arena.Describe"/> reports, every host read refuses with
+/// <see cref="Status.Device"/>.
 /// </remarks>
 public readonly unsafe struct Matches
 {
     private readonly NativeMatchesView _view;
+    private readonly ArenaDescription _description;
 
-    internal Matches(NativeMatchesView view, int queries)
+    internal Matches(NativeMatchesView view, int queries, ArenaDescription description)
     {
         this._view = view;
         this.Queries = queries;
+        this._description = description;
     }
 
     /// <summary>How many queries the call resolved.</summary>
@@ -901,7 +910,8 @@ public readonly unsafe struct Matches
             }
 
             nuint first = (nuint)query * this._view.Columns;
-            return new QueryMatches(this._view.Keys + first, this._view.Scores + first, this._view.Counts + query);
+            return new QueryMatches(
+                this._view.Keys + first, this._view.Scores + first, this._view.Counts + query, this._description);
         }
     }
 }
@@ -913,16 +923,26 @@ public readonly unsafe struct QueryMatches
     private readonly Key* _keys;
     private readonly double* _distances;
     private readonly nuint* _count;
+    private readonly ArenaDescription _description;
 
-    internal QueryMatches(Key* keys, double* distances, nuint* count)
+    internal QueryMatches(Key* keys, double* distances, nuint* count, ArenaDescription description)
     {
         this._keys = keys;
         this._distances = distances;
         this._count = count;
+        this._description = description;
     }
 
-    /// <summary>How many matches the call wrote for the query.</summary>
-    public int Count => (int)*this._count;
+    /// <summary>How many matches the call wrote for the query; refused with <see cref="Status.Device"/>
+    /// over device memory, as every read is.</summary>
+    public int Count
+    {
+        get
+        {
+            this._description.Host();
+            return (int)*this._count;
+        }
+    }
 
     /// <summary>The keys the query matched, nearest first.</summary>
     public ReadOnlySpan<Key> Keys => new(this._keys, this.Count);
@@ -1046,6 +1066,28 @@ public enum Residency : int
     Vram = 2,
     /// <summary>Persisted storage, traversed through pluggable I/O engines and sized past RAM.</summary>
     Nvme = 3,
+}
+
+/// <summary>The GPU vendor whose runtime drives a device. Mirrors <c>usearch_gpu_vendor_t</c>.</summary>
+public enum GpuVendor : int
+{
+    /// <summary>No vendor, as host pages report.</summary>
+    Unknown = 0,
+    /// <summary>NVIDIA, through the CUDA driver.</summary>
+    Nvidia = 1,
+    /// <summary>AMD, through the HIP runtime.</summary>
+    Amd = 2,
+    /// <summary>Apple, through Metal.</summary>
+    Apple = 3,
+}
+
+/// <summary>Whether host code may read an arena's pages. Mirrors <c>usearch_host_access_t</c>.</summary>
+public enum HostAccess : int
+{
+    /// <summary>Device memory: host code must not read the pages.</summary>
+    Refused = 0,
+    /// <summary>Host, pinned, managed and Apple's shared memory.</summary>
+    Readable = 1,
 }
 
 /// <summary>How a search reaches the indexed entries it scores. Mirrors <c>usearch_traversal_t</c>.</summary>
@@ -1348,8 +1390,8 @@ public sealed unsafe class Executor : IDisposable
 /// the views the previous call answered end there, as they do once it is disposed. An arena serves
 /// one call at a time: a blocking call views it until it returns, a deferred one until final, and
 /// a second call naming it meanwhile finishes with <see cref="Status.Contended"/>. A
-/// <see cref="Residency.Vram"/> arena holds device memory, as <see cref="Describe"/> reports, which
-/// its views pass to device code alone.
+/// <see cref="Residency.Vram"/> arena may hold device memory, as <see cref="Describe"/> reports, whose
+/// views refuse every host read with <see cref="Status.Device"/>.
 /// It grows, fills and frees on its executor's first stream, so it serves only calls on that executor
 /// and holds it open until disposed, which defers freeing an executor disposed first; dispose every
 /// arena before its executor.
@@ -1370,7 +1412,8 @@ public sealed unsafe class Arena : IDisposable
         NativeArenaInit arguments = new() { Arena = &created, Executor = pool.Pointer, Outcome = &outcome };
         usearch_arena_init(&arguments);
         this._handle = EngineHandle.Created<NativeArenaHandle>(created, outcome);
-        if (this.Describe().Residency == Residency.Vram)
+        this.Description = this.Describe();
+        if (this.Description.Residency == Residency.Vram)
         {
             this._handle.Executor = HandleReference.Of(executor!.Handle, "executor");
         }
@@ -1379,7 +1422,8 @@ public sealed unsafe class Arena : IDisposable
     /// <summary>Reports where the outputs live, as the executor the arena was made for decided, so a
     /// caller reads them as host memory or hands them to device code without remembering that
     /// executor. Calls <c>usearch_arena_describe</c>.</summary>
-    /// <returns>The residency of the outputs and the device holding them, if any.</returns>
+    /// <returns>The residency of the outputs, the device holding them, if any, and whether the host
+    /// may read them.</returns>
     public ArenaDescription Describe()
     {
         using HandleReference arena = HandleReference.Of(this._handle, "arena");
@@ -1388,8 +1432,17 @@ public sealed unsafe class Arena : IDisposable
         NativeArenaDescribe arguments = new() { Arena = arena.Pointer, Outcome = &outcome, Description = &description };
         usearch_arena_describe(&arguments);
         outcome.ThrowIfFailed();
-        return new(description.Residency, description.Residency == Residency.Vram ? (int)description.Device : null);
+        return new(
+            description.Residency,
+            description.Device < 0 ? null : description.Device,
+            description.Vendor,
+            description.VendorOrdinal < 0 ? null : description.VendorOrdinal,
+            description.HostAccess);
     }
+
+    /// <summary>Where the outputs live, decided once by the executor the arena was made for; every
+    /// view a call answers carries it to guard its host reads.</summary>
+    internal ArenaDescription Description { get; }
 
     /// <summary>Frees the arena and every output in it. Calls <c>usearch_arena_free</c>.</summary>
     public void Dispose() => this._handle.Dispose();
@@ -1404,8 +1457,28 @@ public sealed unsafe class Arena : IDisposable
 /// <c>usearch_arena_description_t</c>.</summary>
 /// <param name="Residency"><see cref="Residency.Ram"/> for host pages, <see cref="Residency.Vram"/> for
 /// one device's memory.</param>
-/// <param name="Device">The ordinal of the device holding the outputs; null for host pages.</param>
-public readonly record struct ArenaDescription(Residency Residency, int? Device);
+/// <param name="Device">The position in the GPU device listing of the device holding the outputs; null
+/// for host pages.</param>
+/// <param name="Vendor">Which vendor's memory it is, as that listing reports; <see cref="GpuVendor.Unknown"/>
+/// for host pages.</param>
+/// <param name="VendorOrdinal">The vendor's own device number, which Arrow and DLPack name; null for
+/// host pages.</param>
+/// <param name="HostAccess">Whether host code may read the outputs: host, pinned, managed and Apple's
+/// shared memory.</param>
+public readonly record struct ArenaDescription(
+    Residency Residency, int? Device, GpuVendor Vendor, int? VendorOrdinal, HostAccess HostAccess)
+{
+    /// <summary>Refuses a host read of outputs the host may not read.</summary>
+    /// <exception cref="USearchException"><see cref="Status.Device"/> unless
+    /// <see cref="HostAccess"/> is <see cref="HostAccess.Readable"/>.</exception>
+    internal void Host()
+    {
+        if (this.HostAccess != HostAccess.Readable)
+        {
+            throw new USearchException(Status.Device, "the outputs are memory the host may not read");
+        }
+    }
+}
 
 #endregion Arenas
 
@@ -1965,7 +2038,10 @@ internal unsafe struct NativeArenaInit
 internal struct NativeArenaDescription
 {
     public Residency Residency;
-    public nuint Device;
+    public int Device;
+    public GpuVendor Vendor;
+    public int VendorOrdinal;
+    public HostAccess HostAccess;
 }
 
 /// <summary>The arguments of <c>usearch_arena_describe</c>.</summary>
@@ -2073,6 +2149,10 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial IntPtr usearch_host_access_name(HostAccess hostAccess);
+
+    [LibraryImport(LibraryName)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial IntPtr usearch_traversal_name(Traversal traversal);
 
     [LibraryImport(LibraryName)]
@@ -2113,7 +2193,7 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
-    internal static partial void usearch_arena_free(IntPtr arena);
+    internal static partial Status usearch_arena_free(IntPtr arena);
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
@@ -2215,9 +2295,11 @@ internal sealed class NativeArenaHandle : EngineHandle
     internal HandleReference Executor;
 
     /// <inheritdoc/>
+    /// <remarks>The free refuses only while an Arrow export of the outputs is open, and no C# view
+    /// opens one, so a refusal is reported as a failed release rather than thrown.</remarks>
     protected override bool ReleaseHandle()
     {
-        NativeMethods.usearch_arena_free(this.handle);
+        if (NativeMethods.usearch_arena_free(this.handle) != Status.Success) return false;
         this.Executor.Dispose();
         return true;
     }

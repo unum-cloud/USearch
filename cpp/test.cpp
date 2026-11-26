@@ -1096,7 +1096,9 @@ static void test_arena_devices_and_version() {
     expect_success(arena_status, "making a host arena");
     auto [description, describe_status] = arena.describe();
     expect_success(describe_status, "describing the arena");
-    expect_true(description.residency == usearch_residency_ram_k, "A host arena must hold host memory");
+    expect_true(description.residency == usearch_residency_ram_k && description.device == -1 &&
+                    description.host_access == usearch_host_access_readable_k,
+                "A host arena must hold readable host memory on no device");
     expect_true(us::arena_t {}.describe().status == us::status_code_t::invalid_argument_k,
                 "An empty arena must be refused");
     expect_success(us::gpu_devices({}).status, "counting the GPUs");

@@ -9,6 +9,8 @@
  *  The variants' bodies compile in the geospatial class units, never here: a handle reaches its
  *  variant only through the residency table the ladder picked.
  */
+#include <iterator> // `std::size` - the relation spellings
+
 #include "basic_index.cuh"
 
 struct usearch_geospatial_index_handle_t {
@@ -35,6 +37,14 @@ struct usearch_geospatial_reshard_plan_handle_t {
 };
 
 extern "C" {
+
+/** The spelling of each relation, indexed by its value, from the unknown one on. */
+static char const* const relation_names_k[] = {"unknown", "near", "visible", "sees", "seen"};
+
+USEARCH_EXPORT char const* usearch_geospatial_relation_name(usearch_geospatial_relation_t relation) {
+    std::size_t const value = static_cast<std::size_t>(relation);
+    return value < std::size(relation_names_k) ? relation_names_k[value] : "unrecognized";
+}
 
 USEARCH_EXPORT void usearch_geospatial_init_ram(usearch_geospatial_init_ram_t* arguments) { basic_init_ram(arguments); }
 USEARCH_EXPORT void usearch_geospatial_init_vram(usearch_geospatial_init_vram_t* arguments) {

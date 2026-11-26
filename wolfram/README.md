@@ -113,7 +113,7 @@ Every output whose length only the call knows, such as matches, rows, products a
 Each call rewinds its arena and copies its outputs into Wolfram arrays, so a steady loop allocates once and every result outlives the next call.
 An arena serves one call at a time, so a second concurrent call fails as `contended`.
 LibraryLink cannot alias memory it did not allocate, so the results stay valid after the arena is released too.
-An arena from a VRAM executor holds device memory, which these functions refuse with `device`.
+`ArenaDescribe` reports its `"HostAccess"`: an arena whose memory the host may not read, as a CUDA or ROCm executor's device memory, is refused by these functions with `device`, while Apple's shared memory reads like host pages.
 
 ```wolfram
 arena = ArenaInit["Executor"->executor];

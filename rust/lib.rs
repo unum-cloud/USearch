@@ -79,7 +79,8 @@ pub use shapes_index::{
 };
 pub use types::{
     Admission, Arena, ArenaDescription, ArrowArray, ArrowColumn, ArrowDeviceArray, ArrowExport, ArrowRows, ArrowSchema,
-    Blocking, CPUClass, Deferred, Deferring, Distance, Element, Error, Executor, GPUClass, Key, Matches, Mood, On,
-    Phase, PhaseProgress, Predicate, PredicateCost, Progress, QueryMatches, Residency, Result, Scalar, Status, Tape,
-    TapeEntries, TapeOffset, Traversal, capabilities_available, capabilities_compiled, keys_from_arrow, rows, version,
+    Blocking, CPUClass, Deferred, Deferring, Distance, Element, Error, Executor, GPUClass, GPUVendor, HostAccess, Key,
+    Matches, Mood, On, Phase, PhaseProgress, Predicate, PredicateCost, Progress, QueryMatches, Residency, Result,
+    Scalar, Status, Tape, TapeEntries, TapeOffset, Traversal, capabilities_available, capabilities_compiled,
+    keys_from_arrow, rows, version,
 };

@@ -1014,6 +1014,8 @@ typedef struct get_call_t {
 } get_call_t;
 
 static PyObject* get_answer(usearch_py_call_t* call) {
+    // The offsets size the views, read here on the host before any view guards them.
+    if (usearch_py_refuse_host_read(call->arena) != 0) return NULL;
     get_call_t const* const get = (get_call_t const*)call->arguments;
     usearch_tape_view_t const* const tape = &get->shapes;
     int const narrow = tape->layout == usearch_tape_u32_k;

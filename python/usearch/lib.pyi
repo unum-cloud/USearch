@@ -93,6 +93,10 @@ __all__: list[str] = [
 
 __version__: str
 
+def _refuse_host_read(description: ArenaDescription, /) -> None:
+    """The host-read guard, applied to a hand-built description: raises `DeviceError` unless READABLE. Python-only."""
+    ...
+
 def version() -> str:
     """The library's semantic version."""
     ...
@@ -239,6 +243,24 @@ class Residency(IntEnum):
     """Accelerator memory, traversed by GPU warps on chosen devices."""
     NVME = 3
     """Persisted on drives, traversed through I/O engines and sized past RAM."""
+
+class GPUVendor(IntEnum):
+    """Whose runtime drives a GPU and owns its memory."""
+
+    NVIDIA = 1
+    """NVIDIA, through the CUDA driver."""
+    AMD = 2
+    """AMD, through the HIP runtime."""
+    APPLE = 3
+    """Apple, through Metal."""
+
+class HostAccess(IntEnum):
+    """Whether host code may read an arena's outputs."""
+
+    REFUSED = 0
+    """Device memory the host must not dereference; read it through `__dlpack__`."""
+    READABLE = 1
+    """Host, page-locked, managed or Apple's shared memory."""
 
 class Traversal(IntEnum):
     """How a search reaches the entries it scores."""
@@ -546,10 +568,10 @@ class Arena:
         ...
 
 @final
-class ArenaDescription(structseq[Any], tuple[Residency, int | None]):
+class ArenaDescription(structseq[Any], tuple[Residency, int | None, GPUVendor | None, int | None, HostAccess]):
     """Where an `Arena`'s outputs live."""
 
-    __match_args__: Final = ("residency", "device")
+    __match_args__: Final = ("residency", "device", "vendor", "vendor_ordinal", "host_access")
 
     @property
     def residency(self) -> Residency:
@@ -561,13 +583,28 @@ class ArenaDescription(structseq[Any], tuple[Residency, int | None]):
         """The device ordinal, as `Executor.for_vram` takes it; None for host pages."""
         ...
 
+    @property
+    def vendor(self) -> GPUVendor | None:
+        """Whose memory it is; None for host pages."""
+        ...
+
+    @property
+    def vendor_ordinal(self) -> int | None:
+        """The vendor's own device number, which DLPack and Arrow name; None for host pages."""
+        ...
+
+    @property
+    def host_access(self) -> HostAccess:
+        """Whether host code may read the outputs."""
+        ...
+
 # The base of every result over an arena, which the module does not export by name.
 @type_check_only
 class _ArenaBuffer:
     """One output a call left in an `Arena`, readable until a later call rewinds it."""
 
     def __buffer__(self, flags: int, /) -> memoryview:
-        """Host memory only, which `Arena.describe` tells apart from device memory. Python-only."""
+        """Memory the host may read only, as `Arena.describe().host_access` says. Python-only."""
         ...
 
     def __len__(self) -> int:

@@ -1038,6 +1038,7 @@ func (receiver sequenceReceiver) get(call *callWithResult[TapeView], completion 
 		return err
 	}
 	arguments := open[C.usearch_sequence_get_t](call)
+	call.result.arena = arena
 	call.result.width = 1
 	*arguments = C.usearch_sequence_get_t{
 		index:      index,
@@ -1153,6 +1154,7 @@ func (receiver sequenceReceiver) search(call *callWithResult[MatchesView], compl
 		return err
 	}
 	arguments := open[C.usearch_sequence_search_t](call)
+	call.result.arena = arena
 	call.result.queries = queries.Entries()
 	*arguments = C.usearch_sequence_search_t{
 		index:            index,
@@ -1248,6 +1250,7 @@ func (receiver sequenceReceiver) sample(call *callWithResult[DenseDraws], comple
 		return fail(StatusShapeMismatch, "the shown keys and coordinates disagree in length")
 	}
 	arguments := open[C.usearch_sequence_sample_t](call)
+	call.result.arena = arena
 	*arguments = C.usearch_sequence_sample_t{
 		index:             index,
 		executor:          executor,
@@ -1302,6 +1305,7 @@ func (receiver sequenceReceiver) saveBuffer(call *callWithResult[Monolith], comp
 		return err
 	}
 	arguments := open[C.usearch_sequence_save_buffer_t](call)
+	call.result.arena = arena
 	*arguments = C.usearch_sequence_save_buffer_t{
 		index:      index,
 		executor:   executor,
@@ -1388,6 +1392,7 @@ func (on SequenceCursorOn) next(call *callWithResult[DenseBatch], wanted uint, a
 		return err
 	}
 	arguments := open[C.usearch_sequence_cursor_next_t](call)
+	call.result.arena = arena
 	*arguments = C.usearch_sequence_cursor_next_t{
 		index:      index,
 		executor:   executor,

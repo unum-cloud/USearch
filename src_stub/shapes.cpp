@@ -392,11 +392,13 @@ char const* usearch_shapes_metric_name(usearch_shapes_metric_t metric) {
     case usearch_shapes_metric_hausdorff_k: return "hausdorff";
     case usearch_shapes_metric_gromov_wasserstein_k: return "gromov-wasserstein";
     case usearch_shapes_metric_wasserstein_procrustes_k: return "wasserstein-procrustes";
-    default: return "unknown";
+    case usearch_shapes_metric_unknown_k: return "unknown";
+    default: return "unrecognized";
     }
 }
 
 usearch_status_t usearch_shapes_metric_from_name(usearch_bytes_view_t name, usearch_shapes_metric_t* metric) {
+    if (named(name, "unknown")) return *metric = usearch_shapes_metric_unknown_k, usearch_status_success_k;
     for (int code = usearch_shapes_metric_chamfer_k; code <= usearch_shapes_metric_wasserstein_procrustes_k; ++code)
         if (named(name, usearch_shapes_metric_name(static_cast<usearch_shapes_metric_t>(code))))
             return *metric = static_cast<usearch_shapes_metric_t>(code), usearch_status_success_k;

@@ -1493,7 +1493,7 @@ pub trait GeospatialVerbs<'index>: Copy {
             handles: Handles::of(index, executor),
             key,
             arena,
-            observations: GeospatialObservations { arena: PhantomData, observations: ptr::null(), written: 0 },
+            observations: GeospatialObservations { arena, observations: ptr::null(), written: 0 },
         })
     }
 
@@ -1588,7 +1588,7 @@ pub trait GeospatialVerbs<'index>: Copy {
     {
         let (index, executor) = self.handles();
         let matches = GeospatialMatches {
-            arena: PhantomData,
+            arena,
             view: usearch_matches_tape_view_t::default(),
             queries: queries.as_ref().len(),
             written: 0,
@@ -1715,16 +1715,18 @@ impl<'index, Completion: crate::types::Completion> GeospatialVerbs<'index> for O
 ///
 /// Rust-only.
 pub struct GeospatialObservations<'arena> {
-    arena: PhantomData<&'arena Arena<'arena>>,
+    arena: &'arena Arena<'arena>,
     observations: *const GeospatialObservation,
     written: usize,
 }
 
 impl<'arena> GeospatialObservations<'arena> {
-    /// Every observation under the key, in insertion order.
-    pub fn view(&self) -> &'arena [GeospatialObservation] {
-        // Safety: the arena holds a finished call's packed output.
-        unsafe { arena_slice(self.observations, self.written) }
+    /// Every observation under the key, in insertion order, refused with [`Status::Device`] over
+    /// memory the host may not read.
+    pub fn view(&self) -> Result<&'arena [GeospatialObservation]> {
+        self.arena.description.host()?;
+        // Safety: the arena holds a finished call's packed output the host may read.
+        Ok(unsafe { arena_slice(self.observations, self.written) })
     }
 }
 
@@ -1733,7 +1735,7 @@ impl<'arena> GeospatialObservations<'arena> {
 ///
 /// Rust-only.
 pub struct GeospatialMatches<'arena> {
-    arena: PhantomData<&'arena Arena<'arena>>,
+    arena: &'arena Arena<'arena>,
     view: usearch_matches_tape_view_t,
     queries: usize,
     written: usize,
@@ -1751,10 +1753,12 @@ impl<'arena> GeospatialMatches<'arena> {
     }
 
     /// One query's matches, refused with [`Status::InvalidArgument`] when `query` is not below
-    /// [`GeospatialMatches::queries`].
+    /// [`GeospatialMatches::queries`], and with [`Status::Device`] over memory the host may not
+    /// read.
     pub fn query(&self, query: usize) -> Result<QueryMatches<'arena>> {
+        self.arena.description.host()?;
         match query < self.queries {
-            // Safety: the arena holds a finished call's output.
+            // Safety: the arena holds a finished call's output the host may read.
             true => Ok(unsafe { self.view.query(query) }),
             false => Err(crate::types::fail(Status::InvalidArgument, "the query is not below the call's count")),
         }
@@ -1827,7 +1831,7 @@ impl<'index> GeospatialCursor<'index> {
         arena: &'arena mut Arena<'_>,
     ) -> Result<DenseBatch<'arena>> {
         let mut batch = DenseBatch {
-            arena: PhantomData,
+            arena,
             keys: usearch_keys_view_t::default(),
             links: linked.then(usearch_keys_tape_view_t::default),
             written: 0,
@@ -2560,12 +2564,15 @@ mod tests {
 
         let mut arena = Arena::new().unwrap();
         let stored = index.get(shared, &mut arena).unwrap();
-        assert_eq!(stored.view().len(), 2);
-        for (restored, inserted) in stored.view().iter().zip(&places) {
+        assert_eq!(stored.view().unwrap().len(), 2);
+        for (restored, inserted) in stored.view().unwrap().iter().zip(&places) {
             assert_close(restored.latitude_degrees, inserted.latitude_degrees, 1e-6);
             assert_close(restored.longitude_degrees, inserted.longitude_degrees, 1e-6);
         }
-        assert!(index.get(Key::from(8u64), &mut arena).unwrap().view().is_empty(), "an absent key yields none");
+        assert!(
+            index.get(Key::from(8u64), &mut arena).unwrap().view().unwrap().is_empty(),
+            "an absent key yields none"
+        );
     }
 
     #[test]
@@ -2606,7 +2613,7 @@ mod tests {
         let index = populated_index(32, 0, case_stream_key(0)).unwrap();
         let mut arena = Arena::new().unwrap();
         let saved = index.save_buffer(&mut arena).unwrap();
-        let monolith = saved.view();
+        let monolith = saved.view().unwrap();
         assert!(!monolith.is_empty());
 
         let connectivity = index.describe().unwrap().metadata.connectivity;

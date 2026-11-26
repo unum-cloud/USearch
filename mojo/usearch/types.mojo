@@ -1065,7 +1065,10 @@ comptime Verb[Arguments: AnyType] = def(Pointer[Arguments, MutAnyOrigin]) thin a
 """Every struct verb: one argument structure named after it, its outputs written through its pointers."""
 
 comptime Release = def(Address) thin abi("C") -> None
-"""The positional `_free` family - executors, arenas, indexes, cursors, streams; `NULL` is safe."""
+"""The positional `_free` family - executors, indexes, cursors, streams; `NULL` is safe."""
+
+comptime ArenaFree = def(Address) thin abi("C") -> c_int
+"""`usearch_arena_free`, which answers `contended` and frees nothing while an export is open."""
 
 comptime OutcomeStatus = def(Pointer[Outcome, MutAnyOrigin]) thin abi("C") -> c_int
 """`usearch_outcome_wait` and `usearch_outcome_status`: an outcome's status, the first once it is final."""
@@ -1547,13 +1550,56 @@ struct ArenaInitArguments(ImplicitlyCopyable):
 
 
 @fieldwise_init
+struct HostAccess(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
+    """Whether host code may read an arena's outputs - `usearch_host_access_t`."""
+
+    var code: c_int
+    """The raw `usearch_host_access_t` value the ABI exchanges."""
+    comptime REFUSED = Self(0)
+    """Host code must not read the pages."""
+    comptime READABLE = Self(1)
+    """Host, pinned, managed and Apple's shared memory."""
+
+
+@fieldwise_init
+struct GPUVendor(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
+    """The vendor whose runtime drives a GPU - `usearch_gpu_vendor_t`."""
+
+    var code: c_int
+    """The raw `usearch_gpu_vendor_t` value the ABI exchanges."""
+    comptime UNKNOWN = Self(0)
+    """No vendor, as host pages report."""
+    comptime NVIDIA = Self(1)
+    """NVIDIA, through the CUDA driver."""
+    comptime AMD = Self(2)
+    """AMD, through the HIP runtime."""
+    comptime APPLE = Self(3)
+    """Apple, through Metal."""
+
+
+@fieldwise_init
 struct ArenaDescription(ImplicitlyCopyable):
     """`usearch_arena_description_t`: where an arena's outputs live."""
 
     var residency: Residency
     """`RAM` for host pages, `VRAM` for one device's memory."""
-    var device: c_size_t
-    """The device ordinal, as `Executor.for_vram` takes it, on `VRAM`; 0 for host pages."""
+    var device: Int32
+    """The position in `usearch_gpu_devices`, as `Executor.for_vram` takes it, or -1 for host pages."""
+    var vendor: GPUVendor
+    """Which vendor's memory it is, `UNKNOWN` for host pages."""
+    var vendor_ordinal: Int32
+    """The vendor's own device number, which Arrow and DLPack name, or -1 for host pages."""
+    var host_access: HostAccess
+    """Whether host code may read the pages: host, pinned, managed and Apple's shared memory."""
+
+    def host(self) raises Error:
+        """Succeeds when host code may read the outputs.
+
+        Raises:
+            `Error` with `Status.DEVICE` when only the device may read them.
+        """
+        if self.host_access != HostAccess.READABLE:
+            raise Error(Status.DEVICE, "the outputs are memory the host may not read")
 
 
 @fieldwise_init
@@ -1582,6 +1628,25 @@ def _arena_init(library: Library, executor: Address) raises Error -> Address:
     return created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0]
 
 
+def _arena_describe(library: Library, arena: Address) raises Error -> ArenaDescription:
+    """Where an arena's outputs live, as the executor that made it decided. Calls `usearch_arena_describe`."""
+    var description = stack_allocation[1, ArenaDescription]()
+    description[unsafe_offset=0] = ArenaDescription(
+        Residency.RAM, Int32(-1), GPUVendor.UNKNOWN, Int32(-1), HostAccess.READABLE
+    )
+    var outcome = stack_allocation[1, Outcome]()
+    outcome[unsafe_offset=0] = Outcome()
+    var arguments = stack_allocation[1, ArenaDescribeArguments]()
+    arguments[unsafe_offset=0] = ArenaDescribeArguments(
+        arena,
+        outcome.unsafe_origin_cast[MutUntrackedOrigin](),
+        description.unsafe_origin_cast[MutUntrackedOrigin](),
+    )
+    library.symbols().arena_describe(arguments.unsafe_origin_cast[MutAnyOrigin]())
+    library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_arena_describe")
+    return description.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0]
+
+
 struct Arena[origin: ImmOrigin]:
     """The memory every output whose length scales with a call lands in - `usearch_arena_t`, freed
     when it goes out of scope.
@@ -1595,9 +1660,10 @@ struct Arena[origin: ImmOrigin]:
     Every verb takes it as its last required argument, deferred ones too, and the result views it
     in turn, so the arena outlives both; a failed call leaves it valid.
 
-    A result reads the arena in place until its next call rewinds it, and `describe` says where that
-    memory lives, which a caller checks before reading a VRAM arena's results on the host. A VRAM
-    arena serves only calls on the executor that made it. An arena never outlives that executor: its
+    A result reads the arena in place until its next call rewinds it, and every result here is a
+    host view, so an executor whose memory the host may not read makes no arena: the constructor
+    refuses it as `Status.DEVICE`, and Apple's shared memory passes. A VRAM arena serves only calls
+    on the executor that made it. An arena never outlives that executor: its
     origin holds it, so Mojo frees the arena first.
 
     Parameters:
@@ -1630,9 +1696,15 @@ struct Arena[origin: ImmOrigin]:
             executor: The executor whose calls it serves, held until the arena is freed.
 
         Raises:
-            `Error` if the engine cannot allocate the handle.
+            `Error` if the engine cannot allocate the handle, or with `Status.DEVICE` when the host may
+            not read the executor's memory.
         """
         var address = _arena_init(executor.library, executor.address)
+        try:
+            _arena_describe(executor.library, address).host()
+        except error:
+            _ = executor.library.symbols().arena_free(address)
+            raise error
         self._library = executor.library
         self._address = address
 
@@ -1640,32 +1712,22 @@ struct Arena[origin: ImmOrigin]:
         """Frees the arena and every output in it. Calls `usearch_arena_free`.
 
         The loader reference is surrendered only after the call, for the reason `Executor` records.
+        The free refuses only while an Arrow export of the outputs is open, and no Mojo view opens
+        one, so its status is dropped.
         """
-        self._library.symbols().arena_free(self._address)
+        _ = self._library.symbols().arena_free(self._address)
         _ = self._library^
 
     def describe(self) raises Error -> ArenaDescription:
         """Where its outputs live, as the executor that made it decided. Calls `usearch_arena_describe`.
 
         Returns:
-            `VRAM` and the device for device memory, which the host cannot read, and `RAM` otherwise.
+            The residency, the device and its vendor for GPU memory, and whether the host may read it.
 
         Raises:
             `Error` if the engine refuses the query.
         """
-        var description = stack_allocation[1, ArenaDescription]()
-        description[unsafe_offset=0] = ArenaDescription(Residency.RAM, c_size_t(0))
-        var outcome = stack_allocation[1, Outcome]()
-        outcome[unsafe_offset=0] = Outcome()
-        var arguments = stack_allocation[1, ArenaDescribeArguments]()
-        arguments[unsafe_offset=0] = ArenaDescribeArguments(
-            self._address,
-            outcome.unsafe_origin_cast[MutUntrackedOrigin](),
-            description.unsafe_origin_cast[MutUntrackedOrigin](),
-        )
-        self._library.symbols().arena_describe(arguments.unsafe_origin_cast[MutAnyOrigin]())
-        self._library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_arena_describe")
-        return description.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0]
+        return _arena_describe(self._library, self._address)
 
 
 def _in_arena[T: Copyable, origin: Origin](address: Address, length: Int) -> Span[T, origin]:

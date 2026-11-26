@@ -36,12 +36,14 @@ struct usearch_shapes_reshard_plan_handle_t {
 extern "C" {
 
 USEARCH_EXPORT char const* usearch_shapes_metric_name(usearch_shapes_metric_t metric) {
+    if (metric == usearch_shapes_metric_unknown_k) return "unknown";
     std::string_view const token = token_of(metric);
     // Every token is a string literal, so its data ends in a terminator.
-    return token.empty() ? "unknown" : token.data();
+    return token.empty() ? "unrecognized" : token.data();
 }
 USEARCH_EXPORT usearch_status_t usearch_shapes_metric_from_name(usearch_bytes_view_t name,
                                                                 usearch_shapes_metric_t* metric) {
+    if (as_text(name) == "unknown") return *metric = usearch_shapes_metric_unknown_k, usearch_status_success_k;
     usearch_shapes_metric_t const parsed = shapes_metric_of(as_text(name));
     if (parsed == usearch_shapes_metric_unknown_k) return usearch_status_invalid_argument_k;
     return *metric = parsed, usearch_status_success_k;

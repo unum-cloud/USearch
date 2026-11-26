@@ -44,6 +44,7 @@ from base import (
 import numkong as nk
 from usearch import (
     Arena,
+    ArenaDescription,
     CancelledError,
     CapacityOverflowError,
     ConfigMismatchError,
@@ -51,6 +52,7 @@ from usearch import (
     CPUClass,
     Deferred,
     DeferredOn,
+    DeviceError,
     DenseIndex,
     DenseIndexDescription,
     DenseMetadata,
@@ -63,6 +65,8 @@ from usearch import (
     DenseVectors,
     Executor,
     GPUClass,
+    GPUVendor,
+    HostAccess,
     InvalidArgumentError,
     Key,
     Match,
@@ -87,6 +91,7 @@ from usearch import (
 )
 from usearch.eval import random_vectors, self_recall
 from usearch.keys import integers_to_keys, keys_to_integers
+from usearch.lib import _refuse_host_read
 
 # region Construction
 
@@ -303,11 +308,22 @@ def test_arena_is_made_by_an_executor_or_none():
     with Executor.for_ram(threads=1) as pool:
         assert isinstance(Arena(pool), Arena)
         assert isinstance(Arena(), Arena)
-        assert Arena(pool).describe() == (Residency.RAM, None) == Arena().describe()
+        assert Arena(pool).describe() == (Residency.RAM, None, None, None, HostAccess.READABLE) == Arena().describe()
     with pytest.raises(UninitializedError):
         Arena(pool)
     with pytest.raises(TypeError):
         Arena(2)
+
+
+@pytest.mark.parametrize(("host_access", "refused"), [(HostAccess.REFUSED, True), (HostAccess.READABLE, False)])
+def test_host_reads_follow_the_description(host_access: HostAccess, refused: bool):
+    """The host-read guard refuses device memory the host may not read and passes the rest, as the description says."""
+    description = ArenaDescription((Residency.VRAM, 0, GPUVendor.NVIDIA, 0, host_access))
+    if refused:
+        with pytest.raises(DeviceError):
+            _refuse_host_read(description)
+    else:
+        _refuse_host_read(description)
 
 
 @pytest.mark.parametrize(("arena", "failure"), [(None, InvalidArgumentError), (0, TypeError)])
@@ -877,6 +893,20 @@ def test_outputs_export_dlpack_in_place(executor, seed: int):
     tensor = np.from_dlpack(rows)
     assert np.array_equal(tensor, np.asarray(rows))
     assert tensor.ctypes.data == np.asarray(rows).ctypes.data
+
+
+@pytest.mark.parametrize("protocol", ["__dlpack__", "__arrow_c_array__", "__arrow_c_device_array__"])
+def test_arena_refuses_calls_while_an_export_lives(executor, protocol: str, seed: int):
+    """A live DLPack or Arrow export pins its arena: the next call on it raises `ContendedError` until it is released."""
+    index, _ = build_index(4, 8, executor, seed=seed)
+    arena = Arena(executor)
+    rows = index.on(executor).get(1, arena)
+    exported = getattr(rows, protocol)()
+    with pytest.raises(ContendedError):
+        index.on(executor).get(2, arena)
+    del exported
+    gc.collect()
+    assert len(index.on(executor).get(2, arena)) == 1
 
 
 class DLPackOnly:

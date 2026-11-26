@@ -932,7 +932,7 @@ public sealed unsafe class ShapesCursor : IDisposable
         };
         usearch_shapes_cursor_next(&arguments);
         outcome.ThrowIfFailed();
-        return new DenseBatch(keys, linked, links, (int)written);
+        return new DenseBatch(keys, linked, links, (int)written, arena.Description);
     }
 
     /// <summary>Releases the cursor, then the index it kept alive. Calls
@@ -1086,7 +1086,7 @@ internal unsafe struct ShapesGetCall(CallHandles handles, Key key, Arena arena, 
     public void Finish(CallOutputs* outputs)
     {
         outputs->Outcome.ThrowIfFailed();
-        this.Result = new TapeEntries(*(NativeTapeView*)outputs->View, (int)outputs->Written, 3);
+        this.Result = new TapeEntries(*(NativeTapeView*)outputs->View, (int)outputs->Written, 3, arena.Description);
     }
 }
 
@@ -1275,7 +1275,7 @@ internal unsafe struct ShapesSearchCall<TScalar>(
     {
         outputs->Outcome.ThrowIfFailed();
         stats?.Adopt(*(NativeDenseTraversalStats*)outputs->Report);
-        this.Result = new Matches(*(NativeMatchesView*)outputs->View, queries.Count);
+        this.Result = new Matches(*(NativeMatchesView*)outputs->View, queries.Count, arena.Description);
     }
 }
 
@@ -1428,7 +1428,7 @@ internal unsafe struct ShapesSampleCall(CallHandles handles, int wanted, Arena a
         config.Stats?.Adopt(reports->Stats);
         this.Result = new Sample(
             reports->Keys, reports->EntryOrdinals, *(NativeMatchesView*)outputs->View, reports->Coordinates,
-            (int)outputs->Written);
+            (int)outputs->Written, arena.Description);
     }
 }
 
@@ -1488,7 +1488,7 @@ internal unsafe struct ShapesSaveBufferCall(CallHandles handles, Arena arena, Pr
     public void Finish(CallOutputs* outputs)
     {
         outputs->Outcome.ThrowIfFailed();
-        this.Result = new Monolith(*(NativeBytesView*)outputs->View);
+        this.Result = new Monolith(*(NativeBytesView*)outputs->View, arena.Description);
     }
 }
 

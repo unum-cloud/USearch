@@ -427,11 +427,13 @@ char const* usearch_dense_metric_name(usearch_dense_metric_t metric) {
     case usearch_dense_metric_euclidean_k: return "euclidean";
     case usearch_dense_metric_hamming_k: return "hamming";
     case usearch_dense_metric_jaccard_k: return "jaccard";
-    default: return "unknown";
+    case usearch_dense_metric_unknown_k: return "unknown";
+    default: return "unrecognized";
     }
 }
 
 usearch_status_t usearch_dense_metric_from_name(usearch_bytes_view_t name, usearch_dense_metric_t* metric) {
+    if (named(name, "unknown")) return *metric = usearch_dense_metric_unknown_k, usearch_status_success_k;
     for (int code = usearch_dense_metric_inner_k; code <= usearch_dense_metric_jaccard_k; ++code)
         if (named(name, usearch_dense_metric_name(static_cast<usearch_dense_metric_t>(code))))
             return *metric = static_cast<usearch_dense_metric_t>(code), usearch_status_success_k;

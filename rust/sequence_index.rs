@@ -1316,7 +1316,7 @@ pub trait SequenceVerbs<'index>: Copy {
             handles: Handles::of(index, executor),
             key,
             arena,
-            sequences: TapeEntries::new(),
+            sequences: TapeEntries::new(arena),
         })
     }
 
@@ -1569,7 +1569,7 @@ impl<'index> SequenceCursor<'index> {
         arena: &'arena mut Arena<'_>,
     ) -> Result<DenseBatch<'arena>> {
         let mut batch = DenseBatch {
-            arena: PhantomData,
+            arena,
             keys: usearch_keys_view_t::default(),
             links: linked.then(usearch_keys_tape_view_t::default),
             written: 0,
@@ -2237,7 +2237,7 @@ mod tests {
 
         let mut arena = Arena::new().unwrap();
         let stored = index.get(shared, &mut arena).unwrap();
-        assert_eq!(stored.iter().collect::<Vec<_>>(), [&b"kitten"[..], &b"sitting"[..]]);
+        assert_eq!(stored.iter().unwrap().collect::<Vec<_>>(), [&b"kitten"[..], &b"sitting"[..]]);
         assert_eq!(index.get(Key::from(8u64), &mut arena).unwrap().written(), 0, "an absent key yields none");
     }
 
@@ -2279,7 +2279,7 @@ mod tests {
         let index = populated_index(32, 0, case_stream_key(0)).unwrap();
         let mut arena = Arena::new().unwrap();
         let saved = index.save_buffer(&mut arena).unwrap();
-        let monolith = saved.view();
+        let monolith = saved.view().unwrap();
         assert!(!monolith.is_empty());
 
         assert_eq!(SequenceIndex::metadata_buffer(monolith).unwrap().metric, SequenceMetric::LevenshteinBytes);

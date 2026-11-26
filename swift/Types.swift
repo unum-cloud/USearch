@@ -430,7 +430,7 @@ public struct Matches: RandomAccessCollection {
 
     /// One query's matches, as many as the call wrote.
     public subscript(query: Int) -> QueryMatches {
-        boundsCheck(query, below: endIndex)
+        boundsCheck(query, below: endIndex, in: arena)
         let start = query * view.columns
         return QueryMatches(
             arena: arena,
@@ -460,7 +460,7 @@ public struct QueryMatches: RandomAccessCollection {
 
     /// The match at a position, key and score read from their paired arrays.
     public subscript(position: Int) -> Match {
-        boundsCheck(position, below: cells.count)
+        boundsCheck(position, below: cells.count, in: arena)
         let cell = cells.lowerBound + position
         return Match(key: Key(raw: keys![cell]), distance: scores![cell])
     }
@@ -705,6 +705,12 @@ func created<Handle>(_ slot: UnsafeMutablePointer<Handle?>) throws(USearchError)
 /// Traps on a position past `count`, as a collection does.
 func boundsCheck(_ position: Int, below count: Int) {
     precondition(position >= 0 && position < count, "the position is out of bounds")
+}
+
+/// Traps on a position past `count`, or on outputs in memory the host may not read.
+func boundsCheck(_ position: Int, below count: Int, in arena: Arena) {
+    precondition(arena.hostAccess == .readable, hostRefusal)
+    boundsCheck(position, below: count)
 }
 
 // MARK: - Deferred Calls
@@ -1110,6 +1116,8 @@ public final class Arena {
     let raw: usearch_arena_t
     /// The VRAM executor that made it, held so the arena is freed first, on that executor's first stream.
     private var executor: Executor?
+    /// Whether host code may read the outputs, as the executor that made it decided once.
+    private(set) var hostAccess = HostAccess.refused
 
     /// Makes an arena where `executor` computes, host pages or its GPU's memory, decided once; nil
     /// makes host pages for calls on the calling thread.
@@ -1120,11 +1128,14 @@ public final class Arena {
         usearch_arena_init(&arguments)
         try callState.wait()
         raw = try created(arena)
-        if try describe().residency == .vram { self.executor = executor }
+        let description = try describe()
+        hostAccess = description.hostAccess
+        if description.residency == .vram { self.executor = executor }
     }
 
-    /// Frees the arena once every deferred call naming it is final.
-    deinit { usearch_arena_free(raw) }
+    /// Frees the arena once every deferred call naming it is final. The free refuses only while an
+    /// Arrow export of the outputs is open, and no Swift view opens one, so its status is dropped.
+    deinit { _ = usearch_arena_free(raw) }
 
     /// Reports where the arena's outputs live, as the executor that made it decided.
     public func describe() throws(USearchError) -> ArenaDescription {
@@ -1141,14 +1152,80 @@ public final class Arena {
 public struct ArenaDescription: Sendable {
     /// `ram` for host pages, `vram` for one device's memory.
     public var residency: Residency
-    /// The ordinal of the GPU holding the outputs; nil for host pages.
+    /// The position of the GPU holding the outputs among the library's devices; nil for host pages.
     public var device: Int32?
+    /// The vendor of that GPU; `unknown` for host pages.
+    public var vendor: GpuVendor
+    /// The vendor's own number for that GPU, which Arrow and DLPack name; nil for host pages.
+    public var vendorOrdinal: Int32?
+    /// Whether host code may read the outputs: host, pinned, managed and Apple's shared memory.
+    public var hostAccess: HostAccess
+
+    /// A description built by hand, as a test of a host read uses.
+    public init(
+        residency: Residency, device: Int32?, vendor: GpuVendor, vendorOrdinal: Int32?, hostAccess: HostAccess
+    ) {
+        self.residency = residency
+        self.device = device
+        self.vendor = vendor
+        self.vendorOrdinal = vendorOrdinal
+        self.hostAccess = hostAccess
+    }
 
     init(_ raw: usearch_arena_description_t) {
         residency = Residency(raw: raw.residency)
-        device = residency == .vram ? Int32(raw.device) : nil
+        device = raw.device < 0 ? nil : raw.device
+        vendor = GpuVendor(raw: raw.vendor)
+        vendorOrdinal = raw.vendor_ordinal < 0 ? nil : raw.vendor_ordinal
+        hostAccess = HostAccess(raw: raw.host_access)
+    }
+
+    /// Succeeds when host code may read the outputs, and throws `device` otherwise.
+    public func host() throws(USearchError) {
+        guard hostAccess == .readable else { throw USearchError(status: .device, message: hostRefusal) }
     }
 }
+
+/// Whether host code may read an arena's outputs.
+public struct HostAccess: Hashable, Sendable, CustomStringConvertible {
+    /// The engine's own value.
+    let raw: usearch_host_access_t
+
+    /// Only the device may read them.
+    public static let refused = HostAccess(raw: usearch_host_access_refused_k)
+    /// Host code may read them: host, pinned, managed and Apple's shared memory.
+    public static let readable = HostAccess(raw: usearch_host_access_readable_k)
+
+    /// The host access rendered as the library spells it.
+    public var description: String { String(cString: usearch_host_access_name(raw)) }
+
+    init(raw: usearch_host_access_t) { self.raw = raw }
+}
+
+/// The vendor whose runtime drives a GPU.
+public enum GpuVendor: Sendable {
+    /// No vendor, as host pages report.
+    case unknown
+    /// NVIDIA, through the CUDA driver.
+    case nvidia
+    /// AMD, through the HIP runtime.
+    case amd
+    /// Apple, through Metal.
+    case apple
+
+    /// Lifts the engine's value, `unknown` for none it names.
+    init(raw: usearch_gpu_vendor_t) {
+        switch raw {
+        case usearch_gpu_vendor_nvidia_k: self = .nvidia
+        case usearch_gpu_vendor_amd_k: self = .amd
+        case usearch_gpu_vendor_apple_k: self = .apple
+        default: self = .unknown
+        }
+    }
+}
+
+/// Why a read of an arena's outputs was refused.
+let hostRefusal = "the outputs are memory the host may not read"
 
 // MARK: - Introspection
 

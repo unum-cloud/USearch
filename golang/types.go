@@ -500,6 +500,7 @@ func (call *call) rows(matrix RowsView) C.usearch_rows_view_t {
 type MatchesView struct {
 	raw     C.usearch_matches_view_t
 	queries uint
+	arena   *Arena
 }
 
 // Queries reports how many queries the call resolved.
@@ -508,15 +509,19 @@ func (matches MatchesView) Queries() uint { return matches.queries }
 // Columns reports the matches the call made room for per query, at most its wanted - the "k" in "kANN".
 func (matches MatchesView) Columns() uint { return uint(matches.raw.columns) }
 
-// Query views one query's keys and scores from the arena, trimmed to the count that query
-// reported; query must be below Queries.
-func (matches MatchesView) Query(query uint) ([]Key, []Distance) {
+// Query views one query's keys and scores from the arena, trimmed to the count that query reported,
+// refused with StatusDevice when the arena is memory the host may not read; query must be below
+// Queries.
+func (matches MatchesView) Query(query uint) ([]Key, []Distance, error) {
+	if err := matches.arena.readable(); err != nil {
+		return nil, nil, err
+	}
 	columns := matches.Columns()
 	count := min(unsafe.Slice((*uint)(unsafe.Pointer(matches.raw.counts)), matches.queries)[query], columns)
 	from := query * columns
 	keys := unsafe.Slice((*Key)(unsafe.Pointer(matches.raw.keys)), matches.queries*columns)
 	scores := unsafe.Slice((*Distance)(unsafe.Pointer(matches.raw.scores)), matches.queries*columns)
-	return keys[from : from+count], scores[from : from+count]
+	return keys[from : from+count], scores[from : from+count], nil
 }
 
 // MatchesTape is a ragged run of matches a call wrote into its arena, one run per query: every pair
@@ -527,6 +532,7 @@ type MatchesTape struct {
 	queries  uint
 	required uint
 	written  uint
+	arena    *Arena
 }
 
 // Queries reports how many left rows the call multiplied, or how many queries it scored.
@@ -540,12 +546,15 @@ func (matches MatchesTape) Required() uint { return matches.required }
 func (matches MatchesTape) Written() uint { return matches.written }
 
 // Query views one query's keys and scores from the arena, a left row's pairs for Multiply; query
-// must be below Queries.
-func (matches MatchesTape) Query(query uint) ([]Key, []Distance) {
+// must be below Queries; refused with StatusDevice when the arena is memory the host may not read.
+func (matches MatchesTape) Query(query uint) ([]Key, []Distance, error) {
+	if err := matches.arena.readable(); err != nil {
+		return nil, nil, err
+	}
 	offsets := unsafe.Slice((*uint)(unsafe.Pointer(matches.raw.offsets)), matches.queries+1)
 	keys := unsafe.Slice((*Key)(unsafe.Pointer(matches.raw.keys)), offsets[matches.queries])
 	scores := unsafe.Slice((*Distance)(unsafe.Pointer(matches.raw.scores)), offsets[matches.queries])
-	return keys[offsets[query]:offsets[query+1]], scores[offsets[query]:offsets[query+1]]
+	return keys[offsets[query]:offsets[query+1]], scores[offsets[query]:offsets[query+1]], nil
 }
 
 // endregion: Matches
@@ -956,6 +965,20 @@ func GPUClassFromName(name string) (GPUClass, error) {
 	return GPUClass(class), nil
 }
 
+// GPUVendor is a GPU maker whose runtime the library drives, as usearch_gpu_devices reports it.
+type GPUVendor int32
+
+const (
+	// GPUVendorUnknown names no vendor, as for host pages.
+	GPUVendorUnknown GPUVendor = C.usearch_gpu_vendor_unknown_k
+	// GPUVendorNVIDIA is NVIDIA, through the CUDA driver.
+	GPUVendorNVIDIA GPUVendor = C.usearch_gpu_vendor_nvidia_k
+	// GPUVendorAMD is AMD, through the HIP runtime.
+	GPUVendorAMD GPUVendor = C.usearch_gpu_vendor_amd_k
+	// GPUVendorApple is Apple, through Metal.
+	GPUVendorApple GPUVendor = C.usearch_gpu_vendor_apple_k
+)
+
 // NvmeClass is an I/O engine USearch drives external memory through, newest first; an NVMe executor
 // pinned to one tries it and degrades down the ladder the media admit.
 type NvmeClass int32
@@ -1108,10 +1131,13 @@ func (executor *Executor) Drain(mood Mood) error {
 // slice they handed out end there, as they do once it is closed; to keep one call's views past the
 // next, give that call another arena. An arena serves one call at a time, and a second overlapping
 // it fails with StatusContended. Deferred verbs view it as blocking ones do, since Close waits for
-// every deferred call naming it. Views over a GPU arena hold device memory, which Describe reports
-// and no Go code may read.
+// every deferred call naming it. Views over device memory no Go code may read, as Describe reports
+// it, refuse with StatusDevice; Arrow exports of them stay open.
 type Arena struct {
 	handle C.usearch_arena_t
+	// description is where the outputs live, read once as the arena is made, so a view checks it
+	// without crossing into the library.
+	description ArenaDescription
 }
 
 // NewArena makes an empty arena where executor computes, host pages or the memory of its GPU,
@@ -1133,33 +1159,86 @@ func NewArena(executor *Executor) (*Arena, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Arena{handle: arena}, nil
+	description, err := described(arena)
+	if err != nil {
+		C.usearch_arena_free(arena)
+		return nil, err
+	}
+	return &Arena{handle: arena, description: description}, nil
+}
+
+// HostAccess says whether Go code may read an arena's pages.
+type HostAccess int32
+
+const (
+	// HostAccessRefused means the pages are device memory no Go code may read.
+	HostAccessRefused HostAccess = C.usearch_host_access_refused_k
+	// HostAccessReadable means host, pinned, managed or Apple's shared memory, which Go code may read.
+	HostAccessReadable HostAccess = C.usearch_host_access_readable_k
+)
+
+// String renders the host access as the library spells it.
+func (access HostAccess) String() string {
+	return C.GoString(C.usearch_host_access_name(C.usearch_host_access_t(access)))
 }
 
 // ArenaDescription is where an arena's outputs live, which decides whether Go code may read them.
 type ArenaDescription struct {
-	// Residency is ResidencyRam for host pages and ResidencyVram for one device's memory, which no Go
-	// code may read.
+	// Residency is ResidencyRam for host pages and ResidencyVram for one device's memory.
 	Residency Residency
-	// Device is the ordinal of the GPU holding the outputs on ResidencyVram, and 0 for host pages.
-	Device uint
+	// Device is the GPU's position in the library's device listing, and -1 for host pages.
+	Device int32
+	// Vendor is the maker of that GPU, and GPUVendorUnknown for host pages.
+	Vendor GPUVendor
+	// VendorOrdinal is the vendor's own device number, which Arrow names, and -1 for host pages.
+	VendorOrdinal int32
+	// HostAccess says whether Go code may read the outputs; every view refuses with StatusDevice
+	// when it is HostAccessRefused.
+	HostAccess HostAccess
 }
 
 // Describe reports where the arena's outputs live, as the executor that made it decided.
 func (arena *Arena) Describe() (ArenaDescription, error) {
-	handle, err := arena.lower()
+	if _, err := arena.lower(); err != nil {
+		return ArenaDescription{}, err
+	}
+	return arena.description, nil
+}
+
+// described asks the library where a new arena's outputs live, once, as NewArena makes it.
+func described(handle C.usearch_arena_t) (ArenaDescription, error) {
+	var call callWithResult[C.usearch_arena_description_t]
+	arguments := open[C.usearch_arena_describe_t](&call)
+	*arguments = C.usearch_arena_describe_t{arena: handle, outcome: call.outcome(), description: call.result}
+	C.usearch_arena_describe(arguments)
+	description, err := block(&call, nil)
 	if err != nil {
 		return ArenaDescription{}, err
 	}
-	var call callWithResult[ArenaDescription]
-	arguments := open[C.usearch_arena_describe_t](&call)
-	*arguments = C.usearch_arena_describe_t{
-		arena:       handle,
-		outcome:     call.outcome(),
-		description: (*C.usearch_arena_description_t)(unsafe.Pointer(call.result)),
+	return ArenaDescription{
+		Residency:     Residency(description.residency),
+		Device:        int32(description.device),
+		Vendor:        GPUVendor(description.vendor),
+		VendorOrdinal: int32(description.vendor_ordinal),
+		HostAccess:    HostAccess(description.host_access),
+	}, nil
+}
+
+// host refuses a host read of outputs the host may not read.
+func (description ArenaDescription) host() error {
+	if description.HostAccess != HostAccessReadable {
+		return fail(StatusDevice, "the outputs are memory the host may not read")
 	}
-	C.usearch_arena_describe(arguments)
-	return block(&call, nil)
+	return nil
+}
+
+// readable refuses a view of a closed arena's outputs, or of ones the host may not read, without
+// crossing into the library.
+func (arena *Arena) readable() error {
+	if _, err := arena.lower(); err != nil {
+		return err
+	}
+	return arena.description.host()
 }
 
 // endregion: Arenas
@@ -1394,13 +1473,16 @@ func (arena *Arena) lower() (C.usearch_arena_t, error) {
 }
 
 // Close releases the memory, waiting for every deferred call naming the arena, and ends every view
-// over it; it comes before the Close of the executor that made the arena. It is idempotent, and a
-// closed arena must not be used again.
+// over it; it comes before the Close of the executor that made the arena. While an Arrow export of
+// its outputs is unreleased it fails with [StatusContended] and frees nothing, so a later Close
+// retries. It is idempotent, and a closed arena must not be used again.
 func (arena *Arena) Close() error {
 	if arena == nil || arena.handle == nil {
 		return nil
 	}
-	C.usearch_arena_free(arena.handle)
+	if status := C.usearch_arena_free(arena.handle); status != C.usearch_status_success_k {
+		return fail(Status(status), "an export of the arena's outputs is still open")
+	}
 	arena.handle = nil
 	return nil
 }
@@ -1635,6 +1717,7 @@ type TapeView struct {
 	raw     C.usearch_tape_view_t
 	written uint
 	width   uint
+	arena   *Arena
 }
 
 // Written reports how many entries the call wrote; zero when the key is absent.
@@ -1655,8 +1738,12 @@ func (tape TapeView) span(entry uint) (uint, uint) {
 
 // TapeEntry views one entry's scalars from the arena - a sequence's bytes, or a shape's points
 // with x, y and z interleaved - refused with StatusInvalidArgument when Value is not the scalar
-// type they were written as; entry must be below Written.
+// type they were written as, and with StatusDevice when the arena is memory the host may not read;
+// entry must be below Written.
 func TapeEntry[Value Element](tape TapeView, entry uint) ([]Value, error) {
+	if err := tape.arena.readable(); err != nil {
+		return nil, err
+	}
 	if scalar := scalarOf[Value](); scalar != tape.Scalar() {
 		return nil, fail(StatusInvalidArgument, "elements written as "+tape.Scalar().String()+" cannot be read as "+scalar.String())
 	}

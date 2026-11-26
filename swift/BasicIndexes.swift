@@ -61,7 +61,7 @@ public struct TapeEntries<Value: ScalarValue>: RandomAccessCollection {
 
     /// One entry's values, as many as its elements span.
     public subscript(entry: Int) -> DenseVectors<Value>.Row {
-        boundsCheck(entry, below: endIndex)
+        boundsCheck(entry, below: endIndex, in: arena)
         let (first, last) = (offset(entry), offset(entry + 1))
         return DenseVectors<Value>.Row(
             arena: arena,

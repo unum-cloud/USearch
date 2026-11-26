@@ -75,6 +75,7 @@ static struct {
 
 static PyMethodDef module_methods[] = {
     {"version", (PyCFunction)api_version, METH_NOARGS, doc_version},                                              //
+    {"_refuse_host_read", (PyCFunction)api_refuse_host_read, METH_O, doc_refuse_host_read},                       //
     {"capabilities_compiled", (PyCFunction)api_capabilities_compiled, METH_NOARGS, doc_capabilities_compiled},    //
     {"capabilities_available", (PyCFunction)api_capabilities_available, METH_NOARGS, doc_capabilities_available}, //
     {NULL, NULL, 0, NULL},

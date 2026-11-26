@@ -131,6 +131,8 @@ public sealed class DenseIndexTests : IDisposable
         Assert.False(Names.TryParse("cosine", out DenseMetric _));
         Assert.True(Names.TryParse("nvme", out Residency residency));
         Assert.Equal(Residency.Nvme, residency);
+        Assert.Equal("refused", HostAccess.Refused.Name());
+        Assert.Equal("readable", HostAccess.Readable.Name());
         Assert.True(Names.TryParse("walk", out Traversal traversal));
         Assert.Equal(Traversal.Walk, traversal);
         Assert.False(Names.TryParse("exact", out Traversal _));
@@ -177,12 +179,12 @@ public sealed class DenseIndexTests : IDisposable
             (view => NativeMethods.usearch_nvme_class_from_name(view, out int read) == Status.Success ? read : -1,
                 NativeMethods.usearch_nvme_class_name),
         ];
-        // Classes keep their registry values forever, and a class this build lacks spells "unknown".
+        // Classes keep their registry values forever, and a class this build lacks spells "unrecognized".
         foreach ((Func<NativeBytesView, int> parse, Func<int, IntPtr> spell) in classes)
             for (int code = 1; code <= byte.MaxValue; ++code)
             {
                 string spelled = Marshal.PtrToStringUTF8(spell(code)) ?? string.Empty;
-                if (spelled != "unknown") Assert.Equal(code, ReadBack(spelled, parse));
+                if (spelled != "unrecognized") Assert.Equal(code, ReadBack(spelled, parse));
             }
         foreach (CPUClass cpuClass in Enum.GetValues<CPUClass>())
             Assert.NotEqual("unknown", Marshal.PtrToStringUTF8(NativeMethods.usearch_cpu_class_name((int)cpuClass)));
@@ -821,7 +823,7 @@ public sealed class DenseIndexTests : IDisposable
         Assert.Equal(Dimensions * sizeof(float), first.StrideBytes);
         Assert.Equal(RowOf(3f), first.Row<float>(2).ToArray());
         Assert.Equal(0, second.Rows);
-        Assert.Equal(new ArenaDescription(Residency.Ram, null), other.Describe());
+        Assert.Equal(new ArenaDescription(Residency.Ram, null, GpuVendor.Unknown, null, HostAccess.Readable), other.Describe());
         Assert.Equal(3UL, index.On(this._pool).Count(shared));
     }
 
@@ -843,6 +845,41 @@ public sealed class DenseIndexTests : IDisposable
 
         arena.Dispose();
         Assert.Equal(Status.Uninitialized, Assert.Throws<USearchException>(() => index.Get<F32>(1UL, arena)).Status);
+    }
+
+    [Fact]
+    public void HostReadsRefuseMemoryTheHostMayNotRead()
+    {
+        ArenaDescription device = new(Residency.Vram, 0, GpuVendor.Nvidia, 0, HostAccess.Refused);
+        Assert.Equal(Status.Device, Assert.Throws<USearchException>(device.Host).Status);
+        new ArenaDescription(Residency.Vram, 0, GpuVendor.Apple, 0, HostAccess.Readable).Host();
+        this._arena.Describe().Host();
+
+        DenseIndex index;
+        try
+        {
+            index = DenseIndex.InitVram(SmallOptions(), devices: [0]);
+        }
+        catch (USearchException)
+        {
+            return; // no GPU device
+        }
+
+        using (index)
+        using (Executor gpu = Executor.ForVram(devices: [0]))
+        using (Arena arena = new(gpu))
+        {
+            index.On(gpu).Insert(KeysOf(1, 2), Rows([.. RowOf(1f), .. RowOf(2f)]));
+            Matches found = index.On(gpu).Search(Rows(RowOf(1f)), wanted: 1, arena);
+            if (arena.Describe().HostAccess == HostAccess.Refused)
+            {
+                Assert.Equal(Status.Device, Assert.Throws<USearchException>(() => found[0].Count).Status);
+            }
+            else
+            {
+                Assert.Equal(Key.FromUInt64(1), found[0].Keys[0]);
+            }
+        }
     }
 
     #endregion Retrieval & Arenas

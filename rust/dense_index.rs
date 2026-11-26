@@ -1459,8 +1459,10 @@ impl<'arena, Value: Element> DenseVectors<'arena, Value> {
     }
 
     /// One row per entry under the key in insertion order, or per query, at the pitch the library
-    /// reported; an absent key leaves a null base, which a zero-row view never reads.
+    /// reported; an absent key leaves a null base, which a zero-row view never reads. Refused with
+    /// [`Status::Device`] over memory the host may not read.
     pub fn view(&self) -> Result<MatrixView<'arena, Value>> {
+        self.arena.description.host()?;
         let data = NonNull::new(self.vectors.data.cast::<Value>().cast_mut()).unwrap_or(NonNull::dangling());
         let shape = [self.count, self.vectors.columns];
         let strides = [self.vectors.stride as isize, core::mem::size_of::<Value>() as isize];
@@ -1523,20 +1525,24 @@ impl<'arena> DenseProducts<'arena> {
 
     /// The pairs of one left row, a key naming each indexed entry beside its product, or the keys
     /// of one query beside their summed maxima, refused with [`Status::InvalidArgument`] when
-    /// `query` is not below [`DenseProducts::queries`].
+    /// `query` is not below [`DenseProducts::queries`], and with [`Status::Device`] over memory the
+    /// host may not read.
     pub fn query(&self, query: usize) -> Result<QueryMatches<'arena>> {
+        self.arena.description.host()?;
         match query < self.count {
-            // Safety: the arena holds a finished call's output.
+            // Safety: the arena holds a finished call's output the host may read.
             true => Ok(unsafe { self.products.query(query) }),
             false => Err(fail(Status::InvalidArgument, "the query is not below the call's count")),
         }
     }
 
-    /// Every query's pairs or keys, in query order.
-    pub fn iter(&self) -> impl Iterator<Item = QueryMatches<'arena>> {
+    /// Every query's pairs or keys, in query order, refused with [`Status::Device`] over memory the
+    /// host may not read.
+    pub fn iter(&self) -> Result<impl Iterator<Item = QueryMatches<'arena>> + use<'arena>> {
+        self.arena.description.host()?;
         let products = self.products;
-        // Safety: the arena holds a finished call's output.
-        (0..self.count).map(move |query| unsafe { products.query(query) })
+        // Safety: the arena holds a finished call's output the host may read.
+        Ok((0..self.count).map(move |query| unsafe { products.query(query) }))
     }
 
     /// Exports every left row's pairs, or every query's keys, as one Arrow `LargeList` of
@@ -1583,10 +1589,11 @@ impl<'arena> Monolith<'arena> {
         Monolith { arena, monolith: usearch_bytes_view_t::default() }
     }
 
-    /// The monolith's bytes.
-    pub fn view(&self) -> &'arena [u8] {
-        // Safety: the arena holds a finished call's output.
-        unsafe { arena_slice(self.monolith.data, self.monolith.length) }
+    /// The monolith's bytes, refused with [`Status::Device`] over memory the host may not read.
+    pub fn view(&self) -> Result<&'arena [u8]> {
+        self.arena.description.host()?;
+        // Safety: the arena holds a finished call's output the host may read.
+        Ok(unsafe { arena_slice(self.monolith.data, self.monolith.length) })
     }
 }
 
@@ -1620,16 +1627,19 @@ impl<'arena> Sample<'arena> {
         self.written
     }
 
-    /// The keys drawn.
-    pub fn keys(&self) -> &'arena [Key] {
-        // Safety: the arena holds a finished call's packed output.
-        unsafe { arena_slice(self.keys.data, self.written) }
+    /// The keys drawn, refused with [`Status::Device`] over memory the host may not read.
+    pub fn keys(&self) -> Result<&'arena [Key]> {
+        self.arena.description.host()?;
+        // Safety: the arena holds a finished call's packed output the host may read.
+        Ok(unsafe { arena_slice(self.keys.data, self.written) })
     }
 
-    /// Which of its key's entries each draw is, in the order [`DenseVerbs::get`] writes them.
-    pub fn entry_ordinals(&self) -> &'arena [usize] {
-        // Safety: the arena holds a finished call's packed output.
-        unsafe { arena_slice(self.entry_ordinals, self.written) }
+    /// Which of its key's entries each draw is, in the order [`DenseVerbs::get`] writes them,
+    /// refused with [`Status::Device`] over memory the host may not read.
+    pub fn entry_ordinals(&self) -> Result<&'arena [usize]> {
+        self.arena.description.host()?;
+        // Safety: the arena holds a finished call's packed output the host may read.
+        Ok(unsafe { arena_slice(self.entry_ordinals, self.written) })
     }
 
     /// The one shown or earlier draw each draw hangs from and its distance, one query per draw,
@@ -1638,10 +1648,13 @@ impl<'arena> Sample<'arena> {
         Matches { arena: self.arena, view: self.parents, queries: self.written }
     }
 
-    /// Where each draw is placed, beside the shown keys.
-    pub fn coordinates(&self) -> &'arena [[f32; 3]] {
-        // Safety: the arena holds a finished call's packed output of three `f32` per row.
-        unsafe { arena_slice(self.coordinates.data.cast::<[f32; 3]>(), self.written) }
+    /// Where each draw is placed, beside the shown keys, refused with [`Status::Device`] over
+    /// memory the host may not read.
+    pub fn coordinates(&self) -> Result<&'arena [[f32; 3]]> {
+        self.arena.description.host()?;
+        // Safety: the arena holds a finished call's packed output of three `f32` per row, which
+        // the host may read.
+        Ok(unsafe { arena_slice(self.coordinates.data.cast::<[f32; 3]>(), self.written) })
     }
 }
 
@@ -1650,7 +1663,7 @@ impl<'arena> Sample<'arena> {
 ///
 /// Rust-only.
 pub struct DenseBatch<'arena> {
-    pub(crate) arena: PhantomData<&'arena Arena<'arena>>,
+    pub(crate) arena: &'arena Arena<'arena>,
     pub(crate) keys: usearch_keys_view_t,
     pub(crate) links: Option<usearch_keys_tape_view_t>,
     pub(crate) written: usize,
@@ -1662,17 +1675,20 @@ impl<'arena> DenseBatch<'arena> {
         self.written
     }
 
-    /// The keys of the entries.
-    pub fn keys(&self) -> &'arena [Key] {
-        // Safety: the arena holds a finished call's packed output.
-        unsafe { arena_slice(self.keys.data, self.written) }
+    /// The keys of the entries, refused with [`Status::Device`] over memory the host may not read.
+    pub fn keys(&self) -> Result<&'arena [Key]> {
+        self.arena.description.host()?;
+        // Safety: the arena holds a finished call's packed output the host may read.
+        Ok(unsafe { arena_slice(self.keys.data, self.written) })
     }
 
     /// The keys entry `entry` links to, refused with [`Status::InvalidArgument`] when the pull did
-    /// not ask for links or `entry` is not below [`DenseBatch::written`].
+    /// not ask for links or `entry` is not below [`DenseBatch::written`], and with
+    /// [`Status::Device`] over memory the host may not read.
     pub fn links(&self, entry: usize) -> Result<&'arena [Key]> {
+        self.arena.description.host()?;
         match (&self.links, entry < self.written) {
-            // Safety: the arena holds a finished call's output.
+            // Safety: the arena holds a finished call's output the host may read.
             (Some(links), true) => Ok(unsafe { links.entry(entry) }),
             _ => Err(fail(Status::InvalidArgument, "the pull exported no links, or the entry is not below its count")),
         }
@@ -1713,7 +1729,7 @@ unsafe impl Send for DenseBatch<'_> {}
 /// let executor = Executor::for_ram(&[], None, 0)?;
 /// let mut arena = Arena::new_in(&executor)?;
 /// let matches = index.on(&executor).search(&rows(&query, 4)?, 10, &mut arena)?;
-/// for query in matches.iter() {
+/// for query in matches.iter()? {
 ///     println!("{} matches", query.keys.len());
 /// }
 /// # Ok::<(), usearch::Error>(())
@@ -3230,7 +3246,7 @@ impl<'index> DenseCursor<'index> {
         arena: &'arena mut Arena<'_>,
     ) -> Result<DenseBatch<'arena>> {
         let mut batch = DenseBatch {
-            arena: PhantomData,
+            arena,
             keys: usearch_keys_view_t::default(),
             links: linked.then(usearch_keys_tape_view_t::default),
             written: 0,
@@ -3714,7 +3730,7 @@ mod tests {
         index.insert(sequential_keys(2), strided).unwrap();
 
         let mut arena = Arena::new().unwrap();
-        let walked_keys = index.cursor(&[]).unwrap().next_keys(2, &mut arena).unwrap().keys().to_vec();
+        let walked_keys = index.cursor(&[]).unwrap().next_keys(2, &mut arena).unwrap().keys().unwrap().to_vec();
         assert_eq!(walked_keys.len(), 2);
         for key in walked_keys {
             let source = u64::try_from(key).unwrap() as usize;
@@ -3848,7 +3864,7 @@ mod tests {
         let mut arena = Arena::new().unwrap();
         let matches = index.search(&rows(&slab[..4 * DIMENSIONS], DIMENSIONS).unwrap(), 0, &mut arena).unwrap();
         assert_eq!(matches.queries(), 4);
-        assert!(matches.iter().all(|query| query.keys.is_empty()), "no query holds a match");
+        assert!(matches.iter().unwrap().all(|query| query.keys.is_empty()), "no query holds a match");
     }
 
     /// Every query's matches land packed in the arena, and its count in its own slot; a query past
@@ -3871,8 +3887,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(matches.queries(), QUERIES);
-        assert!(matches.iter().all(|found| found.keys.len() == WANTED));
-        for (query, found) in matches.iter().enumerate() {
+        assert!(matches.iter().unwrap().all(|found| found.keys.len() == WANTED));
+        for (query, found) in matches.iter().unwrap().enumerate() {
             assert_eq!(found.keys[0], keys[query], "each query finds itself first");
         }
         assert_eq!(matches.query(QUERIES).unwrap_err().status, Status::InvalidArgument);
@@ -4003,7 +4019,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(matches.queries(), COUNT);
-        for (query, found) in matches.iter().enumerate() {
+        for (query, found) in matches.iter().unwrap().enumerate() {
             assert_eq!(found.keys[0], keys[query]);
         }
     }
@@ -4062,10 +4078,10 @@ mod tests {
         let smaller = index.on(&executor()).sample(8, &mut smaller_arena, seeded()).unwrap();
         let larger = index.on(&executor()).sample(16, &mut larger_arena, seeded()).unwrap();
         assert_eq!((smaller.written(), larger.written()), (8, 16));
-        assert_eq!(larger.coordinates().len(), 16);
+        assert_eq!(larger.coordinates().unwrap().len(), 16);
         assert_eq!(larger.parents().queries(), 16);
-        let drawn = larger.keys();
-        assert!(smaller.keys().iter().all(|key| drawn.contains(key)));
+        let drawn = larger.keys().unwrap();
+        assert!(smaller.keys().unwrap().iter().all(|key| drawn.contains(key)));
     }
 
     /// The audit judges every entry published when it started, and no search reaches more.
@@ -4094,19 +4110,19 @@ mod tests {
         let left = rows(&slab, DIMENSIONS).unwrap();
         let mut arena = Arena::new().unwrap();
         let every = index.multiply(&left, 0, &mut arena).unwrap();
-        assert!(every.iter().all(|row| row.keys.len() == ROWS), "every row scores every column");
+        assert!(every.iter().unwrap().all(|row| row.keys.len() == ROWS), "every row scores every column");
 
         let executor = executor();
         let config = DenseMultiplyConfig { expansion_factor: 2 * ROWS, ..DenseMultiplyConfig::from(WANTED) };
         let cut = index.multiply(&left, config, &mut arena).unwrap();
         assert_eq!(cut.queries(), ROWS);
-        assert!(cut.iter().all(|row| row.keys.len() == WANTED));
+        assert!(cut.iter().unwrap().all(|row| row.keys.len() == WANTED));
         assert_eq!(cut.required(), ROWS * ROWS, "the count outruns the pairs kept");
         assert_eq!(cut.query(ROWS).unwrap_err().status, Status::InvalidArgument);
 
         let mut placed = Arena::new_in(&executor).unwrap();
         let same = index.on(&executor).multiply(&left, WANTED, &mut placed).unwrap();
-        assert!(same.iter().all(|row| row.keys.len() == WANTED));
+        assert!(same.iter().unwrap().all(|row| row.keys.len() == WANTED));
     }
 
     /// The outputs are sized over documents rather than rows, which is the one piece of
@@ -4139,14 +4155,17 @@ mod tests {
         let mut arena = Arena::new_in(&executor).unwrap();
         let matches = index.on(&executor).maxsim(&tokens, TOKENS, DOCUMENTS, &mut arena).unwrap();
         assert_eq!(matches.queries(), QUERIES);
-        assert!(matches.iter().all(|query| query.keys.len() == DOCUMENTS), "every document is scored, once per query");
-        let bounded: Vec<usize> = matches.iter().map(|query| query.keys.len()).collect();
+        assert!(
+            matches.iter().unwrap().all(|query| query.keys.len() == DOCUMENTS),
+            "every document is scored, once per query"
+        );
+        let bounded: Vec<usize> = matches.iter().unwrap().map(|query| query.keys.len()).collect();
         let every = index.maxsim(&tokens, TOKENS, 0, &mut arena).unwrap();
         assert!(
-            every.iter().zip(bounded).all(|(query, kept)| query.keys.len() >= kept),
+            every.iter().unwrap().zip(bounded).all(|(query, kept)| query.keys.len() >= kept),
             "no bound lands every key a query scored"
         );
-        assert_eq!(every.required(), every.iter().map(|query| query.keys.len()).sum::<usize>());
+        assert_eq!(every.required(), every.iter().unwrap().map(|query| query.keys.len()).sum::<usize>());
         assert!(matches!(
             index.maxsim(&tokens, TOKENS + 1, DOCUMENTS, &mut arena),
             Err(Error { status: Status::ShapeMismatch, .. })
@@ -4299,7 +4318,7 @@ mod tests {
         let (index, _, _) = populated_index(32, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         let mut arena = Arena::new().unwrap();
         let saved = index.save_buffer(&mut arena).unwrap();
-        let monolith = saved.view();
+        let monolith = saved.view().unwrap();
         assert!(!monolith.is_empty());
 
         let restored = DenseIndex::load_ram_buffer(monolith).unwrap();
@@ -4336,7 +4355,7 @@ mod tests {
                 ..DenseSaveBufferConfig::from(&mut arena)
             })
             .unwrap();
-        assert_eq!(DenseIndex::metadata_buffer(buffer.view()).unwrap().dimensions, DIMENSIONS);
+        assert_eq!(DenseIndex::metadata_buffer(buffer.view().unwrap()).unwrap().dimensions, DIMENSIONS);
     }
 
     #[test]
@@ -4426,7 +4445,7 @@ mod tests {
                 break;
             }
             batches.push(batch.written());
-            seen.extend(batch.keys().iter().copied());
+            seen.extend(batch.keys().unwrap().iter().copied());
         }
 
         assert_eq!(batches, vec![8, 8, 4], "the batch boundary is crossed twice");
@@ -4443,7 +4462,7 @@ mod tests {
         let batch = cursor.next_keys(8, &mut arena).unwrap();
         assert_eq!(batch.written(), 4);
         assert_eq!(
-            batch.keys().iter().copied().collect::<HashSet<Key>>(),
+            batch.keys().unwrap().iter().copied().collect::<HashSet<Key>>(),
             keys.iter().copied().collect::<HashSet<Key>>()
         );
         assert_eq!(cursor.next_keys(8, &mut arena).unwrap().written(), 0, "the walk is exhausted");
@@ -4750,7 +4769,7 @@ mod tests {
         let config = DenseSearchConfig { expansion_factor: 64, ..DenseSearchConfig::from(WANTED) };
         let mut arena = Arena::new_in(&executor).unwrap();
         let matches = receiver.search(&vectors, config, &mut arena).unwrap();
-        assert!(matches.iter().all(|query| query.keys.len() == WANTED), "every query fills its own output");
+        assert!(matches.iter().unwrap().all(|query| query.keys.len() == WANTED), "every query fills its own output");
     }
 
     /// The index itself is the blocking receiver on the calling thread, with the same results.
@@ -4802,7 +4821,7 @@ mod tests {
                     index.on(&reader).search(&queries, config, &mut arena).expect("the racing search must resolve");
                 // Whether a racing insert is visible is what the watermark leaves unspecified;
                 // that no key outside the dataset appears is what it guarantees.
-                for query in matches.iter() {
+                for query in matches.iter().unwrap() {
                     if query.keys.iter().any(|key| !known.contains(key)) {
                         strangers.fetch_add(1, Ordering::Relaxed);
                     }
@@ -4991,7 +5010,7 @@ mod tests {
             &slab[DIMENSIONS * 2..DIMENSIONS * 3],
             BF16_EPSILON,
         );
-        assert_eq!(DenseIndex::metadata_buffer(buffer.wait().unwrap().view()).unwrap().dimensions, DIMENSIONS);
+        assert_eq!(DenseIndex::metadata_buffer(buffer.wait().unwrap().view().unwrap()).unwrap().dimensions, DIMENSIONS);
         assert_eq!(counted.wait().unwrap(), 1);
     }
 

@@ -25,8 +25,10 @@ $executor = ExecutorForRam[]
 Print["New Executor: ", $executor]
 $arena = ArenaInit["Executor" -> $executor]
 $local = ArenaInit[]
-Expect["a host arena", ArenaDescribe[$arena], <|"Residency" -> "ram", "Device" -> None|>]
-Expect["an arena for the calling thread", ArenaDescribe[$local], <|"Residency" -> "ram", "Device" -> None|>]
+Expect["a host arena", ArenaDescribe[$arena],
+    <|"Residency" -> "ram", "Device" -> None, "Vendor" -> "unknown", "VendorOrdinal" -> None, "HostAccess" -> "readable"|>]
+Expect["an arena for the calling thread", ArenaDescribe[$local],
+    <|"Residency" -> "ram", "Device" -> None, "Vendor" -> "unknown", "VendorOrdinal" -> None, "HostAccess" -> "readable"|>]
 Expect["an unknown mood", ExecutorDrain[$executor, "chill"][[1]], "invalid-argument"]
 
 Expect["an unknown quantization", DenseInitRam["inner", "f24", 5][[1]], "unknown-kind"]
@@ -54,6 +56,11 @@ Expect["the calling thread", DenseSearch[$index, $rows, 10, $local]["Keys"], $ma
 Expect["a result outlives its arena's next call", DenseSearch[$index, {Last[$rows]}, 1, $arena]["Keys"], {{43}}]
 Expect["the earlier result", $matches["Keys"], {{$uuid, 43}, {43, $uuid}}]
 Expect["no arena", Head[DenseSearch[$index, $rows, 10]], DenseSearch]
+(* Memory the host may not read is never copied out: a search into such an arena is refused. *)
+$gpu = ExecutorForVram[]
+If[!FailureQ[$gpu], With[{arena = ArenaInit["Executor" -> $gpu]},
+    If[ArenaDescribe[arena]["HostAccess"] === "refused",
+        Expect["a host read of device memory", DenseSearch[$index, $rows, 1, arena][[1]], "device"]]]]
 Expect["a negative wanted", DenseSearch[$index, $rows, -1, $arena][[1]], "invalid-argument"]
 Expect["arguments of the wrong type", Quiet[DenseSearch[$index, {{"one"}}, 1, $arena]][[1]], "invalid-argument"]
 Expect["non-real typed rows", DenseSearch[$index, NumericArray[{{1, 2, 3, 4, 5}}, "Integer32"], 1, $arena][[1]],
@@ -325,6 +332,6 @@ Expect["a cut empties its source into its targets", {AssociationQ[DenseReshard[D
     DenseDescribe[$left]["Size"] + DenseDescribe[$right]["Size"]}, {True, 0, 2}]
 
 ClearAll[$sequences, $shapes, $geospatial, $nearby, $found, $points, $stops, $plan, $loaded, $viewed, $nvme,
-    $source, $gathered, $cut, $left, $right, $arena, $local, $scanned, $index, $executor]
+    $source, $gathered, $cut, $left, $right, $arena, $local, $scanned, $index, $executor, $gpu]
 DeleteFile[$checkpoint]
 Print["Handles Released"]

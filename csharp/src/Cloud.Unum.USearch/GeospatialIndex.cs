@@ -234,18 +234,27 @@ public readonly struct GeospatialIndexDescription
 public readonly unsafe struct GeospatialObservations
 {
     private readonly GeospatialObservation* _observations;
+    private readonly ArenaDescription _description;
 
-    internal GeospatialObservations(GeospatialObservation* observations, int count)
+    internal GeospatialObservations(GeospatialObservation* observations, int count, ArenaDescription description)
     {
         this._observations = observations;
         this.Count = observations is null ? 0 : count;
+        this._description = description;
     }
 
     /// <summary>How many observations the call wrote; zero for an absent key.</summary>
     public int Count { get; }
 
     /// <summary>The observations, in insertion order.</summary>
-    public ReadOnlySpan<GeospatialObservation> Observations => new(this._observations, this.Count);
+    public ReadOnlySpan<GeospatialObservation> Observations
+    {
+        get
+        {
+            this._description.Host();
+            return new(this._observations, this.Count);
+        }
+    }
 }
 
 #endregion Options
@@ -1089,7 +1098,7 @@ public sealed unsafe class GeospatialCursor : IDisposable
         };
         usearch_geospatial_cursor_next(&arguments);
         outcome.ThrowIfFailed();
-        return new DenseBatch(keys, linked, links, (int)written);
+        return new DenseBatch(keys, linked, links, (int)written, arena.Description);
     }
 
     /// <summary>Releases the cursor, then the index it kept alive. Calls
@@ -1241,7 +1250,8 @@ internal unsafe struct GeospatialGetCall(CallHandles handles, Key key, Arena are
     public void Finish(CallOutputs* outputs)
     {
         outputs->Outcome.ThrowIfFailed();
-        this.Result = new GeospatialObservations(*(GeospatialObservation**)outputs->View, (int)outputs->Written);
+        this.Result = new GeospatialObservations(
+            *(GeospatialObservation**)outputs->View, (int)outputs->Written, arena.Description);
     }
 }
 
@@ -1335,7 +1345,7 @@ internal unsafe struct GeospatialSearchCall(
     {
         outputs->Outcome.ThrowIfFailed();
         stats?.Adopt(*(NativeDenseTraversalStats*)outputs->Report);
-        this.Result = new Matches(*(NativeMatchesView*)outputs->View, queries.Length);
+        this.Result = new Matches(*(NativeMatchesView*)outputs->View, queries.Length, arena.Description);
     }
 }
 
@@ -1380,7 +1390,8 @@ internal unsafe struct GeospatialWithinCall(
     {
         outputs->Outcome.ThrowIfFailed();
         stats?.Adopt(*(NativeDenseTraversalStats*)outputs->Report);
-        this.Result = new DenseProducts(*(NativeMatchesTapeView*)outputs->View, queries.Length, outputs->Written);
+        this.Result = new DenseProducts(
+            *(NativeMatchesTapeView*)outputs->View, queries.Length, outputs->Written, arena.Description);
     }
 }
 
@@ -1621,7 +1632,7 @@ internal unsafe struct GeospatialSampleCall(CallHandles handles, int wanted, Are
         config.Stats?.Adopt(reports->Stats);
         this.Result = new Sample(
             reports->Keys, reports->EntryOrdinals, *(NativeMatchesView*)outputs->View, reports->Coordinates,
-            (int)outputs->Written);
+            (int)outputs->Written, arena.Description);
     }
 }
 
@@ -1681,7 +1692,7 @@ internal unsafe struct GeospatialSaveBufferCall(CallHandles handles, Arena arena
     public void Finish(CallOutputs* outputs)
     {
         outputs->Outcome.ThrowIfFailed();
-        this.Result = new Monolith(*(NativeBytesView*)outputs->View);
+        this.Result = new Monolith(*(NativeBytesView*)outputs->View, arena.Description);
     }
 }
 

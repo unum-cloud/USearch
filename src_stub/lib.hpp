@@ -74,6 +74,10 @@ struct usearch_arena_handle_t {
      *  before its final status; null while free. Touched through @c serial_atomic_ref, since calls
      *  on several threads may name it. */
     usearch_outcome_t const* holder = nullptr;
+
+    /** Exports of the arena's outputs a consumer still holds; while any is open, no call rewinds
+     *  the arena and its free frees nothing. Touched through @c serial_atomic_ref. */
+    util::u32_t exports = 0;
 };
 
 /** What @c src/arrow.cpp asks of an arena, as @c src/lib.hpp answers it: whether it holds an
@@ -201,7 +205,7 @@ inline bool reject_traversal(usearch_traversal_t traversal, usearch_outcome_t* o
  *  ceiling, and any class narrows to the serial one this stand-in runs. */
 inline bool reject_ceiling(usearch_cpu_class_t ceiling, usearch_outcome_t* outcome) {
     return reject_if(
-        ceiling != usearch_cpu_class_unknown_k && std::string_view(usearch_cpu_class_name(ceiling)) == "unknown",
+        ceiling != usearch_cpu_class_unknown_k && std::string_view(usearch_cpu_class_name(ceiling)) == "unrecognized",
         usearch_status_invalid_argument_k, "The CPU class ceiling is a value no class takes", outcome);
 }
 
@@ -209,7 +213,7 @@ inline bool reject_ceiling(usearch_cpu_class_t ceiling, usearch_outcome_t* outco
  *  for devices; unknown sets no ceiling. */
 inline bool reject_ceiling(usearch_gpu_class_t ceiling, usearch_outcome_t* outcome) {
     return reject_if(
-        ceiling != usearch_gpu_class_unknown_k && std::string_view(usearch_gpu_class_name(ceiling)) == "unknown",
+        ceiling != usearch_gpu_class_unknown_k && std::string_view(usearch_gpu_class_name(ceiling)) == "unrecognized",
         usearch_status_invalid_argument_k, "The GPU class ceiling is a value no class takes", outcome);
 }
 
@@ -388,8 +392,13 @@ inline bool hold_arena(usearch_arena_t arena, usearch_outcome_t const* call) {
     if (!arena) return true;
     usearch_outcome_t const* holder = nullptr;
     return serial_atomic_ref<usearch_outcome_t const*>(arena->holder)
-               .compare_exchange_strong(holder, call, std::memory_order_acquire, std::memory_order_acquire) ||
+               .compare_exchange_strong(holder, call, std::memory_order_seq_cst, std::memory_order_acquire) ||
            holder == call;
+}
+
+/** Whether a consumer still holds an export of @p arena 's outputs; a null arena has none. */
+inline bool exported(usearch_arena_t arena) {
+    return arena && serial_atomic_ref<util::u32_t>(arena->exports).load(std::memory_order_seq_cst) != 0;
 }
 
 /** Every verb's first act. A call without an executor answers false and runs the verb's body in
@@ -425,6 +434,13 @@ inline usearch_arena_handle_t* claim_arena(usearch_arena_t arena, usearch_outcom
     if (reject_if(!arena, usearch_status_invalid_argument_k, "The arena must not be null", outcome)) return nullptr;
     if (reject_if(!hold_arena(arena, call), usearch_status_contended_k, "The arena serves another call", outcome))
         return nullptr;
+    if (exported(arena)) {
+        usearch_outcome_t const* holder = call;
+        serial_atomic_ref<usearch_outcome_t const*>(arena->holder)
+            .compare_exchange_strong(holder, nullptr, std::memory_order_release, std::memory_order_relaxed);
+        return propagate_error(usearch_status_contended_k, outcome, "An export of the arena's outputs is open"),
+               nullptr;
+    }
     for (void const* input : inputs)
         if (reject_if(input && arena->memory.contains(input), usearch_status_invalid_argument_k,
                       "An input lies inside the arena it rewinds", outcome))

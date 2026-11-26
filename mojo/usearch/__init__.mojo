@@ -77,6 +77,8 @@ from .types import (
     Error,
     Executor,
     GPUClass,
+    GPUVendor,
+    HostAccess,
     Key,
     LoadPath,
     Matches,

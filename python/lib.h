@@ -295,7 +295,8 @@ typedef struct usearch_py_enum_t {
 extern usearch_py_enum_t usearch_py_status, usearch_py_mood, usearch_py_dense_metric, usearch_py_scalar,
     usearch_py_residency, usearch_py_traversal, usearch_py_cpu_class, usearch_py_gpu_class, usearch_py_nvme_class;
 extern usearch_py_enum_t usearch_py_sequence_metric, usearch_py_shapes_metric, usearch_py_geospatial_relation,
-    usearch_py_refine_verdict, usearch_py_phase, usearch_py_predicate_cost;
+    usearch_py_refine_verdict, usearch_py_phase, usearch_py_predicate_cost, usearch_py_gpu_vendor,
+    usearch_py_host_access;
 
 /**
  *  @brief Builds every mirrored enum's class from `enum.IntEnum` and adds it to @p module, one
@@ -669,6 +670,14 @@ int usearch_py_optional_executor_from_object(PyObject* object, usearch_executor_
 /** Asks the library where the outputs of the @c Arena @p arena live; 0, or -1 with an exception. */
 int usearch_py_arena_describe(PyObject* arena, usearch_arena_description_t* description);
 
+/** Whether host code may read the outputs of the @c Arena @p arena: 1 or 0, or -1 with an
+ *  exception set. */
+int usearch_py_host_readable(PyObject* arena);
+
+/** Raises @c DeviceError when host code may not read the outputs of @p arena; 0, or -1 with an
+ *  exception set. Guards every accessor that dereferences an output on the host. */
+int usearch_py_refuse_host_read(PyObject* arena);
+
 /** The handle of the @c Arena @p arena, or NULL for none, which the library refuses. */
 usearch_arena_t usearch_py_arena_handle(PyObject* arena);
 
@@ -772,10 +781,12 @@ PyObject* usearch_py_products_new(PyObject* arena, usearch_matches_tape_view_t c
                                   size_t pairs, size_t required);
 
 extern char const doc_version[];
+extern char const doc_refuse_host_read[];
 extern char const doc_capabilities_compiled[];
 extern char const doc_capabilities_available[];
 
 PyObject* api_version(PyObject* self, PyObject* unused);
+PyObject* api_refuse_host_read(PyObject* self, PyObject* description);
 PyObject* api_capabilities_compiled(PyObject* self, PyObject* unused);
 PyObject* api_capabilities_available(PyObject* self, PyObject* unused);
 

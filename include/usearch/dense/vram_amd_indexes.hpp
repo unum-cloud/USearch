@@ -1762,7 +1762,6 @@ struct vram_amd_indexes {
                 std::size_t const outputs_bytes = taking * dimensions * sizeof(f32_t);
                 std::size_t const block_bytes = outputs_bytes + taking * sizeof(softmax_state_t);
                 byte_t* blocks = nullptr;
-                traversal_context_t* first_traversal = nullptr;
                 auto attend_shard = [&](std::size_t shard, traversal_context_t& traversal,
                                         std::size_t visible) noexcept -> status_t {
                     shard_lookup_t const lookup {shards_[shard].index->device_keys_(), value_lookup};
@@ -1772,14 +1771,12 @@ struct vram_amd_indexes {
                     if (failed(submitted_status)) return submitted_status;
                     if (!shard) {
                         blocks = reinterpret_cast<byte_t*>(submitted);
-                        first_traversal = &traversal;
                         return status_code_t::success_k;
                     }
                     // On the shard's own stream, so the copy follows its walks; unified addressing
                     // tells the two devices apart. Shard 0's staging may have grown on its stream,
-                    // which its context recorded when it queued, so following that mark orders the
-                    // copy after it.
-                    return succeeded(traversal.follow(*first_traversal)) &&
+                    // so following that stream orders the copy after the growth.
+                    return succeeded(fanout.follow_first(shard)) &&
                                    traversal.api().copy_async(blocks + shard * block_bytes, submitted, block_bytes,
                                                               hip_copy_default_k, traversal.stream()) == hip_success_k
                                ? status_code_t::success_k
@@ -2349,7 +2346,6 @@ struct vram_amd_indexes {
                 hosted_bytes +
                 round_up_to_multiple<std::size_t>(rows_count * sizeof(vram_gathered_row_t), default_alignment_k) +
                 rows_count * row_bytes;
-            traversal_context_t* first_traversal = nullptr;
             auto gather_shard = [&](std::size_t shard, traversal_context_t& traversal,
                                     std::size_t) noexcept -> status_t {
                 std::size_t const first = shard ? listed_ends[shard - 1] : 0, count = listed_ends[shard] - first;
@@ -2362,12 +2358,11 @@ struct vram_amd_indexes {
                 byte_t* const outputs = traversal.allocator().allocate(outputs_bytes);
                 if (!outputs && outputs_bytes) return status_code_t::out_of_memory_k;
                 if (!shard) {
-                    first_traversal = &traversal;
                     if (hosted_bytes) gathered = {outputs, rows_count, dimensions(), row_bytes, rows.dtype};
                 }
                 // The first shard's staging may have grown on its stream, so later shards follow
-                // its mark before writing into it.
-                else if (failed(traversal.follow(*first_traversal))) return status_code_t::device_k;
+                // that stream before writing into it.
+                else if (failed(fanout.follow_first(shard))) return status_code_t::device_k;
                 if (!count) return status_code_t::success_k;
                 vram_gathered_row_t* const list = reinterpret_cast<vram_gathered_row_t*>(outputs + own_hosted_bytes);
                 std::span<vram_gathered_row_t const> const shard_list {list, count};
@@ -2836,13 +2831,12 @@ struct vram_amd_indexes {
         std::size_t const first_outputs_bytes = walked_bytes + shards * block_bytes + scored_bytes +
                                                 sizeof(std::size_t);
         byte_t* first_outputs = nullptr;
-        traversal_context_t* first_traversal = nullptr;
         auto multiply_shard = [&](std::size_t shard, traversal_context_t& traversal,
                                   std::size_t visible) noexcept -> status_t {
             byte_t* const outputs = traversal.allocator().allocate(shard ? walked_bytes + block_bytes
                                                                          : first_outputs_bytes);
             if (!outputs) return status_code_t::out_of_memory_k;
-            if (!shard) first_outputs = outputs, first_traversal = &traversal;
+            if (!shard) first_outputs = outputs;
             nk::matrix_span<node_id_t> const ids {reinterpret_cast<node_id_t*>(outputs), rows_count, wanted};
             nk::matrix_span<dot_result_t> const products {reinterpret_cast<dot_result_t*>(outputs + ids_bytes),
                                                           rows_count, wanted};
@@ -2855,9 +2849,9 @@ struct vram_amd_indexes {
                                                                                          ranking_of(block), traversal);
                 failed(resolved) || !shard)
                 return resolved;
-            // The first shard's staging may have grown on its stream, which its context recorded
-            // when it queued, so following that mark orders the copy after the growth.
-            if (failed(traversal.follow(*first_traversal))) return status_code_t::device_k;
+            // The first shard's staging may have grown on its stream, so following that stream
+            // orders the copy after the growth.
+            if (failed(fanout.follow_first(shard))) return status_code_t::device_k;
             return fanout_t::vendor_t::copy(traversal.api(), first_outputs + walked_bytes + shard * block_bytes, block,
                                             block_bytes, traversal.stream());
         };
@@ -2936,13 +2930,12 @@ struct vram_amd_indexes {
         std::size_t const first_walk_bytes = walked_bytes + shards * block_bytes + row_offsets_bytes + nominees_bytes +
                                              union_offsets_bytes + queries_count * capacity * sizeof(key_t);
         byte_t* first_outputs = nullptr;
-        traversal_context_t* first_traversal = nullptr;
         auto walk_shard = [&](std::size_t shard, traversal_context_t& traversal,
                               std::size_t visible) noexcept -> status_t {
             byte_t* const outputs = traversal.allocator().allocate(shard ? walked_bytes + block_bytes
                                                                          : first_walk_bytes);
             if (!outputs) return status_code_t::out_of_memory_k;
-            if (!shard) first_outputs = outputs, first_traversal = &traversal;
+            if (!shard) first_outputs = outputs;
             node_id_t* const ids = reinterpret_cast<node_id_t*>(outputs);
             distance_t* const distances = reinterpret_cast<distance_t*>(outputs + ids_bytes);
             auto const [found, found_status] = shards_[shard].index->submit_search_(
@@ -2959,9 +2952,9 @@ struct vram_amd_indexes {
             if (!shard)
                 return fanout_t::vendor_t::copy(traversal.api(), block + shards * block_bytes, row_offsets.data(),
                                                 row_offsets.size_bytes(), traversal.stream());
-            // The first shard's staging may have grown on its stream, which its context recorded
-            // when it queued, so following that mark orders the copy after the growth.
-            if (failed(traversal.follow(*first_traversal))) return status_code_t::device_k;
+            // The first shard's staging may have grown on its stream, so following that stream
+            // orders the copy after the growth.
+            if (failed(fanout.follow_first(shard))) return status_code_t::device_k;
             return fanout_t::vendor_t::copy(traversal.api(), first_outputs + walked_bytes + shard * block_bytes, block,
                                             block_bytes, traversal.stream());
         };
@@ -3050,7 +3043,7 @@ struct vram_amd_indexes {
             std::size_t const own_bytes = shard ? partials_bytes : first_own_bytes;
             byte_t* const outputs = traversal.allocator().allocate(shared_bytes + own_bytes);
             if (!outputs) return status_code_t::out_of_memory_k;
-            if (!shard) first_outputs = outputs, first_traversal = &traversal;
+            if (!shard) first_outputs = outputs;
             byte_t* const device_nominee_offsets = outputs + row_offsets_bytes;
             byte_t* const device_entries = device_nominee_offsets + nominee_offsets_bytes;
             byte_t* const partials = device_entries + entries_bytes;
@@ -3076,7 +3069,7 @@ struct vram_amd_indexes {
                 nk::matrix_span<dot_result_t> {reinterpret_cast<dot_result_t*>(partials), nominees_count, longest},
                 traversal);
             if (failed(status) || !shard) return status;
-            if (failed(traversal.follow(*first_traversal))) return status_code_t::device_k;
+            if (failed(fanout.follow_first(shard))) return status_code_t::device_k;
             byte_t* const first_partials = first_outputs + row_offsets_bytes + nominee_offsets_bytes +
                                            aligned(entries_ends[0] * sizeof(vram_gathered_row_t));
             return fanout_t::vendor_t::copy(shard_api, first_partials + shard * partials_bytes, partials,
@@ -3175,13 +3168,12 @@ struct vram_amd_indexes {
         // stream's run, the first shard every shard's ranking; a single shard resolves straight
         // into the caller's.
         byte_t* first_outputs = nullptr;
-        traversal_context_t* first_traversal = nullptr;
         auto search_shard = [&](std::size_t shard, traversal_context_t& traversal,
                                 std::size_t visible) noexcept -> status_t {
             byte_t* const outputs = traversal.allocator().allocate(shard ? walked_bytes + block_bytes
                                                                          : first_outputs_bytes);
             if (!outputs) return status_code_t::out_of_memory_k;
-            if (!shard) first_outputs = outputs, first_traversal = &traversal;
+            if (!shard) first_outputs = outputs;
             node_id_t* const ids = reinterpret_cast<node_id_t*>(outputs);
             distance_t* const walked_distances = reinterpret_cast<distance_t*>(outputs + ids_bytes);
             auto const [found, found_status] = shards_[shard].index->submit_search_(
@@ -3197,9 +3189,8 @@ struct vram_amd_indexes {
                 return resolved;
             // On the shard's own stream, so the copy follows its resolution; unified addressing
             // tells the two devices apart. The first shard's staging may have grown on its stream,
-            // which its context recorded when it queued, so following that mark orders the copy
-            // after the growth without the host waiting.
-            return succeeded(traversal.follow(*first_traversal)) &&
+            // so following that stream orders the copy after the growth without the host waiting.
+            return succeeded(fanout.follow_first(shard)) &&
                            traversal.api().copy_async(first_outputs + walked_bytes + shard * block_bytes, block,
                                                       block_bytes, hip_copy_default_k,
                                                       traversal.stream()) == hip_success_k

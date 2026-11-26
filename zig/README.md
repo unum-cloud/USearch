@@ -112,7 +112,7 @@ Each call rewinds its arena and grows it only past its high-water mark, so the p
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own.
 A view reads the arena directly and ends at the arena's next call, so reading one after it is the caller's mistake, never a checked error.
-An arena from a VRAM executor holds device memory, which `describe` reports and no host accessor may read.
+Every output is a host slice, so `Arena.init` refuses with `error.Device` an executor whose memory the host may not read; `describe` reports where an arena lives, its vendor and whether the host may read it.
 It grows and frees on that executor's stream, so it serves only calls on that executor, any other answering `Error.Device`, and is freed before it, like every arena before its executor.
 
 ```zig

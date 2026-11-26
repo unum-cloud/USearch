@@ -219,16 +219,16 @@ struct vram_shard_fanout {
     template <typename submit_type_, typename merge_type_>
     expected<search_result_t> await_every_shard(std::size_t outputs_bytes, submit_type_&& submit,
                                                 merge_type_&& merge) noexcept {
-        std::size_t stream_at[gpu_devices_capacity_k];
         if (status_t const sized = reserve_paired_(shards_, executor_, walk_bytes_per_shard_ + outputs_bytes, 0,
-                                                   stream_at);
+                                                   stream_at_);
             failed(sized))
             return {{}, sized};
         auto [queued, queued_status] = queue_every_shard_(submit);
         traversal_context_t& first = *traversals_[0];
-        status_t followed = enter(shards_, 0);
+        status_t followed = status_code_t::success_k;
         for (std::size_t shard = 1; shard != queued && succeeded(followed); ++shard)
-            followed = first.follow(*traversals_[shard]);
+            followed = stream_of_(0).follow(stream_of_(shard));
+        if (succeeded(followed)) followed = enter(shards_, 0);
         if (succeeded(followed) && succeeded(queued_status)) queued_status = merge(first);
 
         status_t awaited = status_code_t::success_k;
@@ -243,6 +243,15 @@ struct vram_shard_fanout {
             for (std::size_t shard = 0; shard != queued; ++shard) add_spent_(merged, *traversals_[shard]);
         return {merged, queued_status};
     }
+
+    /**
+     *  @brief Queues on shard @p shard 's stream a wait for everything the first shard's stream
+     *      queued so far, so a copy into the first shard's staging follows the staging's growth.
+     *
+     *  @par Statuses:
+     *  - @c device_k A device could not be bound, or the driver refused the wait.
+     */
+    status_t follow_first(std::size_t shard) noexcept { return stream_of_(shard).follow(stream_of_(0)); }
 
     /** Shard @p shard 's context, whose counters a caller reads once @ref await_every_shard
      *  returned. */
@@ -400,6 +409,11 @@ struct vram_shard_fanout {
         return status_code_t::success_k;
     }
 
+    /** The stream shard @p shard is paired with this call, as @ref reserve_paired_ found it. */
+    typename executor_t::stream_t& stream_of_(std::size_t shard) noexcept {
+        return executor_.stream(stream_at_[device_of_(shards_, shard)]);
+    }
+
     /** The ordinal of shard @p shard 's device, where @ref reserve_paired_ writes its stream. */
     static std::size_t device_of_(shards_t const& shards, std::size_t shard) noexcept {
         return static_cast<std::size_t>(shards[shard].index->device_specs().ordinal);
@@ -420,9 +434,8 @@ struct vram_shard_fanout {
     status_t pair_executor_traversals_(usage_types_ const&... usage) noexcept {
         // Counted once, so a shard generation opening meanwhile gets no context here.
         std::size_t const count = shards_.size();
-        std::size_t stream_at[gpu_devices_capacity_k];
         walk_bytes_per_shard_ = walk_bytes_(shards_, usage...);
-        if (status_t const sized = reserve_paired_(shards_, executor_, walk_bytes_per_shard_, 1, stream_at);
+        if (status_t const sized = reserve_paired_(shards_, executor_, walk_bytes_per_shard_, 1, stream_at_);
             failed(sized))
             return sized;
         traversals_.clear();
@@ -430,7 +443,7 @@ struct vram_shard_fanout {
         // Each shard is paired once, taking the next context of its stream.
         std::size_t paired_before[gpu_devices_capacity_k] = {};
         for (std::size_t shard = 0; shard != count; ++shard) {
-            std::size_t const stream = stream_at[device_of_(shards_, shard)];
+            std::size_t const stream = stream_at_[device_of_(shards_, shard)];
             traversals_.push_back_reserved(&executor_.stream(stream).memory.contexts[paired_before[stream]++]);
         }
         return status_code_t::success_k;
@@ -459,6 +472,10 @@ struct vram_shard_fanout {
 
     /** One of the executor's persistent contexts per shard, valid while the claim holds. */
     growing_buffer<traversal_context_t*, forkunion_allocator_t> traversals_;
+
+    /** The position of the stream on each device in the executor, as @ref reserve_paired_ found it
+     *  once per call, which pairing and the joins read. */
+    std::size_t stream_at_[gpu_devices_capacity_k] = {};
 
     /** The widest shard's traversal bytes @ref begin sized every run for, per shard it serves,
      *  which each await's outputs carve beside. */

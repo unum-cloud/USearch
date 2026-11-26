@@ -81,8 +81,14 @@ func main() {
 		log.Fatal(err)
 	}
 
-	found, _ := matches.Query(0)
-	foundLocally, _ := local.Query(0)
+	found, _, err := matches.Query(0)
+	if err != nil {
+		log.Fatal(err)
+	}
+	foundLocally, _, err := local.Query(0)
+	if err != nil {
+		log.Fatal(err)
+	}
 	fmt.Println(found[0], foundLocally[0])
 }
 ```
@@ -174,7 +180,7 @@ Each call rewinds its arena, so the previous call's views die and a steady loop 
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own.
 A view and every slice its accessors returned end at the arena's next call, or its `Close`, and nothing checks them after that.
-An arena from a VRAM executor holds device memory, which `Describe` reports and no Go code may read.
+An arena from a VRAM executor may hold device memory: `Describe` reports its `HostAccess`, and every view over memory the host may not read refuses with `StatusDevice`, while its Arrow exports stay open.
 It grows and frees on that executor's stream, so it serves only calls on that executor, any other finishing `StatusDevice`.
 An arena never outlives the executor that made it, so `defer executor.Close()` comes before `defer arena.Close()`, and an arena from `NewArena(nil)` lives until it is closed.
 
@@ -189,7 +195,10 @@ for _, batch := range batches {
 	if err != nil {
 		return err
 	}
-	keys, _ := matches.Query(0)
+	keys, _, err := matches.Query(0)
+	if err != nil {
+		return err
+	}
 	kept = append(kept, keys...) // a slice into the arena goes stale unchecked, so copy what outlives the loop
 }
 
@@ -198,7 +207,7 @@ defer found.Close()
 fetched, _ := usearch.NewArena(nil)
 defer fetched.Close()
 matches, _ := index.Search(query, 10, found, nil)
-neighbors, _ := matches.Query(0)
+neighbors, _, _ := matches.Query(0)
 for _, key := range neighbors {
 	vectors, _ := index.Get(key, usearch.ScalarF32, fetched) // rewinds fetched, never found
 	rerank(key, vectors)
@@ -301,7 +310,8 @@ In-memory buffers hold single monoliths only, through `SaveBuffer`, `DenseLoadRa
 
 ```go
 monolith, err := index.On(executor).SaveBuffer(arena, nil)
-restored, err := usearch.DenseLoadRamBuffer(monolith.Bytes(), nil)
+serialized, err := monolith.Bytes()
+restored, err := usearch.DenseLoadRamBuffer(serialized, nil)
 ```
 
 ## Dense Indexes
@@ -353,7 +363,10 @@ A search returns a `MatchesView` over its arena, holding up to `wanted` keys per
 
 ```go
 for query := range matches.Queries() {
-	found, distances := matches.Query(query)
+	found, distances, err := matches.Query(query)
+	if err != nil {
+		return err
+	}
 	for rank := range found {
 		fmt.Println(query, found[rank], distances[rank])
 	}
@@ -446,7 +459,15 @@ for {
 	if err != nil || batch.Written() == 0 {
 		break
 	}
-	consume(batch.Keys(), batch.Links(0))
+	keys, err := batch.Keys()
+	if err != nil {
+		return err
+	}
+	links, err := batch.Links(0)
+	if err != nil {
+		return err
+	}
+	consume(keys, links)
 }
 ```
 
@@ -466,7 +487,10 @@ for accepted := 0; accepted < 10; {
 	if err != nil {
 		return err
 	}
-	found, _ := matches.Query(0)
+	found, _, err := matches.Query(0)
+	if err != nil {
+		return err
+	}
 	if len(found) == 0 {
 		break // the walk is drained
 	}
@@ -544,9 +568,9 @@ Equal seeds, shown keys and focus draw equally, and a larger `wanted` draws a su
 draws, err := index.On(executor).Sample(256, arena, &usearch.DenseSampleConfig{
 	Shown: shown, ShownCoordinates: places, Focus: near, Seed: 42,
 })
-keys := draws.Keys()
-entryOrdinals := draws.EntryOrdinals()
-parent, distance := draws.Parents().Query(0) // empty for a root
+keys, err := draws.Keys()
+entryOrdinals, err := draws.EntryOrdinals()
+parent, distance, err := draws.Parents().Query(0) // empty for a root
 points, err := usearch.DenseValues[float32](draws.Coordinates())
 ```
 
@@ -558,7 +582,10 @@ It runs on an inner-product index alone, and its keys, products and row offsets 
 ```go
 products, err := index.On(executor).Multiply(usearch.RowsOf(left, dimensions), arena, &usearch.DenseMultiplyConfig{Wanted: 64})
 for row := range products.Queries() {
-	columns, scores := products.Query(row)
+	columns, scores, err := products.Query(row)
+	if err != nil {
+		return err
+	}
 	accumulate(row, columns, scores)
 }
 ```
@@ -578,7 +605,10 @@ options.ValuesPerKey = 512
 
 documents, err := index.On(executor).Maxsim(usearch.RowsOf(tokens, dimensions), tokensPerQuery, 10, arena, nil)
 for query := range documents.Queries() {
-	keys, scores := documents.Query(query)
+	keys, scores, err := documents.Query(query)
+	if err != nil {
+		return err
+	}
 	rerank(query, keys, scores)
 }
 ```
@@ -642,7 +672,7 @@ if err := index.Insert(keys, words, nil); err != nil {
 }
 
 matches, err := index.Search(usearch.SequencesOf([]byte("sittin")), 1, arena, nil)
-found, distances := matches.Query(0) // key 2, one edit away
+found, distances, err := matches.Query(0) // key 2, one edit away
 ```
 
 `SequenceMetricNeedlemanWunsch` takes `SequenceWeights`, a 256 × 256 substitution matrix with a gap cost, and `SequenceMetricOverlap` takes `WindowWidths`; every load and view names the weights again, since no checkpoint records them.
@@ -669,7 +699,7 @@ if err := index.Insert(keys, usearch.ShapesOf(pair, triple), nil); err != nil {
 
 probe := []float32{0, 0, 0, 1.0, 0, 0}
 matches, err := index.Search(usearch.ShapesOf(probe), 1, arena, nil)
-found, _ := matches.Query(0) // key 1
+found, _, err := matches.Query(0) // key 1
 ```
 
 The metrics are Chamfer, Hausdorff, Gromov-Wasserstein and Wasserstein-Procrustes, over `f16` or `f32` storage, whatever scalar the points arrive in.
@@ -699,7 +729,7 @@ if err := index.Insert(keys, stops, nil); err != nil {
 }
 
 nearby, err := index.Within(stops[:1], usearch.GeospatialRelationNear, 500, arena, nil)
-found, chords := nearby.Query(0) // both stops within 500 metres, in chord metres
+found, chords, err := nearby.Query(0) // both stops within 500 metres, in chord metres
 ```
 
 `Within` reports every entry the relation admits inside the radius, however many, as one `MatchesTape` whose `Written` counts them all, while `Search` ranks the `wanted` nearest, a zero `Metres` ranking by distance alone.
@@ -708,7 +738,7 @@ The relation is an argument of each call: `Near` widens the radius by both posit
 
 ## Apache Arrow
 
-The converters of `c/usearch/arrow.h` view an Arrow column as a verb's input in place, and export what a call wrote into an arena as a column in place, living until the arena's next call or close:
+The converters of `c/usearch/arrow.h` view an Arrow column as a verb's input in place, and export what a call wrote into an arena as a column in place. An export pins its arena until the array is released: every call naming the arena answers `StatusContended`, and so does `Close`, which frees nothing and can be retried:
 
 ```go
 vectors, err := index.Get(usearch.KeyFromUint64(42), usearch.ScalarF32, arena)

@@ -60,7 +60,7 @@ func TestSequenceSearchFindsTheInsertedEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the search must run: %v", err)
 	}
-	if keys, distances := matches.Query(0); len(keys) != 1 || keys[0] != KeyFromUint64(2) || distances[0] != 0 {
+	if keys, distances, _ := matches.Query(0); len(keys) != 1 || keys[0] != KeyFromUint64(2) || distances[0] != 0 {
 		t.Errorf("the search found %v at %v", keys, distances)
 	}
 	if stats, err := index.Count(KeyFromUint64(2)); err != nil || stats.Entries != 1 || stats.TotalBytes != 7 {
@@ -184,7 +184,11 @@ func TestSequenceCursorsWalkEveryEntryOnce(t *testing.T) {
 		if batch.Written() == 0 {
 			break
 		}
-		for _, key := range batch.Keys() {
+		pulled, err := batch.Keys()
+		if err != nil {
+			t.Fatalf("the batch must read: %v", err)
+		}
+		for _, key := range pulled {
 			seen[key] = true
 		}
 	}
@@ -216,12 +220,16 @@ func TestSequenceSavesAndLoads(t *testing.T) {
 	if _, err := SequenceMetadataRead(path, nil); err != nil {
 		t.Errorf("the checkpoint's metadata must read: %v", err)
 	}
-	if _, err := SequenceMetadataReadBuffer(monolith.Bytes(), nil); err != nil {
+	buffer, err := monolith.Bytes()
+	if err != nil {
+		t.Fatalf("the monolith must read: %v", err)
+	}
+	if _, err := SequenceMetadataReadBuffer(buffer, nil); err != nil {
 		t.Errorf("the monolith's metadata must read: %v", err)
 	}
 	loaded := []func() (*SequenceIndex, error){
 		func() (*SequenceIndex, error) { return SequenceLoadRam(path, nil, nil) },
-		func() (*SequenceIndex, error) { return SequenceLoadRamBuffer(monolith.Bytes(), nil, nil) },
+		func() (*SequenceIndex, error) { return SequenceLoadRamBuffer(buffer, nil, nil) },
 		func() (*SequenceIndex, error) { return SequenceViewRam(path, nil) },
 	}
 	for position, load := range loaded {

@@ -117,7 +117,7 @@ Each call rewinds its arena, so the previous call's views die and a steady loop 
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own, and a call naming an arena that serves another call finishes with `Status.Contended`.
 A view ends at its arena's next call or disposal, so read it before then.
-An arena's `Describe()` says where it lives, and one from a VRAM executor holds device memory, whose views are for device code alone.
+An arena's `Describe()` says where it lives and whether the host may read it: views over device memory refuse every host read with `Status.Device`.
 It grows, fills and frees on that executor's first stream, so it serves only calls on that executor and holds it open until disposed; free every arena before its executor, while one made without an executor lives until it is freed.
 
 ```csharp

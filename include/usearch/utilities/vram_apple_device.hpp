@@ -868,6 +868,16 @@ struct metal_executor_t {
         }
 
         /**
+         *  @brief Orders this stream after everything @p other committed so far. Metal has no
+         *      event entry here, so it waits on @p other from the host, and the follow is done
+         *      once it returns.
+         *
+         *  @par Statuses:
+         *  - @c device_k @p other names no device, or the device failed its work.
+         */
+        status_t follow(stream_t& other) noexcept { return other.wait(); }
+
+        /**
          *  @brief Allocates @p bytes of shared storage on this stream's device through its buffer
          *      registry, answering their host address, which kernels reach too.
          *
@@ -1105,28 +1115,53 @@ struct metal_shared_allocator_t {
 };
 
 /** Memory that one call at a time rewinds and refills for one Apple device: the Apple alternative
- *  of @ref gpu_arena_t. Memory is unified, so host pages are the device's and an upload is a copy;
- *  it still serves only the executor that made it, as every vendor's arena does. */
+ *  of @ref gpu_arena_t. It grows Shared @c MTLBuffer chunks on the device, each at least twice the
+ *  last, and hands out their contents, which the host and the device both read; it still serves
+ *  only the executor that made it, as every vendor's arena does. */
 struct metal_device_arena_t {
 
-    /** Takes the device of the executor's @p stream; a template only because that @c stream_t is
-     *  declared after it. */
+    /** Grows on the device of the executor's @p stream; a template only because that @c stream_t
+     *  is declared after it. */
     template <typename stream_type_>
-    explicit metal_device_arena_t(stream_type_ const& stream) noexcept : device_(static_cast<int>(stream.ordinal)) {}
+    explicit metal_device_arena_t(stream_type_ const& stream) noexcept : allocator_(stream) {}
 
-    /** Carves @p count values, or null when the arena cannot grow. */
+    /** Carves @p count values from the newest chunk, opening a wider one when they do not fit, or
+     *  null when the device refuses it. */
     template <typename value_type_>
     value_type_* allocate(std::size_t count) noexcept {
-        return reinterpret_cast<value_type_*>(memory_.allocate(count * sizeof(value_type_), default_alignment_k));
+        if (wraps_on_multiply(count, sizeof(value_type_))) return nullptr;
+        std::size_t const bytes = count * sizeof(value_type_);
+        if (!chunks_.empty()) {
+            std::size_t const start = round_up_to_multiple(used_, default_alignment_k);
+            if (start <= chunks_.back().bytes && bytes <= chunks_.back().bytes - start)
+                return used_ = start + bytes, reinterpret_cast<value_type_*>(chunks_.back().host + start);
+        }
+        std::size_t const width = chunks_.empty() ? bytes : max_of(bytes, 2 * chunks_.back().bytes);
+        metal_buffer_t opened = allocator_.allocate(width);
+        if (!opened || failed(chunks_.push_back(std::move(opened)))) return nullptr;
+        used_ = bytes;
+        return reinterpret_cast<value_type_*>(chunks_.back().host);
     }
 
-    /** Whether @p address lies in memory handed out since the last @ref clear. */
-    bool contains(void const* address) const noexcept { return memory_.contains(address); }
+    /** Whether @p address lies in memory handed out since the last @ref clear: the older chunks
+     *  whole, and the newest up to its last carve. */
+    bool contains(void const* address) const noexcept {
+        byte_t const* const byte = static_cast<byte_t const*>(address);
+        for (std::size_t chunk = 0; chunk != chunks_.size(); ++chunk) {
+            std::size_t const handed = chunk + 1 == chunks_.size() ? used_ : chunks_[chunk].bytes;
+            if (byte >= chunks_[chunk].host && byte < chunks_[chunk].host + handed) return true;
+        }
+        return false;
+    }
 
-    /** Rewinds the arena, so the previous call's outputs die. */
-    void clear() noexcept { memory_.clear(); }
+    /** Rewinds the arena, so the previous call's outputs die, keeping only its widest chunk. */
+    void clear() noexcept {
+        if (chunks_.size() > 1) chunks_[0] = chunks_.pop_back();
+        while (chunks_.size() > 1) chunks_.pop_back();
+        used_ = 0;
+    }
 
-    /** Copies @p bytes from @p source to @p destination in the arena; unified memory needs no
+    /** Copies @p bytes from @p source to @p destination in the arena; Shared storage needs no
      *  stream, so the copy is done when it returns. */
     status_t upload(void* destination, void const* source, std::size_t bytes) noexcept {
         std::memcpy(destination, source, bytes);
@@ -1136,11 +1171,16 @@ struct metal_device_arena_t {
     /** Every upload already arrived, so there is nothing to wait for. */
     status_t wait() noexcept { return status_code_t::success_k; }
 
-    int device() const noexcept { return device_; }
+    int device() const noexcept { return allocator_.device(); }
 
   private:
-    growing_arena<> memory_ {global_allocator};
-    int device_ = 0;
+    [[no_unique_address]] metal_shared_allocator_t allocator_;
+
+    /** The Shared buffers handed out since the last rewind, oldest first, each twice the last. */
+    growing_buffer<metal_buffer_t> chunks_ {global_allocator};
+
+    /** Bytes of the newest chunk handed out, padding included. */
+    std::size_t used_ = 0;
 };
 
 /** Bytes of threadgroup memory one GPU core keeps to itself on the smallest of @p executor 's

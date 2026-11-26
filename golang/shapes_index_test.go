@@ -68,7 +68,7 @@ func TestShapesSearchFindsTheInsertedEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the search must run: %v", err)
 	}
-	if keys, _ := matches.Query(0); len(keys) != 1 || keys[0] != KeyFromUint64(3) {
+	if keys, _, _ := matches.Query(0); len(keys) != 1 || keys[0] != KeyFromUint64(3) {
 		t.Errorf("the search found %v", keys)
 	}
 	if stats, err := index.Count(KeyFromUint64(3)); err != nil || stats.Entries != 1 || stats.TotalPoints != 13 {
@@ -185,7 +185,11 @@ func TestShapesCursorsWalkEveryEntryOnce(t *testing.T) {
 		if batch.Written() == 0 {
 			break
 		}
-		for _, key := range batch.Keys() {
+		pulled, err := batch.Keys()
+		if err != nil {
+			t.Fatalf("the batch must read: %v", err)
+		}
+		for _, key := range pulled {
 			seen[key] = true
 		}
 	}
@@ -217,12 +221,16 @@ func TestShapesSavesAndLoads(t *testing.T) {
 	if _, err := ShapesMetadataRead(path, nil); err != nil {
 		t.Errorf("the checkpoint's metadata must read: %v", err)
 	}
-	if _, err := ShapesMetadataReadBuffer(monolith.Bytes(), nil); err != nil {
+	buffer, err := monolith.Bytes()
+	if err != nil {
+		t.Fatalf("the monolith must read: %v", err)
+	}
+	if _, err := ShapesMetadataReadBuffer(buffer, nil); err != nil {
 		t.Errorf("the monolith's metadata must read: %v", err)
 	}
 	loaded := []func() (*ShapesIndex, error){
 		func() (*ShapesIndex, error) { return ShapesLoadRam(path, nil) },
-		func() (*ShapesIndex, error) { return ShapesLoadRamBuffer(monolith.Bytes(), nil) },
+		func() (*ShapesIndex, error) { return ShapesLoadRamBuffer(buffer, nil) },
 		func() (*ShapesIndex, error) { return ShapesViewRam(path) },
 	}
 	for position, load := range loaded {

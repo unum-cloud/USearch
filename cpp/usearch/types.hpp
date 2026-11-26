@@ -661,9 +661,16 @@ expected<owner_type_> opened_(void (*verb)(arguments_type_*), arguments_type_ ar
     return opened_<owner_type_>(verb, arguments, field, executor);
 }
 
-/** Owns one arena; every call writing outputs into it rewinds it first. */
+/** Frees @p arena as its owner dies, which an open export of its outputs refuses, leaving it to the
+ *  export's holder, who closes every export before the owner dies. */
+inline void free_arena(usearch_arena_t arena) noexcept {
+    [[maybe_unused]] usearch_status_t const freed = usearch_arena_free(arena);
+}
+
+/** Owns one arena; every call writing outputs into it rewinds it first. It has to outlive every
+ *  Arrow array exported from it, since a free refused while one is open leaves it allocated. */
 class arena_t {
-    owner<usearch_arena_t, usearch_arena_free> owner_;
+    owner<usearch_arena_t, free_arena> owner_;
 
   public:
     usearch_arena_t handle() const noexcept { return owner_.handle(); }

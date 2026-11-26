@@ -89,6 +89,30 @@ export enum Residency {
   Nvme = "nvme",
 }
 
+/** The vendor whose runtime drives a GPU, as `usearch_gpu_vendor_t` names it.
+ *  @enum {string}
+ *  @readonly */
+export enum GpuVendor {
+  /** No vendor, as host pages report. */
+  Unknown = "unknown",
+  /** NVIDIA, through the CUDA driver. */
+  Nvidia = "nvidia",
+  /** AMD, through the HIP runtime. */
+  Amd = "amd",
+  /** Apple, through Metal. */
+  Apple = "apple",
+}
+
+/** Whether host code may read an arena's outputs, as `usearch_host_access_t` names it.
+ *  @enum {string}
+ *  @readonly */
+export enum HostAccess {
+  /** Device memory: every verb that would view the outputs throws {@link Status.Device}. */
+  Refused = "refused",
+  /** Host, pinned, managed and Apple's shared memory, viewed in place. */
+  Readable = "readable",
+}
+
 /**
  *  How a search reaches the entries it scores.
  *  @enum {string}
@@ -468,8 +492,8 @@ export const Executor = compiled.Executor as ExecutorConstructor;
  *  A `Vram` arena grows, fills and frees on its executor's first stream, so it serves only calls on
  *  that executor and keeps it alive until freed; every arena is freed before its executor. */
 export interface Arena extends Disposable {
-  /** Where its outputs live, as the executor that made it decided; the views of a `Vram` arena hold
-   *  device memory, which only device code reads. */
+  /** Where its outputs live, as the executor that made it decided; a verb whose outputs land in an
+   *  arena the host cannot read throws {@link Status.Device} rather than view device memory. */
   describe(): ArenaDescription;
 
   /** Releases the memory now, once every deferred call writing it is final; a second call does
@@ -481,8 +505,14 @@ export interface Arena extends Disposable {
 export interface ArenaDescription {
   /** `Ram` for host pages, `Vram` for one device's memory. */
   residency: Residency;
-  /** The ordinal of the device holding a `Vram` arena; `null` for host pages. */
+  /** The device's position in the GPU listing; `null` for host pages. */
   device: number | null;
+  /** The vendor whose memory it is, as that listing reports; `GpuVendor.Unknown` for host pages. */
+  vendor: GpuVendor;
+  /** The vendor's own device number, which Arrow and DLPack name; `null` for host pages. */
+  vendorOrdinal: number | null;
+  /** Whether host code may read the outputs; when refused, verbs throw rather than view them. */
+  hostAccess: HostAccess;
 }
 
 /** Makes an arena where `executor` computes, or host pages for calls on the calling

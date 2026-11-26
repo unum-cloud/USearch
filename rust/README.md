@@ -155,7 +155,7 @@ Each call rewinds its arena, so the previous call's views die and a steady loop 
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own.
 Every call, blocking or deferred, borrows the arena as `&mut Arena<'_>` and its result borrows it in turn, so the borrow checker refuses a stale view at compile time and keeps a call's inputs out of the arena it rewinds.
-An arena from a VRAM executor holds device memory, which host accessors must not read; `Arena::describe` says where an arena's outputs live.
+An arena from a VRAM executor may hold device memory, which every host accessor refuses with `Status::Device`, while Arrow exports still hand it to device code; `Arena::describe` says where an arena's outputs live and whether the host may read them.
 It grows, fills and frees on that executor's first stream, so it serves only calls on that executor, any other refused with `Status::Device`.
 An `Arena<'executor>` borrows the executor that made it, so the borrow checker drops every arena before its executor, and `Arena::new()` is an `Arena<'static>`.
 
@@ -188,7 +188,7 @@ for matches in futures::executor::block_on(futures::future::join_all(calls)) {
 ```
 
 The library never frees an arena under a call: dropping one waits for the calls writing into it, and a call naming an arena that serves another call finishes with `Status::Contended` and rewinds nothing, so even a leaked `Deferred` leaves it safe.
-An arena's `describe()` says where it lives, and on which device.
+An arena's `describe()` says where it lives, on which device and vendor, and whether the host may read it.
 Fixed-size reports, such as stats, descriptions and `required`, stay plain values, and so does state you hold between calls, like the attention `carry`.
 
 ## Keys
@@ -273,7 +273,7 @@ In-memory buffers hold single monoliths only, through `save_buffer`, `load_ram_b
 ```rust
 let mut arena = Arena::new_in(&executor)?;
 let monolith = index.on(&executor).save_buffer(&mut arena)?;
-let restored = DenseIndex::load_ram_buffer(monolith.view())?;
+let restored = DenseIndex::load_ram_buffer(monolith.view()?)?;
 ```
 
 ## Dense Indexes
@@ -338,7 +338,7 @@ println!("{} distances computed", stats.computed_distances);
 `query` pairs one query's keys with its distances, nearest first and trimmed to the cells the call wrote, and `iter` walks every query in order.
 
 ```rust
-for query in matches.iter() {
+for query in matches.iter()? {
     for (key, distance) in query.keys.iter().zip(query.distances) {
         println!("{key} at {distance}");
 }
@@ -422,7 +422,7 @@ let mut cursor = index.cursor(&[])?;
 loop {
     let batch = cursor.on(&executor).next_links(1024, &mut arena)?;
     if batch.written() == 0 { break; }
-    println!("{} keys, the first linking to {:?}", batch.keys().len(), batch.links(0)?);
+    println!("{} keys, the first linking to {:?}", batch.keys()?.len(), batch.links(0)?);
 }
 ```
 
@@ -504,7 +504,7 @@ let drawn = index.on(&executor).sample(
     &mut arena,
     DenseSampleConfig { shown: &shown, shown_coordinates: &xyz, focus: &near, seed: 42, ..Default::default() },
 )?;
-let (keys, places) = (drawn.keys(), drawn.coordinates());
+let (keys, places) = (drawn.keys()?, drawn.coordinates()?);
 ```
 
 ### Sparse Multiplication
@@ -519,7 +519,7 @@ The run's Apache Arrow offsets land in the arena beside the keys and products.
 ```rust
 let mut arena = Arena::new_in(&executor)?;
 let products = index.on(&executor).multiply(&rows(&left, 768)?, 32, &mut arena)?;
-for row in products.iter() {
+for row in products.iter()? {
     println!("{} pairs", row.keys.len());
 }
 ```
@@ -532,7 +532,7 @@ Each query lands its best documents, largest score first, in the same ragged `De
 
 ```rust
 let documents = index.on(&executor).maxsim(&rows(&tokens, 768)?, tokens_per_query, 10, &mut arena)?;
-for query in documents.iter() {
+for query in documents.iter()? {
     println!("best {:?} of {} documents", query.keys.first(), query.keys.len());
 }
 ```

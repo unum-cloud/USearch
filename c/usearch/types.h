@@ -1618,24 +1618,81 @@ typedef struct usearch_arena_init_t {
 USEARCH_EXPORT void usearch_arena_init(usearch_arena_init_t* arguments);
 
 /**
- *  @brief Frees the arena and every output in it; @c NULL is safe, and it cannot fail, so takes no
- *      outcome.
- *  @param[in,out] arena The arena to be freed; invalid afterwards.
+ *  @brief Frees the arena and every output in it, unless a consumer still holds an export of them;
+ *      @c NULL is safe.
+ *  @param[in,out] arena The arena to be freed; invalid afterwards, unless the free was refused.
  *
  *  Waits out every executor call naming the handle; never call it from their callbacks.
  *  Free a GPU arena once the caller's own device work on its outputs has finished, keeping the
  *  rule @ref usearch_arena_t notes.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_contended_k An export of the arena's outputs is open, so nothing was freed;
+ *    free it again once @ref usearch_arena_export_close closed the last one.
  */
-USEARCH_EXPORT void usearch_arena_free(usearch_arena_t arena);
+USEARCH_EXPORT usearch_status_t usearch_arena_free(usearch_arena_t arena);
 
-/** Where an arena's outputs live. */
+/**
+ *  @brief Counts one more live export of the outputs @p arena holds now, which a binding opens when
+ *      it hands a view of them to a consumer, so no call rewinds them and no free frees them.
+ *
+ *  While any export is open, every call naming the arena answers @c usearch_status_contended_k
+ *  before it claims its executor, and @ref usearch_arena_free frees nothing; a describe still
+ *  answers. Close each export once, from the view's deleter or release callback.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_contended_k A call holds the arena, so its outputs are not final yet.
+ *  - @c usearch_status_invalid_argument_k A @c NULL arena.
+ *  - @c usearch_status_overflow_k The arena already counts @c UINT32_MAX exports.
+ */
+USEARCH_EXPORT usearch_status_t usearch_arena_export_open(usearch_arena_t arena);
+
+/** Ends one export @ref usearch_arena_export_open counted, from any thread and in any order; a
+ *  @c NULL arena or one counting none is left alone. */
+USEARCH_EXPORT void usearch_arena_export_close(usearch_arena_t arena);
+
+/** Whether host code may read an arena's pages. */
+typedef enum usearch_host_access_t {
+
+    /** Host code must not read the pages: CUDA or HIP device memory. */
+    usearch_host_access_refused_k = 0,
+
+    /** Host code may read the pages: host, page-locked, managed and Apple's shared memory. */
+    usearch_host_access_readable_k = 1,
+} usearch_host_access_t;
+
+/**
+ *  @brief Where an arena's outputs live, and whether host code may read them.
+ *
+ *  The device type an export reports derives from these fields alone, here and nowhere else:
+ *  - @c usearch_residency_vram_k with @c usearch_host_access_refused_k is device memory:
+ *    @c kDLCUDA or @c kDLROCM, @c ARROW_DEVICE_CUDA or @c ARROW_DEVICE_ROCM;
+ *  - @c usearch_residency_vram_k with @c usearch_host_access_readable_k is managed memory on
+ *    NVIDIA, @c kDLCUDAManaged and @c ARROW_DEVICE_CUDA_MANAGED, and shared memory on Apple,
+ *    @c kDLMetal and @c ARROW_DEVICE_METAL;
+ *  - @c usearch_residency_ram_k with a @c device of 0 or more is page-locked for that device:
+ *    @c kDLCUDAHost or @c kDLROCMHost, @c ARROW_DEVICE_CUDA_HOST or @c ARROW_DEVICE_ROCM_HOST;
+ *  - @c usearch_residency_ram_k with a @c device of -1 is plain host memory: @c kDLCPU and
+ *    @c ARROW_DEVICE_CPU.
+ *
+ *  The CUDA Array Interface covers NVIDIA device and managed memory only.
+ */
 typedef struct usearch_arena_description_t {
 
     /** RAM for host pages, VRAM for one device's memory. */
     usearch_residency_t residency;
 
-    /** The device's position in @c usearch_gpu_devices, on VRAM; 0 for host pages. */
-    size_t device;
+    /** The device's position in @c usearch_gpu_devices, or -1 for host pages. */
+    int32_t device;
+
+    /** The device's vendor, as @c usearch_gpu_devices reports it; unknown for host pages. */
+    usearch_gpu_vendor_t vendor;
+
+    /** The vendor's own number for the device, or -1 for host pages. */
+    int32_t vendor_ordinal;
+
+    /** Whether host code may read the pages. */
+    usearch_host_access_t host_access;
 } usearch_arena_description_t;
 
 /** The arguments of @c usearch_arena_describe. */
@@ -1685,6 +1742,9 @@ USEARCH_EXPORT char const* usearch_residency_name(usearch_residency_t residency)
 /** Reads a residency back into @p residency, or fails with @c usearch_status_invalid_argument_k. */
 USEARCH_EXPORT usearch_status_t usearch_residency_from_name(usearch_bytes_view_t name, usearch_residency_t* residency);
 
+/** The canonical spelling of a host access: @c usearch_host_access_refused_k spells "refused". */
+USEARCH_EXPORT char const* usearch_host_access_name(usearch_host_access_t host_access);
+
 /** The canonical spelling of a traversal, as @c usearch_traversal_scan_k spells "scan". */
 USEARCH_EXPORT char const* usearch_traversal_name(usearch_traversal_t traversal);
 
@@ -1733,6 +1793,9 @@ USEARCH_EXPORT char const* usearch_gpu_class_name(usearch_gpu_class_t gpu_class)
 
 /** Reads a GPU class back into @p gpu_class, or fails with @c usearch_status_invalid_argument_k. */
 USEARCH_EXPORT usearch_status_t usearch_gpu_class_from_name(usearch_bytes_view_t name, usearch_gpu_class_t* gpu_class);
+
+/** The canonical spelling of a GPU vendor, as @c usearch_gpu_vendor_nvidia_k spells "nvidia". */
+USEARCH_EXPORT char const* usearch_gpu_vendor_name(usearch_gpu_vendor_t vendor);
 
 /** The canonical spelling of an NVMe class, as the I/O engine ladder names its rungs. */
 USEARCH_EXPORT char const* usearch_nvme_class_name(usearch_nvme_class_t nvme_class);

@@ -745,14 +745,14 @@ static usearch_arena_t call_arena(call_t* call, MArgument argument) {
     if (!call_ready(call)) return NULL;
     usearch_arena_t const arena = (usearch_arena_t)handles_find(&arenas, MArgument_getInteger(argument));
     if (!arena) return call_refuse(call, usearch_status_uninitialized_k, "the Arena was released"), NULL;
-    usearch_arena_description_t description = {usearch_residency_ram_k, 0};
+    usearch_arena_description_t description = {0};
     usearch_outcome_t described = {usearch_status_success_k, NULL};
     usearch_arena_describe(
         &(usearch_arena_describe_t) {.arena = arena, .outcome = &described, .description = &description});
     if (described.status != usearch_status_success_k)
         return call_refuse(call, described.status, described.message), NULL;
-    if (description.residency == usearch_residency_vram_k)
-        return call_refuse(call, usearch_status_device_k, "the Arena holds VRAM, which the kernel cannot read"), NULL;
+    if (description.host_access != usearch_host_access_readable_k)
+        return call_refuse(call, usearch_status_device_k, "the outputs are memory the host may not read"), NULL;
     return arena;
 }
 
@@ -912,7 +912,8 @@ static void manage_executor(WolframLibraryData library_data, mbool mode, mint id
     else usearch_executor_free((usearch_executor_t)handles_release(&executors, id));
 }
 
-/** Frees a released arena and every output in it. */
+/** Frees a released arena and every output in it. The free refuses only while an Arrow export of
+ *  the outputs is open, and the kernel copies every output instead, so its status is dropped. */
 static void manage_arena(WolframLibraryData library_data, mbool mode, mint id) {
     if (!mode) handles_admit(&arenas, id, empty_slot);
     else usearch_arena_free((usearch_arena_t)handles_release(&arenas, id));
@@ -1190,14 +1191,14 @@ EXTERN_C DLLEXPORT int ArenaInit(WolframLibraryData library_data, mint arguments
     return answer_outcome(library_data, &outcome, result);
 }
 
-/** Calls @c usearch_arena_describe: @c arena → @c Residency, its canonical name, and @c Device, -1
- *  for host pages. */
+/** Calls @c usearch_arena_describe: @c arena → @c Residency, its canonical name, @c Device and
+ *  @c VendorOrdinal, -1 for host pages, @c Vendor and @c HostAccess, "readable" or "refused". */
 EXTERN_C DLLEXPORT int ArenaDescribe(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                      MArgument result) {
     usearch_arena_t const arena = (usearch_arena_t)handles_find(&arenas, MArgument_getInteger(arguments[0]));
     if (!arena) return answer_failure(library_data, usearch_status_uninitialized_k, "the Arena was released", result);
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
-    usearch_arena_description_t description = {usearch_residency_ram_k, 0};
+    usearch_arena_description_t description = {0};
     usearch_arena_describe(
         &(usearch_arena_describe_t) {.arena = arena, .outcome = &outcome, .description = &description});
     if (outcome.status != usearch_status_success_k) return answer_outcome(library_data, &outcome, result);
@@ -1205,8 +1206,10 @@ EXTERN_C DLLEXPORT int ArenaDescribe(WolframLibraryData library_data, mint argum
     if (answered != LIBRARY_NO_ERROR) return answered;
     DataStore const store = MArgument_getDataStore(result);
     store_text(library_data, store, "Residency", usearch_residency_name(description.residency));
-    mint const device = description.residency == usearch_residency_vram_k ? (mint)description.device : -1;
-    library_data->ioLibraryFunctions->DataStore_addNamedInteger(store, "Device", device);
+    library_data->ioLibraryFunctions->DataStore_addNamedInteger(store, "Device", description.device);
+    store_text(library_data, store, "Vendor", usearch_gpu_vendor_name(description.vendor));
+    library_data->ioLibraryFunctions->DataStore_addNamedInteger(store, "VendorOrdinal", description.vendor_ordinal);
+    store_text(library_data, store, "HostAccess", usearch_host_access_name(description.host_access));
     return LIBRARY_NO_ERROR;
 }
 

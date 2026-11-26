@@ -1761,16 +1761,36 @@ void test_arenas(size_t const dimensions) {
     if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return;
     expect_at(matches.counts[0] == 2, __FILE__, __LINE__, "An arena of host pages serves a call on the calling thread");
 
-    usearch_arena_description_t description = {usearch_residency_unknown_k, 1};
+    usearch_arena_description_t description = {usearch_residency_unknown_k, 1, usearch_gpu_vendor_nvidia_k, 1,
+                                               usearch_host_access_refused_k};
     usearch_arena_describe(
         &(usearch_arena_describe_t) {.arena = local, .outcome = &outcome, .description = &description});
     if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return;
-    expect_at(description.residency == usearch_residency_ram_k && description.device == 0, __FILE__, __LINE__,
-              "An arena made without an executor is host pages");
+    expect_at(description.residency == usearch_residency_ram_k && description.device == -1 &&
+                  description.vendor == usearch_gpu_vendor_unknown_k && description.vendor_ordinal == -1 &&
+                  description.host_access == usearch_host_access_readable_k,
+              __FILE__, __LINE__, "An arena made without an executor is readable host pages on no device");
     usearch_arena_describe(
         &(usearch_arena_describe_t) {.arena = NULL, .outcome = &outcome, .description = &description});
     expect_at(outcome.status == usearch_status_invalid_argument_k, __FILE__, __LINE__,
               "Describing a NULL arena is refused");
+
+    // An open export keeps the arena's outputs: no call rewinds it and no free frees it.
+    expect_at(usearch_arena_export_open(NULL) == usearch_status_invalid_argument_k, __FILE__, __LINE__,
+              "Exporting from a NULL arena is refused");
+    expect_at(usearch_arena_export_open(local) == usearch_status_success_k, __FILE__, __LINE__,
+              "A free arena's outputs export");
+    usearch_dense_search(&search);
+    expect_at(outcome.status == usearch_status_contended_k, __FILE__, __LINE__,
+              "A call naming an exported arena is refused");
+    expect_at(usearch_arena_free(local) == usearch_status_contended_k, __FILE__, __LINE__,
+              "Freeing an exported arena is refused");
+    usearch_arena_export_close(local);
+    usearch_arena_export_close(local);
+    usearch_arena_export_close(NULL);
+    usearch_dense_search(&search);
+    expect_at(outcome.status == usearch_status_success_k, __FILE__, __LINE__,
+              "A closed export lets calls rewind the arena again");
 
     size_t devices_count = 0;
     usearch_gpu_devices(&(usearch_gpu_devices_t) {.outcome = &outcome, .devices_count = &devices_count});
@@ -1785,8 +1805,20 @@ void test_arenas(size_t const dimensions) {
         usearch_arena_describe(
             &(usearch_arena_describe_t) {.arena = device_arena, .outcome = &outcome, .description = &description});
         if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return;
-        expect_at(description.residency == usearch_residency_vram_k && description.device == 0, __FILE__, __LINE__,
-                  "An arena made by a device executor lives on its first device");
+        usearch_gpu_device_t listed = {0};
+        size_t listed_count = 1;
+        usearch_gpu_devices(&(usearch_gpu_devices_t) {.outcome = &outcome,
+                                                      .devices = &listed,
+                                                      .devices_capacity = 1,
+                                                      .devices_count = &listed_count});
+        usearch_host_access_t const expected_access = listed.vendor == usearch_gpu_vendor_apple_k
+                                                          ? usearch_host_access_readable_k
+                                                          : usearch_host_access_refused_k;
+        expect_at(description.residency == usearch_residency_vram_k && description.device == 0 &&
+                      description.vendor == listed.vendor &&
+                      description.vendor_ordinal == (int32_t)listed.vendor_ordinal &&
+                      description.host_access == expected_access,
+                  __FILE__, __LINE__, "An arena made by a device executor lives on its first device");
         usearch_arena_free(device_arena);
         usearch_executor_free(device_executor);
     }
@@ -4987,7 +5019,8 @@ static void expect_named(bool holds, char const* what, char const* spelling, cha
  *  miss of a spelling - upper case, a trailing space or letter, the last letter dropped - and an
  *  empty or null view read back as @p unknown. Every value between the smallest and the largest
  *  enumerator that no row lists spells @p fallback, which reads back as @p unknown; a value past
- *  them would lie outside the range a C++ enumeration may hold.
+ *  them would lie outside the range a C++ enumeration may hold. A @c NULL @p from_name checks the
+ *  spellings alone, for an enum no caller passes in.
  */
 static void expect_names(char const* what, named_value_t const* table, size_t count, int unknown, char const* fallback,
                          char const* (*name_of)(int), int (*from_name)(usearch_bytes_view_t)) {
@@ -4999,9 +5032,10 @@ static void expect_names(char const* what, named_value_t const* table, size_t co
         smallest = table[row].value < smallest ? table[row].value : smallest;
         largest = table[row].value > largest ? table[row].value : largest;
         expect_named(strcmp(name_of(table[row].value), spelling) == 0, what, spelling, "the value spells it");
-        expect_named(from_name(text_view(spelling, length)) == table[row].value, what, spelling, "it reads back");
         for (size_t other = 0; other != row; ++other)
             expect_named(strcmp(table[other].spelling, spelling) != 0, what, spelling, "no other row spells it");
+        if (!from_name) continue;
+        expect_named(from_name(text_view(spelling, length)) == table[row].value, what, spelling, "it reads back");
 
         char near_miss[64];
         expect_named(length + 1 < sizeof(near_miss), what, spelling, "it fits the near-miss buffer");
@@ -5020,13 +5054,14 @@ static void expect_names(char const* what, named_value_t const* table, size_t co
         expect_named(from_name(text_view(spelling, length - 1)) == unknown, what, spelling,
                      "a dropped last letter is unknown");
     }
-    expect_named(from_name(text_view("", 0)) == unknown, what, "", "an empty view is unknown");
-    expect_named(from_name(text_view(NULL, 0)) == unknown, what, "", "a null view is unknown");
     for (int value = smallest; value <= largest; ++value) {
         bool listed = false;
         for (size_t row = 0; row != count; ++row) listed = listed || table[row].value == value;
         if (!listed) expect_named(strcmp(name_of(value), fallback) == 0, what, fallback, "an unlisted value spells it");
     }
+    if (!from_name) return;
+    expect_named(from_name(text_view("", 0)) == unknown, what, "", "an empty view is unknown");
+    expect_named(from_name(text_view(NULL, 0)) == unknown, what, "", "a null view is unknown");
     expect_named(from_name(text_view(fallback, strlen(fallback))) == unknown, what, fallback, "it reads back unknown");
 }
 
@@ -5044,6 +5079,11 @@ static char const* residency_name_of(int value) { return usearch_residency_name(
 static int residency_from_name(usearch_bytes_view_t name) {
     usearch_residency_t residency = (usearch_residency_t)0;
     return usearch_residency_from_name(name, &residency) == usearch_status_success_k ? (int)residency : -1;
+}
+static char const* host_access_name_of(int value) { return usearch_host_access_name((usearch_host_access_t)value); }
+static char const* gpu_vendor_name_of(int value) { return usearch_gpu_vendor_name((usearch_gpu_vendor_t)value); }
+static char const* relation_name_of(int value) {
+    return usearch_geospatial_relation_name((usearch_geospatial_relation_t)value);
 }
 static char const* traversal_name_of(int value) { return usearch_traversal_name((usearch_traversal_t)value); }
 static int traversal_from_name(usearch_bytes_view_t name) {
@@ -5123,18 +5163,33 @@ void test_names_round_trip_through_the_library_and_refuse_strangers(void) {
         {usearch_status_invalid_argument_k, "invalid-argument"},
     };
     named_value_t const scalars[] = {
-        {usearch_scalar_f64_k, "f64"},   {usearch_scalar_f32_k, "f32"},   {usearch_scalar_bf16_k, "bf16"},
-        {usearch_scalar_f16_k, "f16"},   {usearch_scalar_e5m2_k, "e5m2"}, {usearch_scalar_e4m3_k, "e4m3"},
-        {usearch_scalar_e3m2_k, "e3m2"}, {usearch_scalar_e2m3_k, "e2m3"}, {usearch_scalar_i8_k, "i8"},
-        {usearch_scalar_i4x2_k, "i4x2"}, {usearch_scalar_i32_k, "i32"},   {usearch_scalar_u8_k, "u8"},
-        {usearch_scalar_u4x2_k, "u4x2"}, {usearch_scalar_u1x8_k, "u1x8"},
+        {usearch_scalar_unknown_k, "unknown"}, {usearch_scalar_f64_k, "f64"},   {usearch_scalar_f32_k, "f32"},
+        {usearch_scalar_bf16_k, "bf16"},       {usearch_scalar_f16_k, "f16"},   {usearch_scalar_e5m2_k, "e5m2"},
+        {usearch_scalar_e4m3_k, "e4m3"},       {usearch_scalar_e3m2_k, "e3m2"}, {usearch_scalar_e2m3_k, "e2m3"},
+        {usearch_scalar_i8_k, "i8"},           {usearch_scalar_i4x2_k, "i4x2"}, {usearch_scalar_i32_k, "i32"},
+        {usearch_scalar_u8_k, "u8"},           {usearch_scalar_u4x2_k, "u4x2"}, {usearch_scalar_u1x8_k, "u1x8"},
     };
     named_value_t const residencies[] = {
+        {usearch_residency_unknown_k, "unknown"},
         {usearch_residency_ram_k, "ram"},
         {usearch_residency_vram_k, "vram"},
         {usearch_residency_nvme_k, "nvme"},
     };
-    named_value_t const traversals[] = {{usearch_traversal_walk_k, "walk"}, {usearch_traversal_scan_k, "scan"}};
+    named_value_t const host_accesses[] = {{usearch_host_access_refused_k, "refused"},
+                                           {usearch_host_access_readable_k, "readable"}};
+    named_value_t const traversals[] = {
+        {usearch_traversal_unknown_k, "unknown"},
+        {usearch_traversal_walk_k, "walk"},
+        {usearch_traversal_scan_k, "scan"},
+    };
+    named_value_t const gpu_vendors[] = {
+        {usearch_gpu_vendor_unknown_k, "unknown"},
+        {usearch_gpu_vendor_nvidia_k, "nvidia"},
+        {usearch_gpu_vendor_amd_k, "amd"},
+        {usearch_gpu_vendor_apple_k, "apple"},
+    };
+    // Spelled by value, as the library's own table is, from unknown on.
+    named_value_t const relations[] = {{0, "unknown"}, {1, "near"}, {2, "visible"}, {3, "sees"}, {4, "seen"}};
     named_value_t const moods[] = {{usearch_mood_parked_k, "parked"}, {usearch_mood_spinning_k, "spinning"}};
     named_value_t const verdicts[] = {
         {usearch_refine_none_k, "none"},           {usearch_refine_improved_k, "improved"},
@@ -5150,6 +5205,7 @@ void test_names_round_trip_through_the_library_and_refuse_strangers(void) {
         {usearch_phase_write_k, "write"},     {usearch_phase_done_k, "done"},
     };
     named_value_t const cpu_classes[] = {
+        {usearch_cpu_class_unknown_k, "unknown"},
         {usearch_cpu_class_serial_k, "serial"},
         {usearch_cpu_class_monoversioned_k, "monoversioned"},
         {usearch_cpu_class_intel_haswell_k, "intel-haswell"},
@@ -5171,6 +5227,7 @@ void test_names_round_trip_through_the_library_and_refuse_strangers(void) {
         {usearch_cpu_class_wasm64_extended_k, "wasm64-extended"},
     };
     named_value_t const gpu_classes[] = {
+        {usearch_gpu_class_unknown_k, "unknown"},
         {usearch_gpu_class_nvidia_ampere_k, "nvidia-ampere"},
         {usearch_gpu_class_nvidia_ada_k, "nvidia-ada"},
         {usearch_gpu_class_nvidia_hopper_k, "nvidia-hopper"},
@@ -5185,6 +5242,7 @@ void test_names_round_trip_through_the_library_and_refuse_strangers(void) {
         {usearch_gpu_class_apple_metal10_k, "apple-metal10"},
     };
     named_value_t const nvme_classes[] = {
+        {usearch_nvme_class_unknown_k, "unknown"},
         {usearch_nvme_class_posix_k, "posix"},
         {usearch_nvme_class_linux_aio_k, "linux-aio"},
         {usearch_nvme_class_linux_uring_k, "linux-uring"},
@@ -5193,17 +5251,19 @@ void test_names_round_trip_through_the_library_and_refuse_strangers(void) {
         {usearch_nvme_class_windows_ioring_k, "windows-ioring"},
     };
     named_value_t const dense_metrics[] = {
-        {usearch_dense_metric_inner_k, "inner"},         {usearch_dense_metric_angular_k, "angular"},
-        {usearch_dense_metric_euclidean_k, "euclidean"}, {usearch_dense_metric_hamming_k, "hamming"},
-        {usearch_dense_metric_jaccard_k, "jaccard"},
+        {usearch_dense_metric_unknown_k, "unknown"}, {usearch_dense_metric_inner_k, "inner"},
+        {usearch_dense_metric_angular_k, "angular"}, {usearch_dense_metric_euclidean_k, "euclidean"},
+        {usearch_dense_metric_hamming_k, "hamming"}, {usearch_dense_metric_jaccard_k, "jaccard"},
     };
     named_value_t const sequence_metrics[] = {
+        {usearch_sequence_metric_unknown_k, "unknown"},
         {usearch_sequence_metric_levenshtein_bytes_k, "levenshtein"},
         {usearch_sequence_metric_levenshtein_utf8_k, "levenshtein-utf8"},
         {usearch_sequence_metric_needleman_wunsch_k, "needleman-wunsch"},
         {usearch_sequence_metric_overlap_k, "overlap"},
     };
     named_value_t const shapes_metrics[] = {
+        {usearch_shapes_metric_unknown_k, "unknown"},
         {usearch_shapes_metric_chamfer_k, "chamfer"},
         {usearch_shapes_metric_hausdorff_k, "hausdorff"},
         {usearch_shapes_metric_gromov_wasserstein_k, "gromov-wasserstein"},
@@ -5213,15 +5273,21 @@ void test_names_round_trip_through_the_library_and_refuse_strangers(void) {
     // Parsers answering a status read a refused spelling as -1, which no enumerator holds.
     expect_names("status", statuses, sizeof(statuses) / row_bytes, -1, "unrecognized", status_name_of,
                  status_from_name);
-    expect_names("scalar", scalars, sizeof(scalars) / row_bytes, -1, "unknown", scalar_name_of, scalar_from_name);
-    expect_names("residency", residencies, sizeof(residencies) / row_bytes, -1, "unknown", residency_name_of,
+    expect_names("scalar", scalars, sizeof(scalars) / row_bytes, -1, "unrecognized", scalar_name_of, scalar_from_name);
+    expect_names("residency", residencies, sizeof(residencies) / row_bytes, -1, "unrecognized", residency_name_of,
                  residency_from_name);
-    expect_names("traversal", traversals, sizeof(traversals) / row_bytes, -1, "unknown", traversal_name_of,
+    expect_names("host access", host_accesses, sizeof(host_accesses) / row_bytes, -1, "unrecognized",
+                 host_access_name_of, NULL);
+    expect_names("GPU vendor", gpu_vendors, sizeof(gpu_vendors) / row_bytes, -1, "unrecognized", gpu_vendor_name_of,
+                 NULL);
+    expect_names("geospatial relation", relations, sizeof(relations) / row_bytes, -1, "unrecognized", relation_name_of,
+                 NULL);
+    expect_names("traversal", traversals, sizeof(traversals) / row_bytes, -1, "unrecognized", traversal_name_of,
                  traversal_from_name);
-    expect_names("mood", moods, sizeof(moods) / row_bytes, -1, "unknown", mood_name_of, mood_from_name);
-    expect_names("refine verdict", verdicts, sizeof(verdicts) / row_bytes, -1, "unknown", verdict_name_of,
+    expect_names("mood", moods, sizeof(moods) / row_bytes, -1, "unrecognized", mood_name_of, mood_from_name);
+    expect_names("refine verdict", verdicts, sizeof(verdicts) / row_bytes, -1, "unrecognized", verdict_name_of,
                  verdict_from_name);
-    expect_names("phase", phases, sizeof(phases) / row_bytes, -1, "unknown", phase_name_of, phase_from_name);
+    expect_names("phase", phases, sizeof(phases) / row_bytes, -1, "unrecognized", phase_name_of, phase_from_name);
     usearch_bytes_view_t const bogus = text_view("bogus", 5);
     usearch_status_t status = usearch_status_success_k;
     usearch_residency_t residency = usearch_residency_ram_k;
@@ -5238,17 +5304,17 @@ void test_names_round_trip_through_the_library_and_refuse_strangers(void) {
     expect_at(status == usearch_status_success_k && residency == usearch_residency_ram_k &&
                   traversal == usearch_traversal_walk_k && mood == usearch_mood_parked_k,
               __FILE__, __LINE__, "A refused spelling leaves its output alone");
-    expect_names("CPU class", cpu_classes, sizeof(cpu_classes) / row_bytes, -1, "unknown", cpu_class_name_of,
+    expect_names("CPU class", cpu_classes, sizeof(cpu_classes) / row_bytes, -1, "unrecognized", cpu_class_name_of,
                  cpu_class_from_name);
-    expect_names("GPU class", gpu_classes, sizeof(gpu_classes) / row_bytes, -1, "unknown", gpu_class_name_of,
+    expect_names("GPU class", gpu_classes, sizeof(gpu_classes) / row_bytes, -1, "unrecognized", gpu_class_name_of,
                  gpu_class_from_name);
-    expect_names("NVMe class", nvme_classes, sizeof(nvme_classes) / row_bytes, -1, "unknown", nvme_class_name_of,
+    expect_names("NVMe class", nvme_classes, sizeof(nvme_classes) / row_bytes, -1, "unrecognized", nvme_class_name_of,
                  nvme_class_from_name);
-    expect_names("dense metric", dense_metrics, sizeof(dense_metrics) / row_bytes, -1, "unknown", dense_metric_name_of,
-                 dense_metric_from_name);
-    expect_names("sequence metric", sequence_metrics, sizeof(sequence_metrics) / row_bytes, -1, "unknown",
+    expect_names("dense metric", dense_metrics, sizeof(dense_metrics) / row_bytes, -1, "unrecognized",
+                 dense_metric_name_of, dense_metric_from_name);
+    expect_names("sequence metric", sequence_metrics, sizeof(sequence_metrics) / row_bytes, -1, "unrecognized",
                  sequence_metric_name_of, sequence_metric_from_name);
-    expect_names("shapes metric", shapes_metrics, sizeof(shapes_metrics) / row_bytes, -1, "unknown",
+    expect_names("shapes metric", shapes_metrics, sizeof(shapes_metrics) / row_bytes, -1, "unrecognized",
                  shapes_metric_name_of, shapes_metric_from_name);
     usearch_scalar_t scalar = usearch_scalar_f32_k;
     usearch_nvme_class_t nvme_class = usearch_nvme_class_posix_k;
@@ -6050,6 +6116,8 @@ void test_arrow_rows_and_keys(void) {
         return;
     expect_at(viewed_keys.data == keys.data && viewed_keys.stride == sizeof(usearch_key_t) && viewed_count == 3,
               __FILE__, __LINE__, "An import views the very keys an export named");
+    expect_at(usearch_arena_free(arena) == usearch_status_contended_k, __FILE__, __LINE__,
+              "An arena an exported array still reads is not freed");
     release_column(&schema, &array);
 
     usearch_keys_view_t const strided = {(usearch_key_t const*)bytes, 2 * sizeof(usearch_key_t)};
@@ -6061,7 +6129,8 @@ void test_arrow_rows_and_keys(void) {
               __FILE__, __LINE__, "An export takes the arena's own outputs alone");
 
     usearch_sequence_free(index);
-    usearch_arena_free(arena);
+    expect_at(usearch_arena_free(arena) == usearch_status_success_k, __FILE__, __LINE__,
+              "Released and refused exports leave the arena free to go");
     usearch_executor_free(executor);
 }
 

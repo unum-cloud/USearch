@@ -20,6 +20,7 @@
 
 #include <bit>              // `std::bit_cast` - the softmax carry crossing the ABI
 #include <initializer_list> // `std::initializer_list` - the inputs a call checks against its arena
+#include <limits>           // `std::numeric_limits` - the cap on an arena's exports
 #include <memory>           // `std::unique_ptr` - the executor's topology
 #include <new>              // `std::nothrow`
 #include <span>             // `std::span` - key batches crossing the ABI
@@ -845,13 +846,15 @@ USEARCH_EXPORT char const* usearch_dense_metric_name(usearch_dense_metric_t metr
     case usearch_dense_metric_euclidean_k: return "euclidean";
     case usearch_dense_metric_hamming_k: return "hamming";
     case usearch_dense_metric_jaccard_k: return "jaccard";
-    default: return "unknown";
+    case usearch_dense_metric_unknown_k: return "unknown";
+    default: return "unrecognized";
     }
 }
 
 USEARCH_EXPORT usearch_status_t usearch_dense_metric_from_name(usearch_bytes_view_t name,
                                                                usearch_dense_metric_t* metric) {
     std::string_view const spelled {reinterpret_cast<char const*>(name.data), name.length};
+    if (spelled == "unknown") return *metric = usearch_dense_metric_unknown_k, usearch_status_success_k;
     for (int code = usearch_dense_metric_inner_k; code <= usearch_dense_metric_jaccard_k; ++code)
         if (spelled == usearch_dense_metric_name(static_cast<usearch_dense_metric_t>(code)))
             return *metric = static_cast<usearch_dense_metric_t>(code), usearch_status_success_k;
@@ -1632,15 +1635,45 @@ USEARCH_EXPORT void usearch_arena_init(usearch_arena_init_t* arguments) {
         if (util::gpu_executor_t* const devices = std::get_if<util::gpu_executor_t>(&arguments->executor->residency)) {
             arena->device_memory = util::gpu_arena_t::on(*devices);
             arena->executor = arguments->executor;
+            // Never taken: every VRAM executor is spawned over devices `gpu_devices` lists, and the
+            // runtime lists them once per process, so the arena's device always has a position.
+            if (arena_description(*arena).device < 0)
+                return delete arena,
+                       propagate_error(usearch_status_device_k, outcome, "The arena's device is not listed"), void();
         }
     *arguments->arena = arena;
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
-USEARCH_EXPORT void usearch_arena_free(usearch_arena_t arena) {
-    if (!arena) return;
+USEARCH_EXPORT usearch_status_t usearch_arena_free(usearch_arena_t arena) {
+    if (!arena) return usearch_status_success_k;
     wait_named_calls(arena->named_calls);
+    if (exported(arena)) return usearch_status_contended_k;
     delete arena;
+    return usearch_status_success_k;
+}
+
+USEARCH_EXPORT usearch_status_t usearch_arena_export_open(usearch_arena_t arena) {
+    if (!arena) return usearch_status_invalid_argument_k;
+    auto exports = fu::standard_atomic_ref<util::u32_t>(arena->exports);
+    util::u32_t counted = exports.load(std::memory_order_relaxed);
+    do
+        if (counted == (std::numeric_limits<util::u32_t>::max)()) return usearch_status_overflow_k;
+    while (!exports.compare_exchange_weak(counted, counted + 1, std::memory_order_seq_cst, std::memory_order_relaxed));
+    // Counted first, then the holder read, so a call taking the arena meanwhile sees this export.
+    if (!fu::standard_atomic_ref<usearch_outcome_t const*>(arena->holder).load(std::memory_order_seq_cst))
+        return usearch_status_success_k;
+    usearch_arena_export_close(arena);
+    return usearch_status_contended_k;
+}
+
+USEARCH_EXPORT void usearch_arena_export_close(usearch_arena_t arena) {
+    if (!arena) return;
+    auto exports = fu::standard_atomic_ref<util::u32_t>(arena->exports);
+    util::u32_t counted = exports.load(std::memory_order_relaxed);
+    do
+        if (!counted) return;
+    while (!exports.compare_exchange_weak(counted, counted - 1, std::memory_order_release, std::memory_order_relaxed));
 }
 
 USEARCH_EXPORT void usearch_arena_describe(usearch_arena_describe_t* arguments) {
@@ -1650,7 +1683,7 @@ USEARCH_EXPORT void usearch_arena_describe(usearch_arena_describe_t* arguments) 
         return propagate_error(usearch_status_invalid_argument_k, outcome,
                                "The arena and description must not be NULL"),
                void();
-    *arguments->description = {arena->residency().residency, arena_device_ordinal(*arena)};
+    *arguments->description = arena_description(*arena);
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 

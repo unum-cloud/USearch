@@ -515,11 +515,13 @@ char const* usearch_sequence_metric_name(usearch_sequence_metric_t metric) {
     case usearch_sequence_metric_levenshtein_utf8_k: return "levenshtein-utf8";
     case usearch_sequence_metric_needleman_wunsch_k: return "needleman-wunsch";
     case usearch_sequence_metric_overlap_k: return "overlap";
-    default: return "unknown";
+    case usearch_sequence_metric_unknown_k: return "unknown";
+    default: return "unrecognized";
     }
 }
 
 usearch_status_t usearch_sequence_metric_from_name(usearch_bytes_view_t name, usearch_sequence_metric_t* metric) {
+    if (named(name, "unknown")) return *metric = usearch_sequence_metric_unknown_k, usearch_status_success_k;
     for (int code = usearch_sequence_metric_levenshtein_bytes_k; code <= usearch_sequence_metric_overlap_k; ++code)
         if (named(name, usearch_sequence_metric_name(static_cast<usearch_sequence_metric_t>(code))))
             return *metric = static_cast<usearch_sequence_metric_t>(code), usearch_status_success_k;

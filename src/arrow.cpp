@@ -240,9 +240,11 @@ struct exported_schema_t {
     std::array<std::array<char, format_capacity_k>, nodes_capacity_k> formats {};
 };
 
-/** The nested arrays of one exported column, as @c exported_schema_t. */
+/** The nested arrays of one exported column, as @c exported_schema_t, and the arena they read,
+ *  whose export the last one standing closes. */
 struct exported_array_t {
     std::size_t live = 0;
+    usearch_arena_t arena = nullptr;
     std::array<ArrowArray, nodes_capacity_k> arrays {};
     std::array<ArrowArray*, nodes_capacity_k> children {};
     std::array<std::array<void const*, 3>, nodes_capacity_k> buffers {};
@@ -256,20 +258,24 @@ static void release_exported(node_type_* node) noexcept {
     for (std::int64_t child = 0; child != node->n_children; ++child)
         if (node->children[child]->release) node->children[child]->release(node->children[child]);
     node->release = nullptr;
-    if (fu::standard_atomic_ref<std::size_t>(shared->live).fetch_sub(1, std::memory_order_acq_rel) == 1) delete shared;
+    if (fu::standard_atomic_ref<std::size_t>(shared->live).fetch_sub(1, std::memory_order_acq_rel) != 1) return;
+    if constexpr (std::is_same_v<shared_type_, exported_array_t>) usearch_arena_export_close(shared->arena);
+    delete shared;
 }
 
 /** Exports @p nodes of a column out of @p arena, the first being the column itself, into @p schema
  *  and @p device_array. Every call filling the arena drained its uploads, so its outputs are final
- *  and no event guards them. */
-static usearch_status_t export_column(usearch_arena_handle_t const& arena, std::span<column_node_t const> nodes,
-                                      ArrowSchema* schema, ArrowDeviceArray* device_array) noexcept {
+ *  and no event guards them. The array keeps the export @ref exported_from opened until its last
+ *  node is released. */
+static usearch_status_t export_column(usearch_arena_t arena, std::span<column_node_t const> nodes, ArrowSchema* schema,
+                                      ArrowDeviceArray* device_array) noexcept {
     exported_schema_t* const schema_block = new (std::nothrow) exported_schema_t {};
     exported_array_t* const array_block = schema_block ? new (std::nothrow) exported_array_t {} : nullptr;
     if (!array_block) {
         delete schema_block;
         return usearch_status_out_of_memory_k;
     }
+    array_block->arena = arena;
     schema_block->live = nodes.size();
     array_block->live = nodes.size();
     *device_array = {};
@@ -301,10 +307,22 @@ static usearch_status_t export_column(usearch_arena_handle_t const& arena, std::
                           .release = &release_exported<ArrowArray, exported_array_t>,
                           .private_data = array_block};
     }
-    arrow_device_t const device = arrow_device_of(arena);
+    arrow_device_t const device = arrow_device_of(*arena);
     device_array->device_id = device.ordinal;
     device_array->device_type = device.type;
     return usearch_status_success_k;
+}
+
+/** Runs @p body, an export out of @p arena, under one export of the arena opened first, so no call
+ *  rewinds it between the checks and the hand-out; a call holding the arena refuses it as
+ *  contended, and a failed body closes it again. */
+template <typename body_type_>
+static usearch_status_t exported_from(usearch_arena_t arena, body_type_&& body) noexcept {
+    if (usearch_status_t const open_status = usearch_arena_export_open(arena); open_status != usearch_status_success_k)
+        return open_status;
+    usearch_status_t const status = body();
+    if (status != usearch_status_success_k) usearch_arena_export_close(arena);
+    return status;
 }
 
 /** Whether the @p bytes at @p data lie in memory @p arena handed out; an empty run always does. */
@@ -487,121 +505,132 @@ USEARCH_EXPORT usearch_status_t usearch_tape_view_from_arrow(ArrowSchema const* 
 USEARCH_EXPORT usearch_status_t usearch_keys_view_to_arrow(usearch_keys_view_t keys, size_t count,
                                                            usearch_arena_t arena, ArrowSchema* schema,
                                                            ArrowDeviceArray* device_array) {
-    if (!arena || !schema || !device_array || (count && !keys.data)) return usearch_status_invalid_argument_k;
-    if (count > 1 && keys.stride != sizeof(usearch_key_t)) return usearch_status_unsupported_layout_k;
-    if (!arena_holds(*arena, keys.data, count * sizeof(usearch_key_t))) return usearch_status_invalid_argument_k;
-    std::array const nodes {keys_node(count, keys.data, nullptr)};
-    return export_column(*arena, nodes, schema, device_array);
+    return exported_from(arena, [&]() noexcept -> usearch_status_t {
+        if (!arena || !schema || !device_array || (count && !keys.data)) return usearch_status_invalid_argument_k;
+        if (count > 1 && keys.stride != sizeof(usearch_key_t)) return usearch_status_unsupported_layout_k;
+        if (!arena_holds(*arena, keys.data, count * sizeof(usearch_key_t))) return usearch_status_invalid_argument_k;
+        std::array const nodes {keys_node(count, keys.data, nullptr)};
+        return export_column(arena, nodes, schema, device_array);
+    });
 }
 
 USEARCH_EXPORT usearch_status_t usearch_rows_view_to_arrow(usearch_rows_view_t rows, size_t count,
                                                            usearch_arena_t arena, ArrowSchema* schema,
                                                            ArrowDeviceArray* device_array) {
-    if (!arena || !schema || !device_array || (count && !rows.data)) return usearch_status_invalid_argument_k;
-    bool const bits = rows.scalar == usearch_scalar_u1x8_k;
-    scalar_layout_t const* const layout = layout_of(rows.scalar);
-    if (!rows.columns || (!bits && !layout)) return usearch_status_unsupported_layout_k;
-    std::size_t const columns_per_element = bits ? 8 : layout->columns_per_element;
-    if (rows.columns % columns_per_element) return usearch_status_unsupported_layout_k;
-    std::size_t const width = rows.columns / columns_per_element;
-    std::size_t const row_bytes = bits ? width : width * layout->element_bytes;
-    if (count > 1 && rows.stride != row_bytes) return usearch_status_unsupported_layout_k;
-    if (util::wraps_on_multiply(count, row_bytes) || !arena_holds(*arena, rows.data, count * row_bytes))
-        return usearch_status_invalid_argument_k;
+    return exported_from(arena, [&]() noexcept -> usearch_status_t {
+        if (!arena || !schema || !device_array || (count && !rows.data)) return usearch_status_invalid_argument_k;
+        bool const bits = rows.scalar == usearch_scalar_u1x8_k;
+        scalar_layout_t const* const layout = layout_of(rows.scalar);
+        if (!rows.columns || (!bits && !layout)) return usearch_status_unsupported_layout_k;
+        std::size_t const columns_per_element = bits ? 8 : layout->columns_per_element;
+        if (rows.columns % columns_per_element) return usearch_status_unsupported_layout_k;
+        std::size_t const width = rows.columns / columns_per_element;
+        std::size_t const row_bytes = bits ? width : width * layout->element_bytes;
+        if (count > 1 && rows.stride != row_bytes) return usearch_status_unsupported_layout_k;
+        if (util::wraps_on_multiply(count, row_bytes) || !arena_holds(*arena, rows.data, count * row_bytes))
+            return usearch_status_invalid_argument_k;
 
-    void const* const data = count ? rows.data : no_rows_k;
-    std::array<char, format_capacity_k> format {};
-    std::string_view const prefix = bits ? "w:" : "+w:";
-    prefix.copy(format.data(), prefix.size());
-    std::to_chars_result const spelled = std::to_chars(format.data() + prefix.size(), format.data() + format.size(),
-                                                       width);
-    std::string_view const spelling {format.data(), static_cast<std::size_t>(spelled.ptr - format.data())};
+        void const* const data = count ? rows.data : no_rows_k;
+        std::array<char, format_capacity_k> format {};
+        std::string_view const prefix = bits ? "w:" : "+w:";
+        prefix.copy(format.data(), prefix.size());
+        std::to_chars_result const spelled = std::to_chars(format.data() + prefix.size(), format.data() + format.size(),
+                                                           width);
+        std::string_view const spelling {format.data(), static_cast<std::size_t>(spelled.ptr - format.data())};
 
-    std::array<column_node_t, 2> nodes {};
-    nodes[0].format = spelling;
-    nodes[0].length = count;
-    if (bits) {
-        static constexpr std::array<char, metadata_capacity_k> u1x8_metadata = extension_metadata("numkong.u1x8");
-        nodes[0].metadata = u1x8_metadata.data();
-        nodes[0].buffers = {nullptr, data, nullptr};
-        nodes[0].buffers_count = 2;
-        return export_column(*arena, std::span {nodes}.first(1), schema, device_array);
-    }
-    nodes[0].first_child = 1;
-    nodes[0].children_count = 1;
-    nodes[1].format = layout->format;
-    nodes[1].metadata = layout->tag();
-    nodes[1].length = count * width;
-    nodes[1].buffers = {nullptr, data, nullptr};
-    nodes[1].buffers_count = 2;
-    return export_column(*arena, nodes, schema, device_array);
+        std::array<column_node_t, 2> nodes {};
+        nodes[0].format = spelling;
+        nodes[0].length = count;
+        if (bits) {
+            static constexpr std::array<char, metadata_capacity_k> u1x8_metadata = extension_metadata("numkong.u1x8");
+            nodes[0].metadata = u1x8_metadata.data();
+            nodes[0].buffers = {nullptr, data, nullptr};
+            nodes[0].buffers_count = 2;
+            return export_column(arena, std::span {nodes}.first(1), schema, device_array);
+        }
+        nodes[0].first_child = 1;
+        nodes[0].children_count = 1;
+        nodes[1].format = layout->format;
+        nodes[1].metadata = layout->tag();
+        nodes[1].length = count * width;
+        nodes[1].buffers = {nullptr, data, nullptr};
+        nodes[1].buffers_count = 2;
+        return export_column(arena, nodes, schema, device_array);
+    });
 }
 
 USEARCH_EXPORT usearch_status_t usearch_tape_view_to_arrow(usearch_tape_view_t tape, size_t count,
                                                            usearch_arena_t arena, ArrowSchema* schema,
                                                            ArrowDeviceArray* device_array) {
-    if (!arena || !schema || !device_array) return usearch_status_invalid_argument_k;
-    bool const wide = tape.layout == usearch_tape_u64_k;
-    if (!wide && tape.layout != usearch_tape_u32_k) return usearch_status_unsupported_layout_k;
-    void const* const offsets = wide ? static_cast<void const*>(tape.offsets.u64) : tape.offsets.u32;
-    if (count && !offsets) return usearch_status_invalid_argument_k;
-    scalar_layout_t const* const layout = layout_of(tape.scalar);
-    if (!layout || layout->columns_per_element != 1) return usearch_status_unsupported_layout_k;
+    return exported_from(arena, [&]() noexcept -> usearch_status_t {
+        if (!arena || !schema || !device_array) return usearch_status_invalid_argument_k;
+        bool const wide = tape.layout == usearch_tape_u64_k;
+        if (!wide && tape.layout != usearch_tape_u32_k) return usearch_status_unsupported_layout_k;
+        void const* const offsets = wide ? static_cast<void const*>(tape.offsets.u64) : tape.offsets.u32;
+        if (count && !offsets) return usearch_status_invalid_argument_k;
+        scalar_layout_t const* const layout = layout_of(tape.scalar);
+        if (!layout || layout->columns_per_element != 1) return usearch_status_unsupported_layout_k;
 
-    bool const bytes = tape.scalar == usearch_scalar_u8_k;
-    std::size_t const element_bytes = bytes ? 1 : 3 * layout->element_bytes;
-    auto const [elements, status] = wide ? last_offset(*arena, tape.offsets.u64, count)
-                                         : last_offset(*arena, tape.offsets.u32, count);
-    if (failed(status)) return static_cast<usearch_status_t>(status.code);
-    if (!arena_holds(*arena, tape.data, elements * element_bytes)) return usearch_status_invalid_argument_k;
+        bool const bytes = tape.scalar == usearch_scalar_u8_k;
+        std::size_t const element_bytes = bytes ? 1 : 3 * layout->element_bytes;
+        auto const [elements, status] = wide ? last_offset(*arena, tape.offsets.u64, count)
+                                             : last_offset(*arena, tape.offsets.u32, count);
+        if (failed(status)) return static_cast<usearch_status_t>(status.code);
+        if (!arena_holds(*arena, tape.data, elements * element_bytes)) return usearch_status_invalid_argument_k;
 
-    void const* const data = tape.data ? tape.data : no_rows_k;
-    if (bytes) {
-        column_node_t column;
-        column.format = wide ? "Z" : "z";
-        column.length = count;
-        column.buffers = {nullptr, count ? offsets : no_rows_k, data};
-        column.buffers_count = 3;
-        std::array const nodes {column};
-        return export_column(*arena, nodes, schema, device_array);
-    }
-    std::array<column_node_t, 3> nodes {};
-    nodes[0] = list_node(count, offsets);
-    nodes[0].format = wide ? "+L" : "+l";
-    nodes[1].format = "+w:3";
-    nodes[1].length = elements;
-    nodes[1].first_child = 2;
-    nodes[1].children_count = 1;
-    nodes[2].format = layout->format;
-    nodes[2].metadata = layout->tag();
-    nodes[2].length = elements * 3;
-    nodes[2].buffers = {nullptr, data, nullptr};
-    nodes[2].buffers_count = 2;
-    return export_column(*arena, nodes, schema, device_array);
+        void const* const data = tape.data ? tape.data : no_rows_k;
+        if (bytes) {
+            column_node_t column;
+            column.format = wide ? "Z" : "z";
+            column.length = count;
+            column.buffers = {nullptr, count ? offsets : no_rows_k, data};
+            column.buffers_count = 3;
+            std::array const nodes {column};
+            return export_column(arena, nodes, schema, device_array);
+        }
+        std::array<column_node_t, 3> nodes {};
+        nodes[0] = list_node(count, offsets);
+        nodes[0].format = wide ? "+L" : "+l";
+        nodes[1].format = "+w:3";
+        nodes[1].length = elements;
+        nodes[1].first_child = 2;
+        nodes[1].children_count = 1;
+        nodes[2].format = layout->format;
+        nodes[2].metadata = layout->tag();
+        nodes[2].length = elements * 3;
+        nodes[2].buffers = {nullptr, data, nullptr};
+        nodes[2].buffers_count = 2;
+        return export_column(arena, nodes, schema, device_array);
+    });
 }
 
-USEARCH_EXPORT usearch_status_t usearch_keys_tape_view_to_arrow(usearch_keys_tape_view_t keys, size_t count,
+USEARCH_EXPORT usearch_status_t usearch_keys_tape_view_to_arrow(usearch_keys_tape_view_t ragged, size_t count,
                                                                 usearch_arena_t arena, ArrowSchema* schema,
                                                                 ArrowDeviceArray* device_array) {
-    if (!arena || !schema || !device_array || (count && !keys.offsets)) return usearch_status_invalid_argument_k;
-    auto const [elements, status] = last_offset(*arena, keys.offsets, count);
-    if (failed(status)) return static_cast<usearch_status_t>(status.code);
-    if (!arena_holds(*arena, keys.keys, elements * sizeof(usearch_key_t))) return usearch_status_invalid_argument_k;
-    std::array const nodes {list_node(count, keys.offsets), keys_node(elements, keys.keys, "item")};
-    return export_column(*arena, nodes, schema, device_array);
+    return exported_from(arena, [&]() noexcept -> usearch_status_t {
+        if (!arena || !schema || !device_array || (count && !ragged.offsets)) return usearch_status_invalid_argument_k;
+        auto const [elements, status] = last_offset(*arena, ragged.offsets, count);
+        if (failed(status)) return static_cast<usearch_status_t>(status.code);
+        if (!arena_holds(*arena, ragged.keys, elements * sizeof(usearch_key_t)))
+            return usearch_status_invalid_argument_k;
+        std::array const nodes {list_node(count, ragged.offsets), keys_node(elements, ragged.keys, "item")};
+        return export_column(arena, nodes, schema, device_array);
+    });
 }
 
 USEARCH_EXPORT usearch_status_t usearch_matches_tape_view_to_arrow(usearch_matches_tape_view_t matches, size_t count,
                                                                    usearch_arena_t arena, ArrowSchema* schema,
                                                                    ArrowDeviceArray* device_array) {
-    if (!arena || !schema || !device_array || (count && !matches.offsets)) return usearch_status_invalid_argument_k;
-    auto const [elements, status] = last_offset(*arena, matches.offsets, count);
-    if (failed(status)) return static_cast<usearch_status_t>(status.code);
-    if (!arena_holds(*arena, matches.keys, elements * sizeof(usearch_key_t)) ||
-        !arena_holds(*arena, matches.scores, elements * sizeof(usearch_distance_t)))
-        return usearch_status_invalid_argument_k;
-    std::array<column_node_t, 4> nodes {};
-    nodes[0] = list_node(count, matches.offsets);
-    matches_nodes(elements, matches.keys, matches.scores, std::span {nodes}.subspan(1));
-    return export_column(*arena, nodes, schema, device_array);
+    return exported_from(arena, [&]() noexcept -> usearch_status_t {
+        if (!arena || !schema || !device_array || (count && !matches.offsets)) return usearch_status_invalid_argument_k;
+        auto const [elements, status] = last_offset(*arena, matches.offsets, count);
+        if (failed(status)) return static_cast<usearch_status_t>(status.code);
+        if (!arena_holds(*arena, matches.keys, elements * sizeof(usearch_key_t)) ||
+            !arena_holds(*arena, matches.scores, elements * sizeof(usearch_distance_t)))
+            return usearch_status_invalid_argument_k;
+        std::array<column_node_t, 4> nodes {};
+        nodes[0] = list_node(count, matches.offsets);
+        matches_nodes(elements, matches.keys, matches.scores, std::span {nodes}.subspan(1));
+        return export_column(arena, nodes, schema, device_array);
+    });
 }

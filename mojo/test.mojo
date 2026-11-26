@@ -19,6 +19,8 @@ from usearch import (
     Admission,
     CPUClass,
     GPUClass,
+    GPUVendor,
+    HostAccess,
     SequenceIndex,
     SequenceMetric,
     SequenceOptions,
@@ -31,6 +33,7 @@ from usearch import (
     sequence_reshard,
     sequence_reshard_plan_finish_deferred,
     Arena,
+    ArenaDescription,
     Continuation,
     DenseAttendConfig,
     DenseIndex,
@@ -332,6 +335,8 @@ def test_names_round_trip_through_the_library_and_refuse_strangers() raises:
     assert_true(library.mood_from_name("parked") == Mood.PARKED, "and back")
     assert_equal(library.residency_name(Residency.VRAM), "vram", "a residency")
     assert_true(library.residency_from_name("nvme") == Residency.NVME, "and back")
+    assert_equal(library.host_access_name(HostAccess.READABLE), "readable", "a host access")
+    assert_equal(library.host_access_name(HostAccess.REFUSED), "refused", "and the other")
     assert_equal(library.traversal_name(Traversal.SCAN), "scan", "a traversal")
     assert_true(library.traversal_from_name("walk") == Traversal.WALK, "and back")
     assert_equal(library.dense_metric_name(DenseMetric.JACCARD), "jaccard", "a metric")
@@ -373,7 +378,8 @@ def test_arena_is_reused_and_results_outlive_the_call() raises:
     var arena = Arena(library)
     var other = Arena(library)
     var described = arena.describe()
-    assert_true(described.residency == Residency.RAM and described.device == 0, "an inline arena is host pages")
+    assert_true(described.residency == Residency.RAM and described.device == -1, "an inline arena is host pages")
+    assert_true(described.vendor_ordinal == -1 and described.host_access == HostAccess.READABLE, "which the host reads")
 
     var first = index.get[DType.float32](Key(integer=0), arena)
     var second = index.get[DType.float32](Key(integer=1), other)
@@ -382,6 +388,35 @@ def test_arena_is_reused_and_results_outlive_the_call() raises:
 
     var reused = index.get[DType.float32](Key(integer=1), arena)
     assert_equal(reused[0][1], Float32(1), "the third call refilled the first arena")
+
+
+def test_host_reads_follow_host_access() raises:
+    """Memory the host may not read is refused as `DEVICE`; Apple's shared memory reads fine."""
+    var device = ArenaDescription(Residency.VRAM, Int32(0), GPUVendor.NVIDIA, Int32(0), HostAccess.REFUSED)
+    var refusal = Status.SUCCESS
+    try:
+        device.host()
+    except error:
+        refusal = error.status
+    assert_true(refusal == Status.DEVICE, "a host read of device memory is refused as a device failure")
+    ArenaDescription(Residency.VRAM, Int32(0), GPUVendor.APPLE, Int32(0), HostAccess.READABLE).host()
+    if not _library_is_present():
+        _skipped(library_missing_k)
+        return
+    var library = Library()
+    var gpu: Executor
+    try:
+        gpu = Executor.for_vram(library)
+    except:
+        _skipped("no GPU device")
+        return
+    refusal = Status.SUCCESS
+    var access = HostAccess.REFUSED
+    try:
+        access = Arena(gpu).describe().host_access
+    except error:
+        refusal = error.status
+    assert_true(refusal == Status.DEVICE or access == HostAccess.READABLE, "only an arena the host reads is made")
 
 
 def test_arena_survives_a_failed_call() raises:
@@ -1723,6 +1758,7 @@ def main() raises:
     suite.test[test_names_round_trip_through_the_library_and_refuse_strangers]()
     suite.test[test_get_exports_every_entry_under_a_key]()
     suite.test[test_arena_is_reused_and_results_outlive_the_call]()
+    suite.test[test_host_reads_follow_host_access]()
     suite.test[test_arena_survives_a_failed_call]()
     suite.test[test_caller_thread_executor_drives_every_verb]()
     suite.test[test_buffers_round_trip_through_the_arena]()

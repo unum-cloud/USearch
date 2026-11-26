@@ -919,7 +919,7 @@ Typed bindings are those whose compiler checks callback signatures, and dynamic 
 
 The C library decides what is valid.
 A binding forwards its status, turns each status into its language's error in one place, re-checks nothing the library refuses, and keeps no copy of state the library already holds.
-Name tables come from the library's `usearch_*_name` and `usearch_*_from_name` pairs, never from a switch written in the binding.
+Every enum the C interface names has a `usearch_*_name`; one a caller can pass in also has `usearch_*_from_name(view, &out)`. Bindings take their name tables from these, never from a switch of their own.
 
 One mechanism reports every outcome: `usearch_outcome_status` reads it without waiting, and `usearch_outcome_wait` parks until it is final.
 Nothing in a binding takes a lock, sends a notification or adds synchronization of its own.

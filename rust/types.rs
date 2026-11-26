@@ -344,6 +344,8 @@ pub const usearch_completion_deferred_k: usearch_completion_t = 1;
 
 pub type usearch_residency_t = c_int;
 pub type usearch_traversal_t = c_int;
+pub type usearch_gpu_vendor_t = c_int;
+pub type usearch_host_access_t = c_int;
 
 pub type usearch_arena_t = *mut c_void;
 pub type usearch_executor_t = *mut c_void;
@@ -359,7 +361,10 @@ pub struct usearch_arena_init_t {
 #[derive(Clone, Copy, Default)]
 pub struct usearch_arena_description_t {
     pub residency: usearch_residency_t,
-    pub device: usize,
+    pub device: i32,
+    pub vendor: usearch_gpu_vendor_t,
+    pub vendor_ordinal: i32,
+    pub host_access: usearch_host_access_t,
 }
 
 #[repr(C)]
@@ -419,7 +424,7 @@ unsafe extern "C" {
     pub fn usearch_executor_free(executor: usearch_executor_t);
 
     pub fn usearch_arena_init(arguments: *mut usearch_arena_init_t);
-    pub fn usearch_arena_free(arena: usearch_arena_t);
+    pub fn usearch_arena_free(arena: usearch_arena_t) -> usearch_status_t;
     pub fn usearch_arena_describe(arguments: *mut usearch_arena_describe_t);
 
     pub fn usearch_status_name(status: usearch_status_t) -> *const c_char;
@@ -431,6 +436,7 @@ unsafe extern "C" {
         name: usearch_bytes_view_t,
         residency: *mut usearch_residency_t,
     ) -> usearch_status_t;
+    pub fn usearch_host_access_name(host_access: usearch_host_access_t) -> *const c_char;
     pub fn usearch_traversal_name(traversal: usearch_traversal_t) -> *const c_char;
     pub fn usearch_traversal_from_name(
         name: usearch_bytes_view_t,
@@ -1126,7 +1132,7 @@ impl<Element: Clone + 'static, Offset: Clone + 'static> Accepts<Tape<'static, El
 ///
 /// Rust-only.
 pub struct TapeEntries<'arena, Element> {
-    pub(crate) arena: PhantomData<&'arena Arena<'arena>>,
+    pub(crate) arena: &'arena Arena<'arena>,
     pub(crate) view: usearch_tape_view_t,
     pub(crate) written: usize,
     pub(crate) element: PhantomData<Element>,
@@ -1136,9 +1142,9 @@ pub struct TapeEntries<'arena, Element> {
 unsafe impl<Element> Send for TapeEntries<'_, Element> {}
 
 impl<'arena, Element: 'arena> TapeEntries<'arena, Element> {
-    /// An empty slot a call fills in an arena.
-    pub(crate) fn new() -> Self {
-        TapeEntries { arena: PhantomData, view: usearch_tape_view_t::default(), written: 0, element: PhantomData }
+    /// An empty slot a call fills in `arena`.
+    pub(crate) fn new(arena: &'arena Arena<'arena>) -> Self {
+        TapeEntries { arena, view: usearch_tape_view_t::default(), written: 0, element: PhantomData }
     }
 
     /// Entries the call wrote; zero for an absent key.
@@ -1147,8 +1153,9 @@ impl<'arena, Element: 'arena> TapeEntries<'arena, Element> {
     }
 
     /// One entry's elements, refused with [`Status::InvalidArgument`] when `entry` is not below
-    /// [`TapeEntries::written`].
+    /// [`TapeEntries::written`], and with [`Status::Device`] over memory the host may not read.
     pub fn entry(&self, entry: usize) -> Result<&'arena [Element]> {
+        self.arena.description.host()?;
         match entry < self.written {
             // Safety: the arena holds a finished call's output.
             true => Ok(unsafe { self.view.entry(entry) }),
@@ -1156,10 +1163,12 @@ impl<'arena, Element: 'arena> TapeEntries<'arena, Element> {
         }
     }
 
-    /// Every entry, in insertion order.
-    pub fn iter(&self) -> impl Iterator<Item = &'arena [Element]> + '_ {
-        // Safety: the arena holds a finished call's output.
-        (0..self.written).map(move |entry| unsafe { self.view.entry(entry) })
+    /// Every entry, in insertion order, refused with [`Status::Device`] over memory the host may
+    /// not read.
+    pub fn iter(&self) -> Result<impl Iterator<Item = &'arena [Element]> + '_> {
+        self.arena.description.host()?;
+        // Safety: the arena holds a finished call's output the host may read.
+        Ok((0..self.written).map(move |entry| unsafe { self.view.entry(entry) }))
     }
 }
 
@@ -1212,20 +1221,23 @@ impl<'arena> Matches<'arena> {
     }
 
     /// Matches written for one query, refused with [`Status::InvalidArgument`] when `query` is not
-    /// below [`Matches::queries`].
+    /// below [`Matches::queries`], and with [`Status::Device`] over memory the host may not read.
     pub fn query(&self, query: usize) -> Result<QueryMatches<'arena>> {
+        self.arena.description.host()?;
         match query < self.queries {
-            // Safety: the arena holds a finished call's output.
+            // Safety: the arena holds a finished call's output the host may read.
             true => Ok(unsafe { self.view.query(query) }),
             false => Err(fail(Status::InvalidArgument, "the query is not below the call's count")),
         }
     }
 
-    /// Every query's matches, in query order.
-    pub fn iter(&self) -> impl Iterator<Item = QueryMatches<'arena>> {
+    /// Every query's matches, in query order, refused with [`Status::Device`] over memory the host
+    /// may not read.
+    pub fn iter(&self) -> Result<impl Iterator<Item = QueryMatches<'arena>> + use<'arena>> {
+        self.arena.description.host()?;
         let view = self.view;
-        // Safety: the arena holds a finished call's output.
-        (0..self.queries).map(move |query| unsafe { view.query(query) })
+        // Safety: the arena holds a finished call's output the host may read.
+        Ok((0..self.queries).map(move |query| unsafe { view.query(query) }))
     }
 
     /// Exports every query's padded keys, `queries` by `columns`, as one Arrow
@@ -1495,12 +1507,12 @@ impl ArrowExport<'_> {
     }
 
     /// Hands the column over past the arena's lifetime, for a consumer that takes the structures by
-    /// value.
+    /// value. The arena counts the export until the array is released: its calls answer
+    /// [`Status::Contended`] meanwhile, and dropping it leaves the memory to the export.
     ///
     /// # Safety
     ///
-    /// The arena must outlive the parts and take no call until they are released, as nothing
-    /// refuses one, and its buffers must be host memory.
+    /// Its buffers must be host memory, which the bare [`ArrowArray`] cannot say otherwise.
     pub unsafe fn into_parts(self) -> (ArrowSchema, ArrowArray) {
         (self.schema, self.array.array)
     }
@@ -2219,6 +2231,9 @@ impl Drop for Executor {
 #[derive(Debug)]
 pub struct Arena<'executor> {
     pub(crate) handle: usearch_arena_t,
+    /// Where the outputs live, which the executor decided once, read when the arena is made so a
+    /// host accessor checks it without crossing into the library.
+    pub(crate) description: ArenaDescription,
     executor: PhantomData<&'executor ()>,
 }
 
@@ -2242,16 +2257,30 @@ impl<'executor> Arena<'executor> {
     }
 
     fn made_by(executor: usearch_executor_t) -> Result<Self> {
-        let mut arena = Arena { handle: ptr::null_mut(), executor: PhantomData };
+        let refused = ArenaDescription {
+            residency: Residency::Ram,
+            device: None,
+            vendor: GPUVendor::Unknown,
+            vendor_ordinal: None,
+            host_access: HostAccess::Refused,
+        };
+        let mut arena = Arena { handle: ptr::null_mut(), description: refused, executor: PhantomData };
         let mut outcome = usearch_outcome_t::default();
         unsafe {
             usearch_arena_init(&mut usearch_arena_init_t { arena: &mut arena.handle, executor, outcome: &mut outcome })
         };
-        check(outcome).map(|()| arena)
+        check(outcome)?;
+        arena.description = arena.described()?;
+        Ok(arena)
     }
 
     /// Where the outputs live, as the executor that made the arena decided.
     pub fn describe(&self) -> Result<ArenaDescription> {
+        Ok(self.description)
+    }
+
+    /// Asks the library where the outputs live, once, as the arena is made.
+    fn described(&self) -> Result<ArenaDescription> {
         let mut description = usearch_arena_description_t::default();
         let mut outcome = usearch_outcome_t::default();
         unsafe {
@@ -2262,21 +2291,23 @@ impl<'executor> Arena<'executor> {
             })
         };
         check(outcome)?;
-        let residency = Residency::from_raw(description.residency)
-            .ok_or_else(|| fail(Status::UnknownKind, "the arena names no known residency"))?;
         Ok(ArenaDescription {
-            residency,
-            device: match residency {
-                Residency::Vram => u32::try_from(description.device).ok(),
-                _ => None,
-            },
+            residency: Residency::from_raw(description.residency)
+                .ok_or_else(|| fail(Status::UnknownKind, "the arena names no known residency"))?,
+            device: u32::try_from(description.device).ok(),
+            vendor: GPUVendor::from_raw(description.vendor),
+            vendor_ordinal: u32::try_from(description.vendor_ordinal).ok(),
+            host_access: HostAccess::from_raw(description.host_access),
         })
     }
 }
 
 impl Drop for Arena<'_> {
     fn drop(&mut self) {
-        unsafe { usearch_arena_free(self.handle) }
+        // Borrows end every view first, so only an Arrow export moved out through
+        // `ArrowExport::into_parts` and still unreleased refuses the free, which leaves the memory
+        // to that export.
+        let _status = unsafe { usearch_arena_free(self.handle) };
     }
 }
 
@@ -2288,6 +2319,76 @@ pub struct ArenaDescription {
     pub residency: Residency,
     /// The device ordinal, as [`Executor::for_vram`] takes it; `None` for host pages.
     pub device: Option<u32>,
+    /// Which vendor's memory it is; [`GPUVendor::Unknown`] for host pages.
+    pub vendor: GPUVendor,
+    /// The vendor's own device number, which Arrow and DLPack name; `None` for host pages.
+    pub vendor_ordinal: Option<u32>,
+    /// Whether host code may read the pages: host, pinned, managed and Apple's shared memory.
+    pub host_access: HostAccess,
+}
+
+impl ArenaDescription {
+    /// Refuses memory the host may not read, before any accessor builds a slice over it.
+    pub(crate) fn host(&self) -> Result<()> {
+        match self.host_access {
+            HostAccess::Readable => Ok(()),
+            HostAccess::Refused => Err(fail(Status::Device, "the outputs are memory the host may not read")),
+        }
+    }
+}
+
+/// The GPU vendor whose runtime drives a device.
+#[repr(i32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[non_exhaustive]
+pub enum GPUVendor {
+    /// No vendor, as host pages report.
+    Unknown = 0,
+    /// NVIDIA, through the CUDA driver.
+    Nvidia = 1,
+    /// AMD, through the HIP runtime.
+    Amd = 2,
+    /// Apple, through Metal.
+    Apple = 3,
+}
+
+impl GPUVendor {
+    /// Reads a vendor this build does not know as unknown.
+    fn from_raw(value: usearch_gpu_vendor_t) -> Self {
+        match value {
+            1 => GPUVendor::Nvidia,
+            2 => GPUVendor::Amd,
+            3 => GPUVendor::Apple,
+            _ => GPUVendor::Unknown,
+        }
+    }
+}
+
+/// Whether host code may read an arena's pages.
+#[repr(i32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum HostAccess {
+    /// Device memory, which host code must not read; exports still hand it to device code.
+    Refused = 0,
+    /// Host, pinned, managed or Apple's shared memory.
+    Readable = 1,
+}
+
+impl HostAccess {
+    /// Reads any value but the readable one as refused, so a newer library never opens a read.
+    fn from_raw(value: usearch_host_access_t) -> Self {
+        match value {
+            1 => HostAccess::Readable,
+            _ => HostAccess::Refused,
+        }
+    }
+}
+
+impl fmt::Display for HostAccess {
+    /// Writes "refused" or "readable", as the library spells them.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(spelling(usearch_host_access_name, *self as c_int))
+    }
 }
 
 /// Views `length` values the library wrote into an arena; a failed or empty call leaves null.
@@ -2591,13 +2692,14 @@ mod tests {
             (usearch_gpu_class_from_name, usearch_gpu_class_name),
             (usearch_nvme_class_from_name, usearch_nvme_class_name),
         ];
-        // Classes keep their registry values forever; a class this build lacks spells "unknown".
+        // Classes keep their registry values forever. A class this build lacks spells
+        // "unrecognized", which reads back as nothing, while a declared zero spells "unknown".
         for (from_name, name) in classes {
-            for code in (1..=c_int::from(u8::MAX)).filter(|&code| spelling(name, code) != "unknown") {
+            for code in (0..=c_int::from(u8::MAX)).filter(|&code| spelling(name, code) != "unrecognized") {
                 let spelled = spelling(name, code);
                 assert_eq!(read_named(spelled, from_name, Some), Ok(code), "{spelled}");
             }
-            assert!(read_named("unknown", from_name, Some).is_err());
+            assert!(read_named("unrecognized", from_name, Some).is_err());
         }
         assert_eq!(CPUClass::Serial.to_string(), "serial");
         assert_eq!(CPUClass::Monoversioned.to_string(), "monoversioned");
@@ -2723,7 +2825,13 @@ mod tests {
     /// An arena lives where the executor that made it computes.
     #[test]
     fn arenas_live_where_their_executor_computes() {
-        let host = ArenaDescription { residency: Residency::Ram, device: None };
+        let host = ArenaDescription {
+            residency: Residency::Ram,
+            device: None,
+            vendor: GPUVendor::Unknown,
+            vendor_ordinal: None,
+            host_access: HostAccess::Readable,
+        };
         assert_eq!(Arena::new().unwrap().describe().unwrap(), host);
 
         let executor = Executor::for_ram(&[], None, 1).unwrap();
@@ -2732,10 +2840,40 @@ mod tests {
         let Ok(gpu) = Executor::for_vram(&[0], None, 0) else {
             return skipped("no GPU device");
         };
-        assert_eq!(
-            Arena::new_in(&gpu).unwrap().describe().unwrap(),
-            ArenaDescription { residency: Residency::Vram, device: Some(0) }
-        );
+        let described = Arena::new_in(&gpu).unwrap().describe().unwrap();
+        assert_eq!((described.residency, described.device), (Residency::Vram, Some(0)));
+    }
+
+    /// Host reads refuse memory the host may not read, and pass shared or managed device memory.
+    #[test]
+    fn host_reads_refuse_device_memory() {
+        let device = ArenaDescription {
+            residency: Residency::Vram,
+            device: Some(0),
+            vendor: GPUVendor::Nvidia,
+            vendor_ordinal: Some(0),
+            host_access: HostAccess::Refused,
+        };
+        assert_eq!(device.host().unwrap_err().status, Status::Device);
+        let shared = ArenaDescription { vendor: GPUVendor::Apple, host_access: HostAccess::Readable, ..device };
+        assert!(shared.host().is_ok());
+        assert_eq!(HostAccess::Refused.to_string(), "refused");
+        assert_eq!(HostAccess::Readable.to_string(), "readable");
+
+        let Ok(gpu) = Executor::for_vram(&[0], None, 0) else {
+            return skipped("no GPU device");
+        };
+        let mut arena = Arena::new_in(&gpu).unwrap();
+        if arena.describe().unwrap().host_access == HostAccess::Readable {
+            return skipped("the GPU's memory is host-readable");
+        }
+        let options = crate::DenseOptions { dimensions: 2, ..crate::DenseOptions::default() };
+        let Ok(index) = crate::DenseIndex::init_vram(&options, &[0]) else {
+            return skipped("no VRAM index");
+        };
+        let slab = [1.0f32, 0.0];
+        let matches = index.on(&gpu).search(&rows(&slab, 2).unwrap(), 1, &mut arena).unwrap();
+        assert_eq!(matches.query(0).unwrap_err().status, Status::Device);
     }
 
     #[test]
@@ -2913,6 +3051,25 @@ mod tests {
         let distances = matches.distances_to_arrow().unwrap();
         assert_eq!(distances.schema().format(), Some(c"+w:1"));
         assert_eq!(distances.array().array.length(), 1);
+    }
+
+    /// An export handed past the arena's lifetime pins it: its calls are refused until the array
+    /// is released.
+    #[test]
+    fn exports_pin_their_arena() {
+        let options = crate::DenseOptions { dimensions: 2, ..crate::DenseOptions::default() };
+        let index = crate::DenseIndex::init_ram(&options, &[]).unwrap();
+        let slab = [1.0f32, 0.0];
+        index.insert([Key::from(3u64)], &rows(&slab, 2).unwrap()).unwrap();
+
+        let mut arena = Arena::new().unwrap();
+        let matches = index.search(&rows(&slab, 2).unwrap(), 1, &mut arena).unwrap();
+        // Safety: the stand-in and RAM arenas hold host memory.
+        let (schema, array) = unsafe { matches.keys_to_arrow().unwrap().into_parts() };
+        let pinned = index.search(&rows(&slab, 2).unwrap(), 1, &mut arena).map(|_| ());
+        assert_eq!(pinned.unwrap_err().status, Status::Contended);
+        drop((schema, array));
+        assert!(index.search(&rows(&slab, 2).unwrap(), 1, &mut arena).is_ok());
     }
 }
 

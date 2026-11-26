@@ -2393,6 +2393,10 @@ struct usearch_arena_handle_t {
     /** Executor calls naming the arena that have not ended, which its free waits out. */
     util::u32_t named_calls = 0;
 
+    /** Exports of the arena's outputs a consumer still holds, opened and closed by the bindings;
+     *  while any is open, no call rewinds the arena and its free frees nothing. */
+    util::u32_t exports = 0;
+
     /** Where the memory lives: host pages, or a device's VRAM. */
     arena_residency_t residency() const noexcept {
         return device_memory ? vram_residency(static_cast<std::size_t>(device_memory.device())) : ram_residency_k;
@@ -2405,8 +2409,15 @@ inline bool hold_arena(usearch_arena_t arena, usearch_outcome_t const* call) noe
     if (!arena) return true;
     usearch_outcome_t const* holder = nullptr;
     return fu::standard_atomic_ref<usearch_outcome_t const*>(arena->holder)
-               .compare_exchange_strong(holder, call, std::memory_order_acquire, std::memory_order_acquire) ||
+               .compare_exchange_strong(holder, call, std::memory_order_seq_cst, std::memory_order_acquire) ||
            holder == call;
+}
+
+/** Whether a consumer still holds an export of @p arena 's outputs; a null arena has none. A call
+ *  reads it after taking the arena, and an export after counting itself, so of a call and an export
+ *  racing for one arena, at least one sees the other and backs out. */
+inline bool exported(usearch_arena_t arena) noexcept {
+    return arena && fu::standard_atomic_ref<util::u32_t>(arena->exports).load(std::memory_order_seq_cst) != 0;
 }
 
 /** Lets go of @p arena when the call whose outcome is @p call holds it. */
@@ -2416,24 +2427,34 @@ inline void release_arena(usearch_arena_t arena, usearch_outcome_t const* call) 
             .compare_exchange_strong(call, nullptr, std::memory_order_release, std::memory_order_relaxed);
 }
 
-/** Where @c usearch_gpu_devices lists the device @p arena lives on, or 0 for host pages; the arena
- *  keeps its vendor's own ordinal, which the listing maps back. */
-inline std::size_t arena_device_ordinal(usearch_arena_handle_t const& arena) noexcept {
-    util::gpu_executor_t const* const devices = arena.executor
-                                                    ? std::get_if<util::gpu_executor_t>(&arena.executor->residency)
-                                                    : nullptr;
-    if (!devices) return 0;
-    util::gpu_vendor_t const vendor = std::visit(
-        []<typename executor_type_>(executor_type_ const&) noexcept {
-            if constexpr (is_gpu_executor<executor_type_>) return executor_type_::vendor_k;
-            else return util::gpu_vendor_t::unknown_k;
+/** Where @p arena 's outputs live: host pages, readable and on no device, or one device's memory,
+ *  which host code may read only on Apple's shared memory; the arena keeps its vendor's own
+ *  ordinal, and @c usearch_gpu_devices maps it back to a position. */
+inline usearch_arena_description_t arena_description(usearch_arena_handle_t const& arena) noexcept {
+    usearch_arena_description_t described {usearch_residency_ram_k, -1, usearch_gpu_vendor_unknown_k, -1,
+                                           usearch_host_access_readable_k};
+    std::visit(
+        [&]<typename arena_type_>(arena_type_ const& placed) noexcept {
+            if constexpr (!std::is_same_v<arena_type_, std::monostate>) {
+                constexpr util::gpu_vendor_t vendor = std::is_same_v<arena_type_, util::cuda_device_arena_t>
+                                                          ? util::gpu_vendor_t::nvidia_k
+                                                      : std::is_same_v<arena_type_, util::hip_device_arena_t>
+                                                          ? util::gpu_vendor_t::amd_k
+                                                          : util::gpu_vendor_t::apple_k;
+                int const vendor_ordinal = placed.device();
+                described.residency = usearch_residency_vram_k;
+                described.vendor = static_cast<usearch_gpu_vendor_t>(vendor);
+                described.vendor_ordinal = static_cast<std::int32_t>(vendor_ordinal);
+                if (vendor != util::gpu_vendor_t::apple_k) described.host_access = usearch_host_access_refused_k;
+                std::span<util::gpu_device_t const> const listed = gpu_devices();
+                for (std::size_t ordinal = 0; ordinal != listed.size(); ++ordinal)
+                    if (listed[ordinal].vendor == vendor &&
+                        static_cast<int>(listed[ordinal].vendor_ordinal) == vendor_ordinal)
+                        described.device = static_cast<std::int32_t>(ordinal);
+            }
         },
-        *devices);
-    std::span<util::gpu_device_t const> const listed = gpu_devices();
-    for (std::size_t ordinal = 0; ordinal != listed.size(); ++ordinal)
-        if (listed[ordinal].vendor == vendor && listed[ordinal].vendor_ordinal == arena.residency().device)
-            return ordinal;
-    return 0;
+        arena.device_memory.arena);
+    return described;
 }
 
 /** Whether @p address lies in memory @p arena handed out, which its next rewind reuses or frees. */
@@ -2486,6 +2507,10 @@ inline usearch_arena_handle_t* claim_arena(usearch_arena_t arena, usearch_outcom
                nullptr;
     if (!hold_arena(arena, call))
         return propagate_error(usearch_status_contended_k, outcome, "The arena serves another call"), nullptr;
+    if (exported(arena))
+        return release_arena(arena, call),
+               propagate_error(usearch_status_contended_k, outcome, "An export of the arena's outputs is open"),
+               nullptr;
     for (void const* input : inputs)
         if (input && arena_contains(*arena, input))
             return propagate_error(usearch_status_invalid_argument_k, outcome,
@@ -2929,6 +2954,10 @@ template <auto verb_, typename arguments_type_>
 inline bool submitted(arguments_type_* arguments) noexcept {
     usearch_executor_t const executor = arguments->executor;
     if (!executor || holding_executor_of(*arguments)) return false;
+    if (exported(arena_of(*arguments)))
+        return propagate_error(usearch_status_contended_k, arguments->outcome,
+                               "An export of the arena's outputs is open"),
+               true;
     holding_call_t& call = executor->holding_call;
     if (host_outcome_verbs().take_claim(&call.claim) == call_claim_t::held_k)
         return propagate_error(usearch_status_contended_k, arguments->outcome, "Another call holds the executor"), true;

@@ -617,6 +617,71 @@ public final class Types {
         }
     }
 
+    /** The GPU vendor whose runtime drives a device, as {@code usearch_gpu_vendor_t} numbers it. */
+    public enum GpuVendor {
+
+        /** No vendor, as host pages report. */
+        UNKNOWN(0),
+        /** NVIDIA, through the CUDA driver. */
+        NVIDIA(1),
+        /** AMD, through the HIP runtime. */
+        AMD(2),
+        /** Apple, through Metal. */
+        APPLE(3);
+
+        private final int code;
+
+        GpuVendor(int code) {
+            this.code = code;
+        }
+
+        /** The C enumerator's numeric value. */
+        public int code() {
+            return code;
+        }
+
+        /** Names the vendor a code holds, UNKNOWN for host pages or a code this build cannot name. */
+        static GpuVendor of(int code) {
+            for (GpuVendor candidate : values()) {
+                if (candidate.code == code) {
+                    return candidate;
+                }
+            }
+            return UNKNOWN;
+        }
+    }
+
+    /** Whether host code may read an arena's pages, as {@code usearch_host_access_t} numbers it. */
+    public enum HostAccess {
+
+        /** Device memory the host must not read. */
+        REFUSED(0),
+        /** Host, pinned, managed or Apple's shared memory. */
+        READABLE(1);
+
+        private final int code;
+
+        HostAccess(int code) {
+            this.code = code;
+        }
+
+        /** The C enumerator's numeric value. */
+        public int code() {
+            return code;
+        }
+
+        /** Names the access a code holds; a code this build cannot name is refused, never read. */
+        static HostAccess of(int code) {
+            return code == READABLE.code ? READABLE : REFUSED;
+        }
+
+        /** Renders the access as its C enumerator's stem. Calls {@code usearch_host_access_name}. */
+        @Override
+        public String toString() {
+            return Library.text(HOST_ACCESS_NAME, code);
+        }
+    }
+
     /** How a search reaches the indexed entries it scores. */
     public enum Traversal {
 
@@ -856,10 +921,20 @@ public final class Types {
         /**
          * Memory where {@code executor} computes, serving the calls of its residency. A VRAM arena
          * grows, fills and frees on that executor's first stream, so it serves only calls on that
-         * executor and must be closed before it. Calls {@code usearch_arena_init}.
+         * executor and must be closed before it. Every result is a host view, so memory the host may
+         * not read is refused here, before any call runs, while Apple's shared memory passes. Calls
+         * {@code usearch_arena_init}.
+         *
+         * @throws USearchException DEVICE when the executor's memory is memory the host may not read.
          */
         public Arena(Executor executor) {
             this.handle = init(Objects.requireNonNull(executor));
+            try {
+                describe().host();
+            } catch (USearchException refusal) {
+                close();
+                throw refusal;
+            }
         }
 
         private static Handle init(@Nullable Executor executor) {
@@ -905,7 +980,8 @@ public final class Types {
 
         /**
          * Widens a pointer a call wrote to the {@code length} bytes it addresses, readable until the
-         * arena closes, and keeping the arena reachable meanwhile.
+         * arena closes, and keeping the arena reachable meanwhile; the constructor already refused
+         * memory the host may not read.
          *
          * @throws IllegalStateException once the arena was closed.
          */
@@ -943,16 +1019,42 @@ public final class Types {
      * Mirrors {@code usearch_arena_description_t}.
      *
      * @param residency RAM for host pages, VRAM for one device's memory.
-     * @param device the ordinal of the device holding the outputs, empty for host pages.
+     * @param device the device's position in the GPU listing, empty for host pages.
+     * @param vendor the vendor whose memory it is, UNKNOWN for host pages.
+     * @param vendorOrdinal the vendor's own device number, which Arrow and DLPack name, empty for host pages.
+     * @param hostAccess whether host code may read the pages; every host view of the arena checks it.
      */
-    public record ArenaDescription(Residency residency, OptionalInt device) {
+    public record ArenaDescription(
+            Residency residency,
+            OptionalInt device,
+            GpuVendor vendor,
+            OptionalInt vendorOrdinal,
+            HostAccess hostAccess) {
+
+        /**
+         * Lets host code read the outputs, or refuses.
+         *
+         * @throws USearchException DEVICE when the outputs are memory the host may not read.
+         */
+        void host() {
+            if (hostAccess != HostAccess.READABLE) {
+                throw new USearchException(Status.DEVICE, "the outputs are memory the host may not read");
+            }
+        }
 
         /** Lifts a {@code usearch_arena_description_t}. */
         static ArenaDescription lift(MemorySegment description) {
-            Residency residency = Residency.of((int) DESCRIPTION_RESIDENCY.get(description, 0L));
-            long device = (long) DESCRIPTION_DEVICE.get(description, 0L);
             return new ArenaDescription(
-                    residency, residency == Residency.VRAM ? OptionalInt.of((int) device) : OptionalInt.empty());
+                    Residency.of((int) DESCRIPTION_RESIDENCY.get(description, 0L)),
+                    ordinal((int) DESCRIPTION_DEVICE.get(description, 0L)),
+                    GpuVendor.of((int) DESCRIPTION_VENDOR.get(description, 0L)),
+                    ordinal((int) DESCRIPTION_VENDOR_ORDINAL.get(description, 0L)),
+                    HostAccess.of((int) DESCRIPTION_HOST_ACCESS.get(description, 0L)));
+        }
+
+        /** Reads a device number the C side spells -1 for host pages. */
+        private static OptionalInt ordinal(int number) {
+            return number < 0 ? OptionalInt.empty() : OptionalInt.of(number);
         }
     }
 
@@ -1947,6 +2049,7 @@ public final class Types {
     private static final MethodHandle CPU_CLASS_NAME = Library.namer("usearch_cpu_class_name");
     private static final MethodHandle GPU_CLASS_NAME = Library.namer("usearch_gpu_class_name");
     private static final MethodHandle RESIDENCY_NAME = Library.namer("usearch_residency_name");
+    private static final MethodHandle HOST_ACCESS_NAME = Library.namer("usearch_host_access_name");
     private static final MethodHandle TRAVERSAL_NAME = Library.namer("usearch_traversal_name");
     private static final MethodHandle PHASE_NAME = Library.namer("usearch_phase_name");
 
@@ -2031,15 +2134,26 @@ public final class Types {
 
     private static final VarHandle ARENA_INIT_ARENA = ARENA_INIT.field("arena");
 
-    private static final MethodHandle ARENA_FREE =
-            Library.downcall("usearch_arena_free", FunctionDescriptor.ofVoid(Library.POINTER));
+    /**
+     * {@code usearch_arena_free}, its status dropped: it refuses only while an Arrow export of the
+     * outputs is open, and no Java view opens one, so every free here frees.
+     */
+    private static final MethodHandle ARENA_FREE = MethodHandles.dropReturn(
+            Library.downcall("usearch_arena_free", FunctionDescriptor.of(Library.ENUM, Library.POINTER)));
 
     /** {@code usearch_arena_description_t}. */
     private static final StructLayout ARENA_DESCRIPTION = MemoryLayout.structLayout(
-            Library.ENUM.withName("residency"), Library.padding(), Library.SIZE.withName("device"));
+            Library.ENUM.withName("residency"),
+            ValueLayout.JAVA_INT.withName("device"),
+            Library.ENUM.withName("vendor"),
+            ValueLayout.JAVA_INT.withName("vendor_ordinal"),
+            Library.ENUM.withName("host_access"));
 
     private static final VarHandle DESCRIPTION_RESIDENCY = Library.field(ARENA_DESCRIPTION, "residency");
     private static final VarHandle DESCRIPTION_DEVICE = Library.field(ARENA_DESCRIPTION, "device");
+    private static final VarHandle DESCRIPTION_VENDOR = Library.field(ARENA_DESCRIPTION, "vendor");
+    private static final VarHandle DESCRIPTION_VENDOR_ORDINAL = Library.field(ARENA_DESCRIPTION, "vendor_ordinal");
+    private static final VarHandle DESCRIPTION_HOST_ACCESS = Library.field(ARENA_DESCRIPTION, "host_access");
 
     /** {@code usearch_arena_describe_t}. */
     private static final Verb ARENA_DESCRIBE = new Verb(

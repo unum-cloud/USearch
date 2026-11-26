@@ -143,12 +143,14 @@ public static class Tape
 public readonly unsafe struct TapeEntries
 {
     private readonly NativeTapeView _view;
+    private readonly ArenaDescription _description;
 
-    internal TapeEntries(NativeTapeView view, int count, int width)
+    internal TapeEntries(NativeTapeView view, int count, int width, ArenaDescription description)
     {
         this._view = view;
         this.Count = view.Data == IntPtr.Zero ? 0 : count;
         this.Width = width;
+        this._description = description;
     }
 
     /// <summary>How many entries the call wrote; zero for an absent key.</summary>
@@ -164,6 +166,7 @@ public readonly unsafe struct TapeEntries
     /// <typeparam name="TElement">The element type, <c>byte</c> for sequences.</typeparam>
     /// <param name="entry">The entry, in the order the call wrote them.</param>
     /// <returns>Its elements, valid until the arena's next call or disposal.</returns>
+    /// <exception cref="USearchException"><see cref="Status.Device"/> over device memory.</exception>
     public ReadOnlySpan<TElement> Entry<TElement>(int entry) where TElement : unmanaged
     {
         if ((uint)entry >= (uint)this.Count)
@@ -171,6 +174,7 @@ public readonly unsafe struct TapeEntries
             throw new ArgumentOutOfRangeException(nameof(entry));
         }
 
+        this._description.Host();
         nuint* offsets = (nuint*)this._view.Offsets;
         nuint begin = offsets[entry] * (nuint)this.Width;
         int length = (int)((offsets[entry + 1] * (nuint)this.Width) - begin);

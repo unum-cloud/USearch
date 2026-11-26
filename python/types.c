@@ -189,6 +189,14 @@ static char const* spell_refine_verdict(int value) {
     return usearch_refine_verdict_name((usearch_refine_verdict_t)value);
 }
 
+/** The C surface spells no vendor, so the members hold the names the header documents. */
+static char const* spell_gpu_vendor(int value) {
+    static char const* const names[] = {"unknown", "nvidia", "amd", "apple"};
+    return value >= 0 && (size_t)value < usearch_py_table_size_(names) ? names[value] : "unknown";
+}
+
+static char const* spell_host_access(int value) { return usearch_host_access_name((usearch_host_access_t)value); }
+
 static char const* spell_phase(int value) { return usearch_phase_name((usearch_phase_t)value); }
 static char const* spell_predicate_cost(int value) {
     return usearch_predicate_cost_name((usearch_predicate_cost_t)value);
@@ -221,6 +229,10 @@ usearch_py_enum_t usearch_py_geospatial_relation = {"GeospatialRelation", usearc
                                                     NULL};
 usearch_py_enum_t usearch_py_refine_verdict = {"RefineVerdict", usearch_refine_none_k, usearch_refine_stopped_k,
                                                spell_refine_verdict, NULL};
+usearch_py_enum_t usearch_py_gpu_vendor = {"GPUVendor", usearch_gpu_vendor_nvidia_k, usearch_gpu_vendor_apple_k,
+                                           spell_gpu_vendor, NULL};
+usearch_py_enum_t usearch_py_host_access = {"HostAccess", usearch_host_access_refused_k, usearch_host_access_readable_k,
+                                            spell_host_access, NULL};
 usearch_py_enum_t usearch_py_phase = {"Phase", usearch_phase_none_k, usearch_phase_done_k, spell_phase, NULL};
 usearch_py_enum_t usearch_py_predicate_cost = {"PredicateCost", usearch_predicate_cost_cheap_k,
                                                usearch_predicate_cost_expensive_k, spell_predicate_cost, NULL};
@@ -265,7 +277,8 @@ int usearch_py_register_enums(PyObject* module) {
         &usearch_py_scalar,          &usearch_py_residency,     &usearch_py_traversal,
         &usearch_py_cpu_class,       &usearch_py_gpu_class,     &usearch_py_nvme_class,
         &usearch_py_sequence_metric, &usearch_py_shapes_metric, &usearch_py_geospatial_relation,
-        &usearch_py_refine_verdict,  &usearch_py_phase,         &usearch_py_predicate_cost};
+        &usearch_py_refine_verdict,  &usearch_py_phase,         &usearch_py_predicate_cost,
+        &usearch_py_gpu_vendor,      &usearch_py_host_access};
     PyObject* const enum_module = PyImport_ImportModule("enum");
     PyObject* const int_enum = enum_module ? PyObject_GetAttrString(enum_module, "IntEnum") : NULL;
     PyObject* keywords = int_enum ? PyDict_New() : NULL;
@@ -2906,31 +2919,40 @@ static PyObject* Arena_tp_new(PyTypeObject* type, PyObject* args, PyObject* keyw
 }
 
 static void Arena_dealloc(Arena* self) {
+    // Every export holds this object, so none is open and the free cannot be refused.
     Py_BEGIN_ALLOW_THREADS;
-    usearch_arena_free(self->handle);
+    (void)usearch_arena_free(self->handle);
     Py_END_ALLOW_THREADS;
     if (self->executor) executor_release((Executor*)self->executor);
     Py_XDECREF(self->executor);
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
-static char const doc_ArenaDescription[] =                                         //
-    "ArenaDescription(residency, device)\n"                                        //
-    "\n"                                                                           //
-    "Where an `Arena`'s outputs live, as `Arena.describe` reports it.\n"           //
-    "\n"                                                                           //
-    "Attributes:\n"                                                                //
-    "  residency (Residency): RAM for host pages, VRAM for one device's memory.\n" //
-    "  device (int | None): The device ordinal, as `Executor.for_vram` takes it; None for host pages.";
+static char const doc_ArenaDescription[] =                                                        //
+    "ArenaDescription(residency, device, vendor, vendor_ordinal, host_access)\n"                  //
+    "\n"                                                                                          //
+    "Where an `Arena`'s outputs live, as `Arena.describe` reports it.\n"                          //
+    "\n"                                                                                          //
+    "Attributes:\n"                                                                               //
+    "  residency (Residency): RAM for host pages, VRAM for one device's memory.\n"                //
+    "  device (int | None): The device ordinal, as `Executor.for_vram` takes it; None for host\n" //
+    "    pages.\n"                                                                                //
+    "  vendor (GPUVendor | None): Whose memory it is; None for host pages.\n"                     //
+    "  vendor_ordinal (int | None): The vendor's own device number, which DLPack and Arrow\n"     //
+    "    name; None for host pages.\n"                                                            //
+    "  host_access (HostAccess): Whether host code may read the outputs.";
 
 static PyStructSequence_Field ArenaDescription_fields[] = {
     {"residency", "RAM for host pages, VRAM for one device's memory."},
     {"device", "The device ordinal, as `Executor.for_vram` takes it; None for host pages."},
+    {"vendor", "Whose memory it is; None for host pages."},
+    {"vendor_ordinal", "The vendor's own device number, which DLPack and Arrow name; None for host pages."},
+    {"host_access", "Whether host code may read the outputs."},
     {NULL, NULL},
 };
 
 PyStructSequence_Desc usearch_py_arena_description_desc = {"usearch.ArenaDescription", doc_ArenaDescription,
-                                                           ArenaDescription_fields, 2};
+                                                           ArenaDescription_fields, 5};
 
 PyTypeObject ArenaDescriptionType;
 
@@ -2941,16 +2963,22 @@ static char const doc_Arena_describe[] =                              //
     "Calls `usearch_arena_describe`.\n"                               //
     "\n"                                                              //
     "Returns:\n"                                                      //
-    "  ArenaDescription: The residency, and the device for device memory.";
+    "  ArenaDescription: The residency, the device and its vendor, and whether the host reads it.";
 
 static PyObject* Arena_describe(Arena* self, PyObject* unused) {
     usearch_arena_description_t description = {0};
     if (usearch_py_arena_describe((PyObject*)self, &description) != 0) return NULL;
-    PyObject* fields[2] = {
+    // Each field reads as C reports it, None standing for its own "none" value.
+    PyObject* fields[5] = {
         usearch_py_enum_to_object(&usearch_py_residency, description.residency),
-        description.residency == usearch_residency_vram_k ? PyLong_FromSize_t(description.device) : Py_NewRef(Py_None),
+        description.device >= 0 ? PyLong_FromLong(description.device) : Py_NewRef(Py_None),
+        description.vendor != usearch_gpu_vendor_unknown_k
+            ? usearch_py_enum_to_object(&usearch_py_gpu_vendor, description.vendor)
+            : Py_NewRef(Py_None),
+        description.vendor_ordinal >= 0 ? PyLong_FromLong(description.vendor_ordinal) : Py_NewRef(Py_None),
+        usearch_py_enum_to_object(&usearch_py_host_access, description.host_access),
     };
-    return usearch_py_struct_sequence_steal(&ArenaDescriptionType, fields, 2);
+    return usearch_py_struct_sequence_steal(&ArenaDescriptionType, fields, 5);
 }
 
 static PyMethodDef Arena_methods[] = {
@@ -3001,21 +3029,48 @@ void* usearch_py_call_arena(usearch_py_call_t* call, PyObject* object, PyTypeObj
  *  an arena. */
 enum { arena_buffer_max_rank_k = 3 };
 
-/** Whether @p buffer lives in device memory, which the host may not dereference; -1 with an
- *  exception set when the library cannot say. */
-static int arena_buffer_on_device(ArenaBuffer const* buffer) {
+int usearch_py_host_readable(PyObject* arena) {
     usearch_arena_description_t description = {0};
-    if (usearch_py_arena_describe(buffer->arena, &description) != 0) return -1;
-    return description.residency == usearch_residency_vram_k;
+    if (usearch_py_arena_describe(arena, &description) != 0) return -1;
+    return description.host_access == usearch_host_access_readable_k;
+}
+
+/** Raises @c DeviceError unless @p description lets host code read the pages; 0, or -1. */
+static int refuse_host_read_of(usearch_arena_description_t const* description) {
+    if (description->host_access == usearch_host_access_readable_k) return 0;
+    return usearch_py_raise(usearch_status_device_k, "the host may not read this memory; read `__dlpack__`");
+}
+
+int usearch_py_refuse_host_read(PyObject* arena) {
+    usearch_arena_description_t description = {0};
+    if (usearch_py_arena_describe(arena, &description) != 0) return -1;
+    return refuse_host_read_of(&description);
+}
+
+char const doc_refuse_host_read[] =                                                               //
+    "_refuse_host_read(description, /) -> None\n"                                                 //
+    "\n"                                                                                          //
+    "The host-read guard every accessor runs, applied to a hand-built `ArenaDescription`, so a\n" //
+    "host with no GPU tests it. Raises `DeviceError` unless `host_access` is READABLE.\n"         //
+    "Python-only.";
+
+PyObject* api_refuse_host_read(PyObject* self, PyObject* description_object) {
+    if (!PyObject_TypeCheck(description_object, &ArenaDescriptionType))
+        return PyErr_Format(PyExc_TypeError, "expected an ArenaDescription, got %S", Py_TYPE(description_object));
+    long const host_access = PyLong_AsLong(PyStructSequence_GetItem(description_object, 4));
+    if (host_access == -1 && PyErr_Occurred()) return NULL;
+    usearch_arena_description_t const description = {.host_access = (usearch_host_access_t)host_access};
+    if (refuse_host_read_of(&description) != 0) return NULL;
+    Py_RETURN_NONE;
 }
 
 static int ArenaBuffer_getbuffer(ArenaBuffer* self, Py_buffer* view, int flags) {
-    // A device output's address is no host one, so the buffer protocol refuses it, Metal's too.
+    // Memory the host may not read has no host address, so the buffer protocol refuses it.
     view->obj = NULL;
-    int const on_device = arena_buffer_on_device(self);
-    if (on_device < 0) return -1;
-    if (on_device)
-        return usearch_py_raise(usearch_status_device_k, "the output lives in device memory; read `__dlpack__`");
+    int const readable = usearch_py_host_readable(self->arena);
+    if (readable < 0) return -1;
+    if (!readable)
+        return PyErr_SetString(PyExc_BufferError, "the host may not read this memory; read `__dlpack__`"), -1;
     Py_ssize_t bytes = self->item_bytes;
     for (int axis = 0; axis != self->rank; ++axis) bytes *= self->shape[axis];
     view->obj = Py_NewRef((PyObject*)self);
@@ -3048,9 +3103,9 @@ static PyObject* extents_to_tuple(Py_ssize_t const* extents, int rank) {
 }
 
 static PyObject* ArenaBuffer_get_cuda_array_interface(ArenaBuffer* self, void* closure) {
-    int const on_device = arena_buffer_on_device(self);
-    if (on_device < 0) return NULL;
-    if (!on_device) {
+    usearch_arena_description_t description = {0};
+    if (usearch_py_arena_describe(self->arena, &description) != 0) return NULL;
+    if (description.residency != usearch_residency_vram_k) {
         PyErr_SetString(PyExc_AttributeError, "the output lives in host memory; read it through the buffer protocol");
         return NULL;
     }
@@ -3082,25 +3137,11 @@ static int arena_buffer_dlpack_device(ArenaBuffer const* buffer, DLDevice* devic
     if (usearch_py_arena_describe(buffer->arena, &description) != 0) return -1;
     *device = (DLDevice) {kDLCPU, 0};
     if (description.residency != usearch_residency_vram_k) return 0;
-    // The library numbers devices across vendors, and DLPack by each vendor's own ordinal.
-    size_t const capacity = (size_t)description.device + 1;
-    usearch_gpu_device_t* const devices = PyMem_Calloc(capacity, sizeof(usearch_gpu_device_t));
-    if (!devices) return PyErr_NoMemory(), -1;
-    size_t count = 0;
-    usearch_outcome_t outcome = {0};
-    usearch_gpu_devices_t listing = {.outcome = &outcome,
-                                     .devices = devices,
-                                     .devices_capacity = capacity,
-                                     .devices_count = &count};
-    usearch_gpu_devices(&listing);
-    usearch_gpu_device_t const listed = devices[description.device];
-    PyMem_Free(devices);
-    if (usearch_py_raise_on_outcome(&outcome) != 0) return -1;
-    if (count < capacity) return usearch_py_raise(usearch_status_device_k, "the arena's device is past the listing");
-    DLDeviceType const type = listed.vendor == usearch_gpu_vendor_nvidia_k ? kDLCUDA
-                              : listed.vendor == usearch_gpu_vendor_amd_k  ? kDLROCM
-                                                                           : kDLMetal;
-    *device = (DLDevice) {type, (int32_t)listed.vendor_ordinal};
+    // DLPack numbers devices by each vendor's own ordinal, which the description carries.
+    DLDeviceType const type = description.vendor == usearch_gpu_vendor_nvidia_k ? kDLCUDA
+                              : description.vendor == usearch_gpu_vendor_amd_k  ? kDLROCM
+                                                                                : kDLMetal;
+    *device = (DLDevice) {type, description.vendor_ordinal};
     return 0;
 }
 
@@ -3140,6 +3181,7 @@ typedef struct arena_buffer_dlpack_t {
 static void arena_buffer_dlpack_release(arena_buffer_dlpack_t* export) {
     // Consumers such as PyTorch delete tensors from threads that do not hold the interpreter.
     PyGILState_STATE const interpreter = PyGILState_Ensure();
+    usearch_arena_export_close(usearch_py_arena_handle(export->owner->arena));
     Py_DECREF(export->owner);
     PyMem_Free(export);
     PyGILState_Release(interpreter);
@@ -3209,8 +3251,14 @@ static PyObject* ArenaBuffer_dlpack(ArenaBuffer* self, PyObject* const* args, Py
         versioned = major >= dlpack_major_version_k;
     }
 
+    // The arena refuses every call while the tensor is alive, so no rewind reaches its memory.
+    usearch_status_t const opened = usearch_arena_export_open(usearch_py_arena_handle(self->arena));
+    if (opened != usearch_status_success_k) return usearch_py_raise(opened, "the arena is serving a call"), NULL;
     arena_buffer_dlpack_t* const export = PyMem_Calloc(1, sizeof(arena_buffer_dlpack_t));
-    if (!export) return PyErr_NoMemory();
+    if (!export) {
+        usearch_arena_export_close(usearch_py_arena_handle(self->arena));
+        return PyErr_NoMemory();
+    }
     export->owner = (ArenaBuffer*)Py_NewRef((PyObject*)self);
     for (int axis = 0; axis != self->rank; ++axis) {
         export->shape[axis] = self->shape[axis];
@@ -3451,6 +3499,7 @@ static PyObject* Matches_item(Matches* self, Py_ssize_t query_index) {
         PyErr_SetString(PyExc_IndexError, "query index out of range");
         return NULL;
     }
+    if (usearch_py_refuse_host_read(self->arena) != 0) return NULL;
     usearch_matches_view_t const* const view = &self->view;
     // A count is the engine's word, and the sibling `multiply` verb documents counts that
     // exceed the column width outright - so it bounds a read here rather than defining one.
@@ -3577,6 +3626,7 @@ static PyObject* DenseProducts_query(DenseProducts* self, PyObject* query_object
         PyErr_SetString(PyExc_IndexError, "query index out of range");
         return NULL;
     }
+    if (usearch_py_refuse_host_read(self->arena) != 0) return NULL;
     size_t const begin = self->view.offsets[query], end = self->view.offsets[query + 1];
     Py_ssize_t const keys_shape[2] = {(Py_ssize_t)(end - begin), (Py_ssize_t)sizeof(usearch_key_t)};
     Py_ssize_t const scores_shape[1] = {(Py_ssize_t)(end - begin)};
@@ -3742,6 +3792,7 @@ static struct ArrowArray arrow_compacted_node(arrow_compacted_t* block, int64_t 
  *  The child schema moves out of an export of no rows, so its tags stay the library's.
  */
 static int matches_compact_export(Matches* self, struct ArrowSchema* schema, struct ArrowDeviceArray* device_array) {
+    if (usearch_py_refuse_host_read(self->arena) != 0) return -1;
     usearch_matches_tape_view_t const nothing = {0};
     struct ArrowSchema view_schema;
     struct ArrowDeviceArray view_array;

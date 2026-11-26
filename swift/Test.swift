@@ -184,6 +184,8 @@ struct VocabularyTests {
         #expect(Residency.vram.description == "vram")
         #expect(Residency(name: "nvme") == .nvme)
         #expect(Residency(name: "disk") == nil)
+        #expect(HostAccess.readable.description == "readable")
+        #expect(HostAccess.refused.description == "refused")
         #expect(Traversal.scan.description == "scan")
         #expect(Traversal(name: "walk") == .walk)
         #expect(Traversal(name: "sweep") == nil)
@@ -204,7 +206,20 @@ struct VocabularyTests {
         for arena in [try Arena(on: executor), try Arena()] {
             let description = try arena.describe()
             #expect(description.residency == .ram && description.device == nil)
+            #expect(description.vendor == .unknown && description.vendorOrdinal == nil)
+            #expect(description.hostAccess == .readable)
         }
+    }
+
+    /// A host read of memory the host may not read is refused; Apple's shared memory reads fine.
+    @Test func hostReadsFollowHostAccess() throws {
+        let device = ArenaDescription(residency: .vram, device: 0, vendor: .nvidia, vendorOrdinal: 0, hostAccess: .refused)
+        #expect(failureStatus(of: try device.host()) == .device)
+        let shared = ArenaDescription(residency: .vram, device: 0, vendor: .apple, vendorOrdinal: 0, hostAccess: .readable)
+        try shared.host()
+        guard let gpu = try? Executor.forVram(devices: [0]) else { return }
+        let description = try Arena(on: gpu).describe()
+        #expect(description.residency == .vram && description.device == 0 && description.vendor != .unknown)
     }
 
     @Test func theLibraryNamesItsCapabilities() {

@@ -30,6 +30,7 @@
 #include <cmath> // `std::sqrt`, `std::sin`, `std::cos`, `std::isnan`
 
 #include <array>    // `std::array`
+#include <iterator> // `std::size` - the relation spellings
 #include <limits>   // `std::numeric_limits`
 #include <numbers>  // `std::numbers::pi`
 #include <optional> // `std::optional`
@@ -445,6 +446,14 @@ struct usearch_geospatial_refine_plan_handle_t : long_verb_plan<usearch_geospati
 struct usearch_geospatial_reshard_plan_handle_t : long_verb_plan<usearch_geospatial_index_handle_t> {};
 
 extern "C" {
+
+/** The spelling of each relation, indexed by its value, from the unknown one on. */
+static char const* const relation_names_k[] = {"unknown", "near", "visible", "sees", "seen"};
+
+char const* usearch_geospatial_relation_name(usearch_geospatial_relation_t relation) {
+    std::size_t const value = static_cast<std::size_t>(relation);
+    return value < std::size(relation_names_k) ? relation_names_k[value] : "unrecognized";
+}
 
 void usearch_geospatial_init_ram(usearch_geospatial_init_ram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);

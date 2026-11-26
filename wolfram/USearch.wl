@@ -36,7 +36,7 @@ ExecutorForVram::usage = "ExecutorForVram[] orders work on one stream per device
 ExecutorForNvme::usage = "ExecutorForNvme[] opens one submission ring per worker for NVMe-resident indexes. \"Paths\" lists the devices or directories to serve shards from, {} leaving every shard where its manifest points, and \"Threads\" is how many workers to spawn, 0 deriving it from the devices' queues."
 ExecutorDrain::usage = "ExecutorDrain[executor, mood] waits until no call holds the executor, then sets what idle workers do: \"parked\", the default, or \"spinning\"."
 ArenaInit::usage = "ArenaInit[] makes an arena for verb outputs, placed where its \"Executor\" computes; None, the default, holds host memory for calls on the calling thread."
-ArenaDescribe::usage = "ArenaDescribe[arena] reports where the arena's outputs live: its \"Residency\", \"ram\" for host pages or \"vram\" for one device's memory, and the ordinal of that \"Device\", None for host pages."
+ArenaDescribe::usage = "ArenaDescribe[arena] reports where the arena's outputs live: its \"Residency\", \"ram\" for host pages or \"vram\" for one device's memory, the position of that \"Device\" among the library's GPUs, its \"Vendor\" and the \"VendorOrdinal\" its vendor numbers it by, each None for host pages, and \"HostAccess\", \"readable\" when host code may read the outputs or \"refused\" when only the device may."
 
 DenseInitRam::usage = "DenseInitRam[metric, quantization, dimensions] creates an empty, mutable index in host memory, scoring by metric, \"angular\" by default, and storing quantization scalars, \"bf16\" by default. \"Connectivity\" bounds the connections per node, 0 deriving it; \"ValuesPerKey\" bounds the entries sharing one key, 0 leaving it unbounded; and \"MemoryDomains\" lists the NUMA nodes to place shards on, {} deriving every node the process may allocate on."
 DenseInitVram::usage = "DenseInitVram[metric, quantization, dimensions] creates an empty, mutable index in device memory, scoring by metric, \"angular\" by default, and storing quantization scalars, \"bf16\" by default. \"Connectivity\" bounds the connections per node, 0 deriving it; \"ValuesPerKey\" bounds the entries sharing one key, 0 leaving it unbounded; and \"Devices\" lists the device ordinals to place shards on, {} picking device zero."
@@ -412,7 +412,7 @@ ExecutorDrain[executor_Executor, mood_String : "parked"] := call[executorDrain, 
 Options[ArenaInit] = {"Executor" -> None};
 ArenaInit[OptionsPattern[]] := construct[Arena, arenaInit, {OptionValue["Executor"]}]
 ArenaDescribe[arena_Arena] := Replace[call[arenaDescribe, {arena}],
-    description_Association :> Append[description, "Device" -> Replace[description["Device"], -1 -> None]]]
+    description_Association :> Join[description, Replace[description[[{"Device", "VendorOrdinal"}]], -1 -> None, {1}]]]
 
 Options[DenseInitRam] = {"Connectivity" -> 0, "ValuesPerKey" -> 0, "MemoryDomains" -> {}};
 DenseInitRam[metric_String : "angular", quantization_String : "bf16", dimensions_Integer, OptionsPattern[]] :=

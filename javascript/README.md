@@ -109,8 +109,8 @@ Each call rewinds its arena, so the previous call's views die and a steady loop 
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own.
 A deferred call uses its arena as a blocking one does: another call naming it before the first is final finishes with `Status.Contended`, and `free()` waits for it.
-A view ends at the next call on its arena, as a pointer into it would: its typed arrays read whatever the arena holds from then on, and a call naming a freed arena is refused with `Status.InvalidArgument`.
-An arena from a VRAM executor holds device memory, which `arena.describe()` names and only device code reads.
+A view ends at the next call on its arena: that call detaches every typed array over the previous call's outputs before it rewinds them, so an old view reads as empty, with `buffer.detached` set, instead of whatever the arena holds next. `free()` detaches the views still held the same way, and a call naming a freed arena is refused with `Status.InvalidArgument`.
+An arena from a VRAM executor may hold device memory, which `arena.describe().hostAccess` names: when it is `HostAccess.Refused`, a verb throws `Status.Device` rather than view the outputs.
 It grows, fills and frees on that executor's first stream, so it serves only calls on that executor and keeps it alive until freed, and the executor's `free()` refuses with `Status.Contended` while such an arena lives; free every arena before its executor, while one made without an executor lives until it is freed.
 
 ```js
@@ -181,7 +181,7 @@ TypeScript callers can narrow a caught value to the exported `USearchError` type
 ## Residency
 
 An executor and an index are each built through the residency they drive, so a direct `new usearch.Executor()` or `new usearch.DenseIndex()` throws and names the factories instead.
-An index runs its verbs only on an executor of its own residency, and `arena.describe()` reports where an arena's outputs live as `{ residency, device }`, with `device` `null` for host pages.
+An index runs its verbs only on an executor of its own residency, and `arena.describe()` reports where an arena's outputs live as `{ residency, device, vendor, vendorOrdinal, hostAccess }`, with `device` and `vendorOrdinal` `null` and `vendor` `"unknown"` for host pages.
 
 ```js
 const hostIndex = usearch.DenseIndex.initRam({ dimensions: 128 }, [0, 1]);
@@ -577,7 +577,7 @@ The Arrow converters of `c/usearch/arrow.h` are not bound either; `Tape` reads t
 - __No life of its own.__
   The binding starts no threads and keeps no queues; releasing a `Deferred` rides `using` and `Symbol.dispose`, which waits for the call first.
 - __Arenas belong to the caller and are reused, never shared.__
-  Every output whose length scales with the call lands in an arena the caller passes, and its views end at the arena's next call, as in C.
+  Every output whose length scales with the call lands in an arena the caller passes, and its views are detached at the arena's next call or `free()`.
 - __Nothing costs anything until it is used.__
   Submitting a call allocates nothing, and an arena allocates only when a call writes into it.
 - __Every wrapper names its C symbol.__

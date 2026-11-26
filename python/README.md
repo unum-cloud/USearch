@@ -107,6 +107,7 @@ Every output whose length only the call knows lands in a `usearch.Arena` you pas
 Each call rewinds its arena, so a steady loop allocates once and the previous call's views go stale; copy a result with `np.array(...)` or pass the next call another arena.
 An arena serves one call at a time, so each deferred call needs its own.
 A VRAM arena holds device memory and serves only its executor's calls, its views exporting `__cuda_array_interface__`, while every view exports `__dlpack__`, so `torch.from_dlpack(vectors)` takes it in place.
+`arena.describe()` names the residency, the device, its vendor and vendor ordinal, and `host_access`: where it reads `HostAccess.REFUSED`, the buffer protocol raises `BufferError` and the accessors that read on the host, such as `matches[0]`, raise `DeviceError`.
 
 ```python
 found, fetched = usearch.Arena(), usearch.Arena()  # Two live results, two arenas

@@ -1553,13 +1553,6 @@ struct hip_traversal_context {
      */
     status_t finished() const noexcept { return event_.finished(); }
 
-    /** Queues on this context's stream a wait for everything @p other recorded last, so work here
-     *  follows work there without the host waiting; the two may sit on different devices. */
-    status_t follow(hip_traversal_context const& other) noexcept {
-        return api().stream_wait_event(stream(), other.event_, 0) == hip_success_k ? status_code_t::success_k
-                                                                                   : status_code_t::device_k;
-    }
-
     /** The telemetry of the last submission, zeroed when it was queued; read once it finished. */
     vram_telemetry_block_t spent() const noexcept {
         return host_counters_ ? host_counters_->telemetry : vram_telemetry_block_t {};
@@ -1879,6 +1872,23 @@ struct hip_executor_t {
             if (status_t const bound = bind(); bound.failed()) return bound;
             if (status_t const recorded = event.record(handle); recorded.failed()) return recorded;
             return event.wait();
+        }
+
+        /**
+         *  @brief Queues on this stream a wait for everything @p other queued so far, marking it
+         *      with its device bound, so work here follows work there without the host waiting;
+         *      the two may sit on different devices.
+         *
+         *  @par Statuses:
+         *  - @c device_k A device could not be bound, or the driver refused the mark or the wait.
+         */
+        status_t follow(stream_t& other) noexcept {
+            if (status_t const bound = other.bind(); bound.failed()) return bound;
+            if (status_t const recorded = other.event.record(other.handle); recorded.failed()) return recorded;
+            if (status_t const bound = bind(); bound.failed()) return bound;
+            if (handle.api().stream_wait_event(handle, other.event, 0) != hip_success_k)
+                return {status_code_t::device_k, "The stream refused to wait on the mark"};
+            return {};
         }
 
         /**

@@ -1357,7 +1357,7 @@ static napi_value usearch_js_index_attend(napi_env env, napi_callback_info info)
         !usearch_js_arena_from_value(env, arguments[11], &attend.arena))
         return NULL;
     usearch_outcome_t described = {usearch_status_success_k, NULL};
-    usearch_arena_description_t description = {usearch_residency_ram_k, 0};
+    usearch_arena_description_t description = {.residency = usearch_residency_ram_k, .device = -1};
     usearch_arena_describe_t describe = {.arena = attend.arena, .outcome = &described, .description = &description};
     usearch_arena_describe(&describe);
     if (!usearch_js_succeeded(env, &described)) return NULL;
@@ -1500,7 +1500,8 @@ napi_value usearch_js_finish_cursor_links(napi_env env, usearch_js_call_t* call,
     usearch_js_index_call_t const* const dense = (usearch_js_index_call_t const*)call;
     napi_value const arena = slots[usearch_js_slot_arena_k];
     napi_value const batch = usearch_js_finish_cursor_keys(env, call, slots);
-    size_t const linked = dense->links.offsets ? dense->links.offsets[dense->written] : 0;
+    // Read only once the keys' view has proven the host may read the arena.
+    size_t const linked = batch && dense->links.offsets ? dense->links.offsets[dense->written] : 0;
     napi_value const offsets = batch ? usearch_js_arena_view(env, arena, napi_biguint64_array,
                                                              (void*)dense->links.offsets,
                                                              (dense->written + 1) * sizeof(size_t), dense->written + 1)

@@ -1270,7 +1270,7 @@ pub trait ShapesVerbs<'index>: Copy {
             handles: Handles::of(index, executor),
             key,
             arena,
-            shapes: TapeEntries::new(),
+            shapes: TapeEntries::new(arena),
         })
     }
 
@@ -1518,7 +1518,7 @@ impl<'index> ShapesCursor<'index> {
         arena: &'arena mut Arena<'_>,
     ) -> Result<DenseBatch<'arena>> {
         let mut batch = DenseBatch {
-            arena: PhantomData,
+            arena,
             keys: usearch_keys_view_t::default(),
             links: linked.then(usearch_keys_tape_view_t::default),
             written: 0,
@@ -2193,7 +2193,7 @@ mod tests {
         let mut arena = Arena::new().unwrap();
         let stored = index.get::<f32>(shared, &mut arena).unwrap();
         assert_eq!(stored.written(), 2);
-        for (restored, inserted) in stored.iter().zip(&shapes) {
+        for (restored, inserted) in stored.iter().unwrap().zip(&shapes) {
             assert_eq!(restored.len(), inserted.len());
             let flat = |cloud: &[[f32; 3]]| cloud.iter().flatten().copied().collect::<Vec<f32>>();
             assert_close_rows(&flat(restored), &flat(inserted), 1e-4);
@@ -2239,7 +2239,7 @@ mod tests {
         let index = populated_index(32, 0, case_stream_key(0)).unwrap();
         let mut arena = Arena::new().unwrap();
         let saved = index.save_buffer(&mut arena).unwrap();
-        let monolith = saved.view();
+        let monolith = saved.view().unwrap();
         assert!(!monolith.is_empty());
 
         assert_eq!(ShapesIndex::metadata_buffer(monolith).unwrap().metric, ShapesMetric::Chamfer);

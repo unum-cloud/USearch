@@ -52,22 +52,25 @@ func TestGeospatialSearchFindsTheInsertedEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the search must run: %v", err)
 	}
-	if keys, distances := matches.Query(0); len(keys) != 1 || keys[0] != KeyFromUint64(3) || distances[0] != 0 {
+	if keys, distances, _ := matches.Query(0); len(keys) != 1 || keys[0] != KeyFromUint64(3) || distances[0] != 0 {
 		t.Errorf("the search found %v at %v", keys, distances)
 	}
 	within, err := index.Within(observations[:1], GeospatialRelationNear, 2000, arena, nil)
 	if err != nil {
 		t.Fatalf("the containment must run: %v", err)
 	}
-	if keys, _ := within.Query(0); len(keys) != 2 || within.Written() != 2 {
+	if keys, _, _ := within.Query(0); len(keys) != 2 || within.Written() != 2 {
 		t.Errorf("the radius held %v of %d", keys, within.Written())
 	}
 	if _, err := index.Within(observations[:1], GeospatialRelationVisible, 2000, arena, nil); !errors.Is(err, StatusUnsupported) {
 		t.Errorf("a visible relation without terrain reported %v", err)
 	}
 	stored, err := index.Get(KeyFromUint64(3), arena)
-	if err != nil || stored.Written() != 1 || !nearly(stored.Observations()[0].LatitudeDegrees, 52.52, 1e-6) {
-		t.Errorf("the key got %+v: %v", stored.Observations(), err)
+	if err != nil {
+		t.Fatalf("the key must get: %v", err)
+	}
+	if read, err := stored.Observations(); err != nil || stored.Written() != 1 || !nearly(read[0].LatitudeDegrees, 52.52, 1e-6) {
+		t.Errorf("the key got %+v: %v", read, err)
 	}
 	if stats, err := index.Count(KeyFromUint64(3)); err != nil || stats.Entries != 1 {
 		t.Errorf("the key counts %+v: %v", stats, err)
@@ -155,7 +158,11 @@ func TestGeospatialCursorsWalkEveryEntryOnce(t *testing.T) {
 		if batch.Written() == 0 {
 			break
 		}
-		for _, key := range batch.Keys() {
+		pulled, err := batch.Keys()
+		if err != nil {
+			t.Fatalf("the batch must read: %v", err)
+		}
+		for _, key := range pulled {
 			seen[key] = true
 		}
 	}
@@ -187,12 +194,16 @@ func TestGeospatialSavesAndLoads(t *testing.T) {
 	if _, err := GeospatialMetadataRead(path, nil); err != nil {
 		t.Errorf("the checkpoint's metadata must read: %v", err)
 	}
-	if _, err := GeospatialMetadataReadBuffer(monolith.Bytes(), nil); err != nil {
+	buffer, err := monolith.Bytes()
+	if err != nil {
+		t.Fatalf("the monolith must read: %v", err)
+	}
+	if _, err := GeospatialMetadataReadBuffer(buffer, nil); err != nil {
 		t.Errorf("the monolith's metadata must read: %v", err)
 	}
 	loaded := []func() (*GeospatialIndex, error){
 		func() (*GeospatialIndex, error) { return GeospatialLoadRam(path, nil) },
-		func() (*GeospatialIndex, error) { return GeospatialLoadRamBuffer(monolith.Bytes(), nil) },
+		func() (*GeospatialIndex, error) { return GeospatialLoadRamBuffer(buffer, nil) },
 		func() (*GeospatialIndex, error) { return GeospatialViewRam(path) },
 	}
 	for position, load := range loaded {

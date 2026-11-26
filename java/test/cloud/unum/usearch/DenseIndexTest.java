@@ -51,6 +51,8 @@ import cloud.unum.usearch.Types.ArenaDescription;
 import cloud.unum.usearch.Types.Deferred;
 import cloud.unum.usearch.Types.Executor;
 import cloud.unum.usearch.Types.Extents;
+import cloud.unum.usearch.Types.GpuVendor;
+import cloud.unum.usearch.Types.HostAccess;
 import cloud.unum.usearch.Types.Key;
 import cloud.unum.usearch.Types.Matches;
 import cloud.unum.usearch.Types.Monolith;
@@ -192,6 +194,9 @@ public class DenseIndexTest {
         assertEquals("spinning", Mood.SPINNING.toString());
         assertEquals("jaccard", DenseMetric.JACCARD.toString());
         assertEquals("vram", Residency.VRAM.toString());
+        assertEquals("refused", HostAccess.REFUSED.toString());
+        assertEquals("readable", HostAccess.READABLE.toString());
+        assertEquals(HostAccess.READABLE, HostAccess.of(HostAccess.READABLE.code()));
         assertEquals("scan", Traversal.SCAN.toString());
     }
 
@@ -223,6 +228,43 @@ public class DenseIndexTest {
                                 USearchException.class,
                                 () -> Executor.forVram(new int[] {0, 1}, null, new MemorySegment[1], 0))
                         .status());
+    }
+
+    @Test
+    public void hostReadsOfDeviceMemoryAreRefused() {
+        ArenaDescription device = new ArenaDescription(
+                Residency.VRAM, OptionalInt.of(0), GpuVendor.NVIDIA, OptionalInt.of(0), HostAccess.REFUSED);
+        assertEquals(Status.DEVICE, assertThrows(USearchException.class, device::host).status());
+        new ArenaDescription(
+                        Residency.VRAM,
+                        OptionalInt.of(0),
+                        GpuVendor.APPLE,
+                        OptionalInt.of(0),
+                        HostAccess.READABLE)
+                .host();
+    }
+
+    @Test
+    public void hostReadsOfDeviceArenasAreRefused() {
+        Executor gpu;
+        try {
+            gpu = Executor.forVram(new int[] {0}, null, new MemorySegment[0], 0);
+        } catch (USearchException missing) {
+            assumeTrue(false, "no GPU device");
+            return;
+        }
+        try (gpu) {
+            Arena readable;
+            try {
+                readable = new Arena(gpu);
+            } catch (USearchException refusal) {
+                assertEquals(Status.DEVICE, refusal.status(), "device memory is refused before any call runs");
+                return;
+            }
+            try (readable) {
+                assertEquals(HostAccess.READABLE, readable.describe().hostAccess());
+            }
+        }
     }
 
     @Test
@@ -495,7 +537,14 @@ public class DenseIndexTest {
             assertFalse(index.contains(Key.of(6)));
 
             Arena arena = new Arena(POOL);
-            assertEquals(new ArenaDescription(Residency.RAM, OptionalInt.empty()), arena.describe());
+            assertEquals(
+                    new ArenaDescription(
+                            Residency.RAM,
+                            OptionalInt.empty(),
+                            GpuVendor.UNKNOWN,
+                            OptionalInt.empty(),
+                            HostAccess.READABLE),
+                    arena.describe());
             DenseVectors every = index.get(Key.of(5), Scalar.F64, arena);
             assertEquals(3, every.rows());
             assertEquals(2 * Double.BYTES, every.strideBytes());

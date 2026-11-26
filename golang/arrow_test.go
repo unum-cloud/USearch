@@ -7,6 +7,7 @@
 package usearch_test
 
 import (
+	"errors"
 	"slices"
 	"testing"
 
@@ -45,6 +46,11 @@ func TestArrowColumnsRoundTrip(t *testing.T) {
 	if err != nil || rows.Rows() != 1 || rows.Dimensions() != 4 || rows.Scalar() != usearch.ScalarF32 {
 		t.Fatalf("viewed %d rows of %d %v, %v", rows.Rows(), rows.Dimensions(), rows.Scalar(), err)
 	}
+	// The export pins the arena: closing it now frees nothing, and the deferred Close succeeds once
+	// the array is released.
+	if err := arena.Close(); !errors.Is(err, usearch.StatusContended) {
+		t.Fatalf("closing an exported arena must be refused, got %v", err)
+	}
 	// The rows live in arena, which the search would rewind under them, so it writes into another.
 	searched, err := usearch.NewArena(nil)
 	if err != nil {
@@ -55,7 +61,7 @@ func TestArrowColumnsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the exported row must search: %v", err)
 	}
-	if found, _ := matches.Query(0); !slices.Equal(found, keys[1:]) {
+	if found, _, _ := matches.Query(0); !slices.Equal(found, keys[1:]) {
 		t.Fatalf("the exported row found %v", found)
 	}
 }

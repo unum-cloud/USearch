@@ -1123,6 +1123,18 @@ test("Arenas hold every output whose length scales with the call", async (t) => 
     assert.deepEqual(latest.data, new Float32Array([1, 0, 0, 0]));
   });
 
+  await t.test("the next call on an arena detaches the views of the one before", () => {
+    const arena = new Arena();
+    const earlier = index.get(1n, arena).data;
+    assert.equal(earlier.buffer.detached, false);
+    const later = index.get(2n, arena).data;
+    assert.equal(earlier.buffer.detached, true, "a rewound view throws rather than reads new rows");
+    assert.equal(earlier.length, 0);
+    assert.deepEqual(later, new Float32Array([0, 1, 0, 0]));
+    arena.free();
+    assert.equal(later.buffer.detached, true, "a freed arena detaches every view still held");
+  });
+
   await t.test("a freed arena is refused by every later call", () => {
     const arena = new Arena();
     index.get(1n, arena);
@@ -1131,12 +1143,38 @@ test("Arenas hold every output whose length scales with the call", async (t) => 
     assert.throws(() => index.get(1n, arena), { code: Status.InvalidArgument });
   });
 
-  await t.test("a host arena describes itself as RAM with no device", () => {
-    assert.deepEqual(new Arena().describe(), { residency: usearch.Residency.Ram, device: null });
-    assert.deepEqual(new Arena(EXECUTOR).describe(), { residency: usearch.Residency.Ram, device: null });
+  await t.test("a host arena describes itself as readable RAM with no device", () => {
+    const host = {
+      residency: usearch.Residency.Ram,
+      device: null,
+      vendor: "unknown",
+      vendorOrdinal: null,
+      hostAccess: usearch.HostAccess.Readable,
+    };
+    assert.deepEqual(new Arena().describe(), host);
+    assert.deepEqual(new Arena(EXECUTOR).describe(), host);
     assert.throws(() => new Arena({}), {
       code: Status.InvalidArgument,
     });
+  });
+
+  await t.test("outputs the host may not read are refused rather than viewed", (t) => {
+    let gpu, device;
+    try {
+      gpu = Executor.forVram({ devices: [0] });
+      device = DenseIndex.initVram({ metric: DenseMetric.Inner, dimensions: 4 }, [0]);
+    } catch {
+      return t.skip("no GPU device");
+    }
+    const arena = new Arena(gpu);
+    if (arena.describe().hostAccess !== usearch.HostAccess.Refused) return t.skip("the GPU's memory is host-readable");
+    device.on(gpu).reserve(1);
+    device.on(gpu).insert(1n, rows(4, 1, 0, 0, 0));
+    assert.throws(() => device.on(gpu).search(rows(4, 1, 0, 0, 0), 1, arena), {
+      code: Status.Device,
+      message: "the outputs are memory the host may not read",
+    });
+    arena.free();
   });
 
   await t.test("the exported kind decides the element type and the byte count", () => {

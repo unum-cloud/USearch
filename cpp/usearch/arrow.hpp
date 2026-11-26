@@ -7,7 +7,9 @@
  *
  *  A converter reads one column's schema and array and answers the view with its entry count, or
  *  the status explaining why the column has no such view. An exporter fills a caller's schema and
- *  device array, which read the arena's outputs until its next call and release apart.
+ *  device array, which release apart. Until the array is released, the arena counts it as an open
+ *  export: every call naming the arena answers contended, and the arena has to outlive the array,
+ *  since an @c arena_t dying meanwhile cannot free it and leaves it allocated.
  *
  *  @code{.cpp}
  *  namespace us = unum::usearch;

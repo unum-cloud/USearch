@@ -2283,7 +2283,7 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
 
     var arena: Arena = try .init(executor);
     defer arena.deinit();
-    try std.testing.expectEqual(types.ArenaDescription{ .residency = .ram, .device = null }, try arena.describe());
+    try std.testing.expectEqual(types.ArenaDescription{ .residency = .ram, .device = null, .vendor = .unknown, .vendor_ordinal = null, .host_access = .readable }, try arena.describe());
     const matches = try index.on(executor).search(try .ofRow(f32, slab[0..dimensions]), 2, &arena, .{ .stats = &stats });
     try std.testing.expectEqual(@as(usize, 2), matches.query(0).keys.len);
     try std.testing.expectEqual(keys[0], matches.query(0).keys[0]);

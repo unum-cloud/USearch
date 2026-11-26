@@ -21,7 +21,7 @@ extern fn usearch_executor_for_vram(arguments: *usearch_executor_for_vram_t) voi
 extern fn usearch_executor_drain(arguments: *usearch_executor_drain_t) void;
 extern fn usearch_executor_free(executor: ?*anyopaque) void;
 extern fn usearch_arena_init(arguments: *usearch_arena_init_t) void;
-extern fn usearch_arena_free(arena: ?*anyopaque) void;
+extern fn usearch_arena_free(arena: ?*anyopaque) Status;
 extern fn usearch_arena_describe(arguments: *usearch_arena_describe_t) void;
 
 extern fn usearch_status_name(status: Status) [*:0]const u8;
@@ -30,6 +30,7 @@ extern fn usearch_scalar_name(scalar: Scalar) [*:0]const u8;
 extern fn usearch_scalar_from_name(name: BytesView, scalar: *Scalar) Status;
 extern fn usearch_residency_name(residency: Residency) [*:0]const u8;
 extern fn usearch_residency_from_name(name: BytesView, residency: *Residency) Status;
+extern fn usearch_host_access_name(host_access: HostAccess) [*:0]const u8;
 extern fn usearch_traversal_name(traversal: Traversal) [*:0]const u8;
 extern fn usearch_traversal_from_name(name: BytesView, traversal: *Traversal) Status;
 extern fn usearch_mood_name(mood: Mood) [*:0]const u8;
@@ -853,7 +854,10 @@ const usearch_arena_init_t = extern struct {
 
 const usearch_arena_description_t = extern struct {
     residency: Residency = .ram,
-    device: usize = 0,
+    device: i32 = -1,
+    vendor: GPUVendor = .unknown,
+    vendor_ordinal: i32 = -1,
+    host_access: HostAccess = .refused,
 };
 
 const usearch_arena_describe_t = extern struct {
@@ -1009,17 +1013,18 @@ pub const Executor = struct {
 /// mark, so a steady loop allocates once. An arena serves one call at a time: a second use while a
 /// call holds it fails with `Error.Contended` and leaves that call's views alone.
 ///
-/// A GPU arena holds device memory, which `describe` reports and no host accessor may read. It
-/// grows, fills and frees on the first stream of the executor that made it, so it serves only calls
-/// on that executor, any other or none answering `Error.Device`, and must be freed before that
-/// executor is.
+/// Every output an arena hands back is a host slice, so `init` refuses with `Error.Device` an
+/// executor whose memory the host may not read; Apple's shared and CUDA's managed memory pass. A
+/// GPU arena grows, fills and frees on the first stream of the executor that made it, so it serves
+/// only calls on that executor, any other or none answering `Error.Device`, and must be freed
+/// before that executor is.
 pub const Arena = struct {
     /// The opaque `usearch_arena_t` the ABI hands back; null once freed.
     handle: ?*anyopaque,
 
     /// Makes an arena where `executor` computes, decided once, or host pages for calls on the
-    /// calling thread when null; every arena is freed before its executor.
-    /// Calls `usearch_arena_init`.
+    /// calling thread when null; every arena is freed before its executor. Refuses with
+    /// `Error.Device` memory the host may not read. Calls `usearch_arena_init`.
     pub fn init(executor: ?Executor) Error!Arena {
         var arena: Arena = .{ .handle = null };
         var outcome: Outcome = .{};
@@ -1029,15 +1034,16 @@ pub const Arena = struct {
             .outcome = &outcome,
         };
         usearch_arena_init(&arguments);
-        errdefer usearch_arena_free(arena.handle);
+        errdefer _ = usearch_arena_free(arena.handle);
         try outcome.check();
+        try (try arena.describe()).host();
         return arena;
     }
 
-    /// Frees every output in it, waiting for every deferred call naming it.
-    /// Calls `usearch_arena_free`.
+    /// Frees every output in it, waiting for every deferred call naming it. Zig opens no export,
+    /// so the free is never refused. Calls `usearch_arena_free`.
     pub fn deinit(self: *Arena) void {
-        usearch_arena_free(self.handle);
+        _ = usearch_arena_free(self.handle);
         self.handle = null;
     }
 
@@ -1051,7 +1057,10 @@ pub const Arena = struct {
         try outcome.check();
         return .{
             .residency = description.residency,
-            .device = if (description.residency == .vram) @intCast(description.device) else null,
+            .device = std.math.cast(u32, description.device),
+            .vendor = description.vendor,
+            .vendor_ordinal = std.math.cast(u32, description.vendor_ordinal),
+            .host_access = description.host_access,
         };
     }
 };
@@ -1060,8 +1069,45 @@ pub const Arena = struct {
 pub const ArenaDescription = struct {
     /// `.ram` for host pages, `.vram` for one device's memory.
     residency: Residency,
-    /// The ordinal of the device holding a `.vram` arena; null for host pages.
+    /// The position in the library's GPU listing; null for host pages.
     device: ?u32,
+    /// Which vendor's memory it is; `.unknown` for host pages.
+    vendor: GPUVendor,
+    /// The vendor's own device number, which Arrow and DLPack name; null for host pages.
+    vendor_ordinal: ?u32,
+    /// Whether host code may read the pages: host, pinned, managed and Apple's shared memory.
+    host_access: HostAccess,
+
+    /// Refuses with `Error.Device` memory the host may not read.
+    pub fn host(self: ArenaDescription) Error!void {
+        if (self.host_access != .readable) return Error.Device;
+    }
+};
+
+/// The GPU vendor whose runtime drives a device. Mirrors `usearch_gpu_vendor_t`.
+pub const GPUVendor = enum(c_int) {
+    unknown = 0,
+    /// NVIDIA, through the CUDA driver.
+    nvidia = 1,
+    /// AMD, through the HIP runtime.
+    amd = 2,
+    /// Apple, through Metal.
+    apple = 3,
+    _,
+};
+
+/// Whether host code may read an arena's pages. Mirrors `usearch_host_access_t`.
+pub const HostAccess = enum(c_int) {
+    /// Device memory, which host code must not read.
+    refused = 0,
+    /// Host, pinned, managed or Apple's shared memory.
+    readable = 1,
+    _,
+
+    /// The canonical spelling, as `.readable` spells "readable". Calls `usearch_host_access_name`.
+    pub fn name(self: HostAccess) [:0]const u8 {
+        return std.mem.span(usearch_host_access_name(self));
+    }
 };
 
 /// The library's version, as a static null-terminated string. Calls `usearch_version_name`.
@@ -1088,9 +1134,8 @@ fn expectSpellings(comptime Enum: type) !void {
         var dashed: [field.name.len]u8 = field.name[0..].*;
         std.mem.replaceScalar(u8, &dashed, '_', '-');
         try std.testing.expectEqualStrings(&dashed, value.name());
-        // "unknown" spells the zero enumerator, which the library refuses to read back.
-        const expected: ?Enum = if (comptime std.mem.eql(u8, field.name, "unknown")) null else value;
-        try std.testing.expectEqual(expected, Enum.fromName(&dashed));
+        // Every declared enumerator reads back, "unknown" included.
+        try std.testing.expectEqual(@as(?Enum, value), Enum.fromName(&dashed));
     }
 }
 
@@ -1120,6 +1165,9 @@ test "every enumerator keeps the value the linked library spells it by" {
     try expectSpellings(Traversal);
     try expectSpellings(Mood);
     try expectSpellings(Phase);
+    // Host access is only ever reported, so it spells its name without reading one back.
+    try std.testing.expectEqualStrings("refused", HostAccess.refused.name());
+    try std.testing.expectEqualStrings("readable", HostAccess.readable.name());
     try std.testing.expectEqualStrings("unrecognized", (@as(Status, @enumFromInt(9999))).name());
     try std.testing.expectEqual(@as(?Status, null), Status.fromName("pending"));
     try std.testing.expectEqual(@as(?Mood, null), Mood.fromName("chill"));
@@ -1127,6 +1175,20 @@ test "every enumerator keeps the value the linked library spells it by" {
     try std.testing.expectEqual(@as(?Residency, null), Residency.fromName("disk"));
     try std.testing.expectEqual(@as(?Traversal, null), Traversal.fromName("exact"));
     try std.testing.expectEqual(@as(?Scalar, null), Scalar.fromName("f128"));
+}
+
+test "host reads refuse memory the host may not read" {
+    var arena = try Arena.init(null);
+    defer arena.deinit();
+    const host = try arena.describe();
+    try std.testing.expectEqual(HostAccess.readable, host.host_access);
+    try std.testing.expectEqual(@as(?u32, null), host.device);
+    const device: ArenaDescription = .{ .residency = .vram, .device = 0, .vendor = .nvidia, .vendor_ordinal = 0, .host_access = .refused };
+    try std.testing.expectError(Error.Device, device.host());
+    var shared = device;
+    shared.vendor = .apple;
+    shared.host_access = .readable;
+    try shared.host();
 }
 
 test "integer identities park in the low eight bytes" {

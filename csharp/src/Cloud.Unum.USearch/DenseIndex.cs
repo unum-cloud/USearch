@@ -1646,7 +1646,7 @@ internal unsafe struct DenseGetCall(CallHandles handles, Key key, Arena arena, S
     public void Finish(CallOutputs* outputs)
     {
         outputs->Outcome.ThrowIfFailed();
-        this.Result = new DenseVectors(*(NativeRowsView*)outputs->View, (int)outputs->Written);
+        this.Result = new DenseVectors(*(NativeRowsView*)outputs->View, (int)outputs->Written, arena.Description);
     }
 }
 
@@ -1798,7 +1798,7 @@ internal unsafe struct DenseSearchCall(
     {
         outputs->Outcome.ThrowIfFailed();
         stats?.Adopt(*(NativeDenseTraversalStats*)outputs->Report);
-        this.Result = new Matches(*(NativeMatchesView*)outputs->View, queries.Rows);
+        this.Result = new Matches(*(NativeMatchesView*)outputs->View, queries.Rows, arena.Description);
     }
 }
 
@@ -1851,7 +1851,7 @@ internal unsafe struct DenseMaxsimCall(
         outputs->Outcome.ThrowIfFailed();
         stats?.Adopt(*(NativeDenseTraversalStats*)outputs->Report);
         this.Result = new DenseProducts(
-            *(NativeMatchesTapeView*)outputs->View, queries.Rows / rowsPerQuery, outputs->Required);
+            *(NativeMatchesTapeView*)outputs->View, queries.Rows / rowsPerQuery, outputs->Required, arena.Description);
     }
 }
 
@@ -1895,7 +1895,8 @@ internal unsafe struct DenseMultiplyCall(
     {
         outputs->Outcome.ThrowIfFailed();
         stats?.Adopt(*(NativeDenseTraversalStats*)outputs->Report);
-        this.Result = new DenseProducts(*(NativeMatchesTapeView*)outputs->View, left.Rows, outputs->Required);
+        this.Result = new DenseProducts(
+            *(NativeMatchesTapeView*)outputs->View, left.Rows, outputs->Required, arena.Description);
     }
 }
 
@@ -1957,7 +1958,7 @@ internal unsafe struct DenseAttendCall(
     {
         outputs->Outcome.ThrowIfFailed();
         stats?.Adopt(*(NativeDenseTraversalStats*)outputs->Report);
-        this.Result = new DenseVectors(*(NativeRowsView*)outputs->View, queries.Rows);
+        this.Result = new DenseVectors(*(NativeRowsView*)outputs->View, queries.Rows, arena.Description);
     }
 }
 
@@ -2183,7 +2184,7 @@ internal unsafe struct DenseSampleCall(CallHandles handles, int wanted, Arena ar
         config.Stats?.Adopt(reports->Stats);
         this.Result = new Sample(
             reports->Keys, reports->EntryOrdinals, *(NativeMatchesView*)outputs->View, reports->Coordinates,
-            (int)outputs->Written);
+            (int)outputs->Written, arena.Description);
     }
 }
 
@@ -2255,7 +2256,7 @@ internal unsafe struct DenseSaveBufferCall(CallHandles handles, Arena arena, Pro
     public void Finish(CallOutputs* outputs)
     {
         outputs->Outcome.ThrowIfFailed();
-        this.Result = new Monolith(*(NativeBytesView*)outputs->View);
+        this.Result = new Monolith(*(NativeBytesView*)outputs->View, arena.Description);
     }
 }
 
@@ -2293,10 +2294,12 @@ internal sealed unsafe class ValueRows(Func<Key, int> rowOf, RowsView values, by
 public readonly unsafe struct DenseVectors
 {
     private readonly byte* _data;
+    private readonly ArenaDescription _description;
 
-    internal DenseVectors(NativeRowsView view, int rows)
+    internal DenseVectors(NativeRowsView view, int rows, ArenaDescription description)
     {
         this._data = (byte*)view.Data;
+        this._description = description;
         this.Rows = rows;
         this.StrideBytes = (int)view.Stride;
         this.Columns = (int)view.Columns;
@@ -2326,6 +2329,7 @@ public readonly unsafe struct DenseVectors
             throw new ArgumentOutOfRangeException(nameof(row));
         }
 
+        this._description.Host();
         int values = (int)this.Scalar.RowBytes((ulong)this.Columns) / sizeof(TScalar);
         return new ReadOnlySpan<TScalar>(this._data + ((long)row * this.StrideBytes), values);
     }
@@ -2339,10 +2343,12 @@ public readonly unsafe struct DenseVectors
 public readonly unsafe struct DenseProducts
 {
     private readonly NativeMatchesTapeView _view;
+    private readonly ArenaDescription _description;
 
-    internal DenseProducts(NativeMatchesTapeView view, int queries, nuint required)
+    internal DenseProducts(NativeMatchesTapeView view, int queries, nuint required, ArenaDescription description)
     {
         this._view = view;
+        this._description = description;
         this.Queries = queries;
         this.Required = (ulong)required;
     }
@@ -2372,6 +2378,7 @@ public readonly unsafe struct DenseProducts
             throw new ArgumentOutOfRangeException(nameof(query));
         }
 
+        this._description.Host();
         return this._view.Offsets[query];
     }
 
@@ -2385,10 +2392,12 @@ public readonly unsafe struct DenseProducts
 public readonly unsafe struct Monolith
 {
     private readonly byte* _data;
+    private readonly ArenaDescription _description;
 
-    internal Monolith(NativeBytesView view)
+    internal Monolith(NativeBytesView view, ArenaDescription description)
     {
         this._data = (byte*)view.Data;
+        this._description = description;
         this.Length = (long)view.Length;
     }
 
@@ -2396,10 +2405,18 @@ public readonly unsafe struct Monolith
     public long Length { get; }
 
     /// <summary>The monolith's bytes, valid until the arena's next call or disposal; a monolith past
-    /// 2 GiB refuses with <see cref="Status.Overflow"/>.</summary>
-    public ReadOnlySpan<byte> Bytes => this.Length <= int.MaxValue
-        ? new ReadOnlySpan<byte>(this._data, (int)this.Length)
-        : throw new USearchException(Status.Overflow, "the monolith exceeds what one span can address");
+    /// 2 GiB refuses with <see cref="Status.Overflow"/>, one in device memory with
+    /// <see cref="Status.Device"/>.</summary>
+    public ReadOnlySpan<byte> Bytes
+    {
+        get
+        {
+            this._description.Host();
+            return this.Length <= int.MaxValue
+                ? new ReadOnlySpan<byte>(this._data, (int)this.Length)
+                : throw new USearchException(Status.Overflow, "the monolith exceeds what one span can address");
+        }
+    }
 }
 
 /// <summary>
@@ -2442,10 +2459,13 @@ public readonly unsafe struct Sample
     private readonly nuint* _entryOrdinals;
     private readonly NativeMatchesView _parents;
     private readonly float* _coordinates;
+    private readonly ArenaDescription _description;
 
     internal Sample(
-        NativeKeysView keys, nuint* entryOrdinals, NativeMatchesView parents, NativeRowsView coordinates, int count)
+        NativeKeysView keys, nuint* entryOrdinals, NativeMatchesView parents, NativeRowsView coordinates, int count,
+        ArenaDescription description)
     {
+        this._description = description;
         this._keys = (Key*)keys.Data;
         this._entryOrdinals = entryOrdinals;
         this._parents = parents;
@@ -2457,18 +2477,24 @@ public readonly unsafe struct Sample
     public int Count { get; }
 
     /// <summary>The keys drawn.</summary>
-    public ReadOnlySpan<Key> Keys => new(this._keys, this.Count);
+    public ReadOnlySpan<Key> Keys => this.Read(this._keys, this.Count);
 
     /// <summary>Which of its key's entries each draw is, in the order <see cref="DenseIndex.Get"/>
     /// writes them.</summary>
-    public ReadOnlySpan<nuint> EntryOrdinals => new(this._entryOrdinals, this.Count);
+    public ReadOnlySpan<nuint> EntryOrdinals => this.Read(this._entryOrdinals, this.Count);
 
     /// <summary>The one shown or earlier draw each draw hangs from and its distance, one query per
     /// draw.</summary>
-    public Matches Parents => new(this._parents, this.Count);
+    public Matches Parents => new(this._parents, this.Count, this._description);
 
     /// <summary>Where each draw is placed, three values apiece.</summary>
-    public ReadOnlySpan<float> Coordinates => new(this._coordinates, this.Count * 3);
+    public ReadOnlySpan<float> Coordinates => this.Read(this._coordinates, this.Count * 3);
+
+    private ReadOnlySpan<TValue> Read<TValue>(TValue* values, int count) where TValue : unmanaged
+    {
+        this._description.Host();
+        return new(values, count);
+    }
 }
 
 /// <summary>One batch a <see cref="DenseCursor"/> pull wrote into its <see cref="Arena"/>: the keys,
@@ -2481,10 +2507,13 @@ public readonly unsafe struct DenseBatch
     private readonly Key* _keys;
     private readonly NativeKeysTapeView _links;
     private readonly bool _linked;
+    private readonly ArenaDescription _description;
 
-    internal DenseBatch(NativeKeysView keys, NativeKeysTapeView links, bool linked, int count)
+    internal DenseBatch(
+        NativeKeysView keys, NativeKeysTapeView links, bool linked, int count, ArenaDescription description)
     {
         this._keys = (Key*)keys.Data;
+        this._description = description;
         this._links = links;
         this._linked = linked;
         this.Count = count;
@@ -2494,7 +2523,14 @@ public readonly unsafe struct DenseBatch
     public int Count { get; }
 
     /// <summary>The identities of the entries, in storage order.</summary>
-    public ReadOnlySpan<Key> Keys => new(this._keys, this.Count);
+    public ReadOnlySpan<Key> Keys
+    {
+        get
+        {
+            this._description.Host();
+            return new(this._keys, this.Count);
+        }
+    }
 
     /// <summary>The keys one entry links to, as the graph stored them when the pull ran.</summary>
     /// <param name="entry">The entry's position in <see cref="Keys"/>.</param>
@@ -2512,6 +2548,7 @@ public readonly unsafe struct DenseBatch
             throw new ArgumentOutOfRangeException(nameof(entry));
         }
 
+        this._description.Host();
         nuint begin = this._links.Offsets[entry];
         return new ReadOnlySpan<Key>(this._links.Keys + begin, (int)(this._links.Offsets[entry + 1] - begin));
     }
@@ -2600,7 +2637,7 @@ public sealed unsafe class DenseCursor : IDisposable
         };
         usearch_dense_cursor_next(&arguments);
         outcome.ThrowIfFailed();
-        return new DenseBatch(keys, linked, links, (int)written);
+        return new DenseBatch(keys, linked, links, (int)written, arena.Description);
     }
 
     /// <summary>Releases the cursor, then the index it kept alive. Calls
@@ -2702,7 +2739,7 @@ public sealed unsafe class DenseSearchStream : IDisposable
         };
         usearch_dense_search_stream_next(&arguments);
         outcome.ThrowIfFailed();
-        return new QueryMatches(matches.Keys, matches.Scores, matches.Counts);
+        return new QueryMatches(matches.Keys, matches.Scores, matches.Counts, arena.Description);
     }
 
     /// <summary>Releases the stream and the walk state it keeps, then the index and executor it kept
