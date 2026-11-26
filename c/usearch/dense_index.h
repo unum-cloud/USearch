@@ -1745,7 +1745,8 @@ typedef struct usearch_dense_search_stream_next_t {
  *  stream end.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k @c index is not the handle the stream was opened on.
+ *  - @c usearch_status_invalid_argument_k A @c NULL stream, as one freed and cleared, or @c index
+ *    is not the handle the stream was opened on.
  */
 USEARCH_EXPORT void usearch_dense_search_stream_next(usearch_dense_search_stream_next_t* arguments);
 

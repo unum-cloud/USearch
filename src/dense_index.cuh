@@ -1104,6 +1104,8 @@ USEARCH_EXPORT void usearch_dense_search_stream_next(usearch_dense_search_stream
     if (submitted<usearch_dense_search_stream_next>(arguments)) return;
     call_outcome_t outcome(*arguments);
     *arguments->matches = {};
+    if (!arguments->stream)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The stream must not be NULL"), void();
     propagate_error(usearch_status_unsupported_k, outcome, "No residency streams matches yet");
 }
 

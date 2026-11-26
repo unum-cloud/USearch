@@ -1915,6 +1915,17 @@ void test_walks_name_their_index(size_t const dimensions) {
         expect_at(pulled.counts[0] == 2, __FILE__, __LINE__, "A refused pull must leave the stream where it was");
         usearch_dense_search_stream_free(stream);
     }
+    // A freed stream a binding cleared to NULL is refused, by a library that streams or not.
+    usearch_matches_view_t closed = {0};
+    usearch_dense_search_stream_next(&(usearch_dense_search_stream_next_t) {.index = index,
+                                                                            .executor = executor,
+                                                                            .outcome = &outcome,
+                                                                            .stream = NULL,
+                                                                            .matches = &closed,
+                                                                            .arena = arena,
+                                                                            .wanted = 2});
+    expect_at(outcome.status == usearch_status_invalid_argument_k, __FILE__, __LINE__,
+              "A pull from a NULL stream is refused");
 
     usearch_arena_free(arena);
     free(data);

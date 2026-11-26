@@ -836,6 +836,8 @@ void usearch_dense_search_stream_next(usearch_dense_search_stream_next_t* argume
     if (through_executor<usearch_dense_search_stream_next>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     *arguments->matches = {};
+    if (reject_if(!arguments->stream, usearch_status_invalid_argument_k, "The stream must not be NULL", outcome))
+        return;
     usearch_dense_search_stream_handle_t& stream = *arguments->stream;
     if (reject_if(arguments->index != stream.opened_on, usearch_status_invalid_argument_k,
                   "The stream was opened on another index", outcome))
