@@ -18,8 +18,8 @@
 #include <numkong/tensor.hpp> // `nk::matrix_span` - the rankings a batch writes
 
 #include "usearch/utilities/types.hpp"
-#include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the batch's contexts & staging
-#include "usearch/utilities/ram_device.hpp"  // `forkunion_allocator` - where the staging lives
+#include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the batch's contexts & snapshot
+#include "usearch/utilities/ram_device.hpp"  // `forkunion_allocator` - where the snapshot & the frame live
 
 namespace unum::usearch::utilities {
 
@@ -51,7 +51,6 @@ struct vram_shard_fanout {
     /** A fan-out of @p shards over @p executor, claimed and sized by @ref begin. */
     vram_shard_fanout(shards_t const& shards, executor_t& executor) noexcept
         : shards_(shards), executor_(executor), traversals_(shards.allocator()), visible_(shards.allocator()),
-          shard_ids_(shards.allocator()), shard_scores_(shards.allocator()), shard_counts_(shards.allocator()),
           frame_(shards.allocator()) {}
 
 #pragma region Pairing
@@ -154,8 +153,8 @@ struct vram_shard_fanout {
 
     /**
      *  @brief Claims the executor, snapshots the shards' visible nodes, reserves every shard's
-     *      traversals for @p usage and sizes the host staging for windows of up to @p widest
-     *      queries ranking @p wanted matches each.
+     *      traversals for @p usage and sizes each one's pinned results as the host staging for
+     *      windows of up to @p widest queries ranking @p wanted matches each.
      *
      *  @p usage is the arguments of a shard's @c traversal_memory_usage. The sizing repeats for a
      *  shard generation opened meanwhile. A call that never ranks through @ref search_every_shard
@@ -175,12 +174,17 @@ struct vram_shard_fanout {
         claim_ = std::move(claim);
         while (true) {
             if (status_t const paired = pair_executor_traversals_(usage...); failed(paired)) return paired;
-            std::size_t const shards = traversals_.size(), entries = shards * widest * wanted;
-            if (failed(visible_.resize(shards)) || failed(shard_ids_.resize_uninitialized(entries)) ||
-                failed(shard_scores_.resize_uninitialized(entries)) ||
-                failed(shard_counts_.resize_uninitialized(shards * widest)) ||
-                failed(frame_.resize_uninitialized(wanted)))
+            std::size_t const shards = traversals_.size(), staged_bytes = widest * (2 * wanted + 1) * sizeof(u64_t);
+            if (failed(visible_.resize(shards)) || failed(frame_.resize_uninitialized(wanted)))
                 return status_code_t::out_of_memory_k;
+            // A device-to-host copy into pageable memory returns only once it lands, holding each
+            // shard's queuing until the one before it finished, so each shard stages in the pinned
+            // results its context keeps across calls, and a warm call pins nothing.
+            for (std::size_t shard = 0; shard != shards; ++shard) {
+                auto& staging = traversals_[shard]->results.entries_;
+                if (failed(staging.resize_uninitialized(divide_round_up(staged_bytes, sizeof(staging[0])))))
+                    return status_code_t::out_of_memory_k;
+            }
             status_t const taken = shards_.snapshot(to_writable_span(visible_)).status;
             if (taken != status_code_t::shape_mismatch_k) return taken;
         }
@@ -253,7 +257,8 @@ struct vram_shard_fanout {
         node_id_t node_id;
         shard_score_t distance;
     };
-    static_assert(sizeof(shard_match_t) == 8 || sizeof(shard_match_t) == 16);
+    static_assert(sizeof(shard_match_t) == 8 || sizeof(shard_match_t) == 16,
+                  "An ID and a score each fit the word a staging slot holds");
 
     /**
      *  @brief Runs @p search_shard on every live shard's own stream, each copying up to the
@@ -262,8 +267,9 @@ struct vram_shard_fanout {
      *      node IDs through each shard's own keys.
      *
      *  @p search_shard is called as <tt>search_shard(shard, node_ids, scores, counts, traversal,
-     *  visible) → status_t</tt> with that shard's own block of the staging: a query's matches end at
-     *  its count, which starts at the wanted count for a search that reports none, or at its first
+     *  visible) → status_t</tt> with that shard's staging, its context's pinned results laid out as
+     *  the IDs, the scores and each query's count, a word per slot: a query's matches end at its
+     *  count, which starts at the wanted count for a search that reports none, or at its first
      *  sentinel ID. Every shard merges once the one wait returned, and a refused window merges
      *  nothing, so the rankings and the counts agree. A shard with no visible node walks nothing
      *  and merges nothing. The staging is never zeroed: @ref begin sized it for the widest window,
@@ -277,28 +283,43 @@ struct vram_shard_fanout {
                                                  nk::matrix_span<key_t> keys, nk::matrix_span<score_type_> scores,
                                                  std::span<std::size_t> counts) noexcept {
         std::size_t const shards = this->shards(), wanted = frame_.size(), shard_entries = queries_count * wanted;
-        if (shards * queries_count > shard_counts_.size()) return {{}, status_code_t::config_mismatch_k};
+        // Every shard's staging grew alike in `begin`.
+        if (shards) {
+            auto const& staging = traversals_[0]->results.entries_;
+            if (staging.size() * sizeof(staging[0]) < (2 * shard_entries + queries_count) * sizeof(u64_t))
+                return {{}, status_code_t::config_mismatch_k};
+        }
+        auto staged = [&](std::size_t shard) noexcept {
+            return reinterpret_cast<byte_t*>(traversals_[shard]->results.entries_.data());
+        };
+        auto shard_ids = [&](std::size_t shard) noexcept { return reinterpret_cast<node_id_t*>(staged(shard)); };
+        auto shard_scores = [&](std::size_t shard) noexcept {
+            return reinterpret_cast<shard_score_t*>(staged(shard) + shard_entries * sizeof(u64_t));
+        };
         auto shard_counts = [&](std::size_t shard) noexcept {
-            return std::span<std::size_t>(shard_counts_.data() + shard * queries_count, queries_count);
+            return std::span<std::size_t>(
+                reinterpret_cast<std::size_t*>(staged(shard) + 2 * shard_entries * sizeof(u64_t)), queries_count);
         };
         auto submit_shard = [&](std::size_t shard, traversal_context_t& traversal,
                                 std::size_t visible) noexcept -> status_t {
             if (!visible) return status_code_t::success_k;
             for (std::size_t& count : shard_counts(shard)) count = wanted;
-            return search_shard(
-                shard, nk::matrix_span<node_id_t> {shard_ids_.data() + shard * shard_entries, queries_count, wanted},
-                nk::matrix_span<shard_score_t> {shard_scores_.data() + shard * shard_entries, queries_count, wanted},
-                shard_counts(shard), traversal, visible);
+            return search_shard(shard, nk::matrix_span<node_id_t> {shard_ids(shard), queries_count, wanted},
+                                nk::matrix_span<shard_score_t> {shard_scores(shard), queries_count, wanted},
+                                shard_counts(shard), traversal, visible);
         };
         auto merge_shard = [&](std::size_t shard) noexcept {
             if (!visible_[shard]) return;
+            node_id_t const* const ids = shard_ids(shard);
+            shard_score_t const* const staged_scores = shard_scores(shard);
+            std::span<std::size_t const> const found_counts = shard_counts(shard);
             for (std::size_t query = 0; query != queries_count; ++query) {
-                std::size_t const first = shard * shard_entries + query * wanted;
-                std::size_t const found = min_of(shard_counts_[shard * queries_count + query], wanted);
+                std::size_t const first = query * wanted;
+                std::size_t const found = min_of(found_counts[query], wanted);
                 // An absent match ends the row, and must never index a key column.
                 std::size_t live = 0;
-                for (; live != found && shard_ids_[first + live] != node_id_limits<node_id_t>::unknown_k; ++live)
-                    frame_[live] = shard_match_t {shard_ids_[first + live], shard_scores_[first + live]};
+                for (; live != found && ids[first + live] != node_id_limits<node_id_t>::unknown_k; ++live)
+                    frame_[live] = shard_match_t {ids[first + live], staged_scores[first + live]};
                 std::span<shard_match_t const> const matches {frame_.data(), live};
                 counts[query] = merge_search_results(matches, shards_[shard].index->keys(),
                                                      to_span(keys.row(query).as_vector()),
@@ -424,12 +445,7 @@ struct vram_shard_fanout {
     /** Every shard's visible entries in the one snapshot every window reads below. */
     growing_buffer<node_id_t, forkunion_allocator_t> visible_;
 
-    /** The host staging every window's matches are copied into, one block per shard: the IDs, the
-     *  scores and each query's count; then the frame one query's matches repack into. Sized by
-     *  @ref begin for the widest window, which every window re-slices. */
-    growing_buffer<node_id_t, forkunion_allocator_t> shard_ids_;
-    growing_buffer<shard_score_t, forkunion_allocator_t> shard_scores_;
-    growing_buffer<std::size_t, forkunion_allocator_t> shard_counts_;
+    /** The frame one query's staged matches repack into. */
     growing_buffer<shard_match_t, forkunion_allocator_t> frame_;
 };
 
