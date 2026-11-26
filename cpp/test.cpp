@@ -1605,6 +1605,109 @@ void test_level_generators() {
     expect(!all_multiples);
 }
 
+/// Tape allocations left before `failing_tape_allocator_t` starts returning `nullptr`.
+static std::size_t failing_tape_allocations_left = (std::numeric_limits<std::size_t>::max)();
+
+/**
+ *  @brief  Tape allocator that returns `nullptr` once the global budget is spent.
+ *          The budget is global, because `index_gt::reset` replaces the allocator with a default-constructed one.
+ */
+struct failing_tape_allocator_t {
+    using value_type = byte_t;
+
+    byte_t* allocate(std::size_t length) const noexcept {
+        if (failing_tape_allocations_left == 0)
+            return nullptr;
+        --failing_tape_allocations_left;
+        return static_cast<byte_t*>(std::malloc(length));
+    }
+    void deallocate(byte_t* pointer, std::size_t) const noexcept { std::free(pointer); }
+};
+
+/**
+ *  @brief  Regression test: `load_from_stream` must fail cleanly if a node allocation fails.
+ *          It used to store null nodes, report success, and crash when the index was destroyed.
+ */
+void test_load_from_stream_out_of_memory() {
+    std::printf("Testing load from stream when node allocations fail\n");
+
+    using index_t = index_gt<float, std::int64_t, std::uint32_t>;
+    using failing_index_t =
+        index_gt<float, std::int64_t, std::uint32_t, std::allocator<byte_t>, failing_tape_allocator_t>;
+    using member_cref_t = typename index_t::member_cref_t;
+    using member_citerator_t = typename index_t::member_citerator_t;
+    using vector_of_vectors_t = std::vector<std::vector<float>>;
+
+    std::size_t const collection = 32, dimensions = 4;
+    vector_of_vectors_t vectors(collection, std::vector<float>(dimensions));
+    for (auto& vector : vectors)
+        std::generate(vector.begin(), vector.end(), [] { return float(std::rand()) / float(RAND_MAX); });
+
+    struct metric_t {
+        vector_of_vectors_t const* vectors_ptr = nullptr;
+        std::size_t dimensions = 0;
+
+        float const* row(std::size_t i) const noexcept { return (*vectors_ptr)[i].data(); }
+
+        float operator()(member_cref_t const& a, member_cref_t const& b) const {
+            return metric_cos_gt<float, float>{}(row(get_slot(b)), row(get_slot(a)), dimensions);
+        }
+        float operator()(float const* some_vector, member_cref_t const& member) const {
+            return metric_cos_gt<float, float>{}(some_vector, row(get_slot(member)), dimensions);
+        }
+        float operator()(member_citerator_t const& a, member_citerator_t const& b) const {
+            return metric_cos_gt<float, float>{}(row(get_slot(b)), row(get_slot(a)), dimensions);
+        }
+        float operator()(float const* some_vector, member_citerator_t const& member) const {
+            return metric_cos_gt<float, float>{}(some_vector, row(get_slot(member)), dimensions);
+        }
+    };
+
+    // Build a small index and serialize it into memory
+    index_config_t config(8);
+    metric_t metric{&vectors, dimensions};
+    std::vector<byte_t> stream;
+    {
+        aligned_wrapper_gt<index_t> source(config);
+        expect(source.index->try_reserve(collection));
+        for (std::size_t i = 0; i != collection; ++i)
+            expect(source.index->add(static_cast<std::int64_t>(i), vectors[i].data(), metric));
+        auto output = [&](void const* buffer, std::size_t length) {
+            byte_t const* bytes = static_cast<byte_t const*>(buffer);
+            stream.insert(stream.end(), bytes, bytes + length);
+            return true;
+        };
+        expect(source.index->save_to_stream(output));
+    }
+
+    // Every node takes one tape allocation, so fail on the first, the second, the middle and the last node
+    for (std::size_t allowed : {std::size_t{0}, std::size_t{1}, collection / 2, collection - 1}) {
+        std::size_t offset = 0;
+        auto input = [&](void* buffer, std::size_t length) {
+            if (offset + length > stream.size())
+                return false;
+            if (length)
+                std::memcpy(buffer, stream.data() + offset, length);
+            offset += length;
+            return true;
+        };
+
+        bool loaded_ok = true;
+        std::size_t loaded_size = 0;
+        {
+            aligned_wrapper_gt<failing_index_t> loaded(config);
+            failing_tape_allocations_left = allowed;
+            serialization_result_t result = loaded.index->load_from_stream(input);
+            loaded_ok = static_cast<bool>(result);
+            loaded_size = loaded.index->size();
+            result.error.release();
+        } // Destroying the index frees every node it believes it holds
+        failing_tape_allocations_left = (std::numeric_limits<std::size_t>::max)();
+        expect(!loaded_ok);
+        expect_eq(loaded_size, std::size_t{0});
+    }
+}
+
 int main(int, char**) {
     install_crash_handlers();
 
@@ -1704,5 +1807,6 @@ int main(int, char**) {
     test_load_after_metric_make();
     test_view_of_corrupted_file();
     test_level_generators();
+    test_load_from_stream_out_of_memory();
     return 0;
 }
