@@ -659,6 +659,9 @@ struct vram_shard_core {
      *  holds. */
     api_t const& api() const noexcept { return vectors_matrix_.api(); }
 
+    /** The optional driver entries its storage maps through. */
+    auto const& extensions() const noexcept { return vectors_matrix_.extensions(); }
+
     /** The metric every walk scores by, fixed at construction. */
     nk_kernel_kind_t kernel() const noexcept { return kernel_; }
 

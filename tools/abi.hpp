@@ -739,11 +739,35 @@ inline session_t open_session(settings_t const& settings, usearch_cpu_class_t cp
     return session;
 }
 
-/** Every vendor's driver table and Apple's contexts, loaded once by the first harness step that
- *  touches a device. */
-inline util::gpu_drivers_t& gpu_drivers() noexcept {
-    static util::gpu_drivers_t drivers;
-    return drivers;
+/** The harness's stand-in for the library's GPU runtime, which the library keeps hidden: every
+ *  vendor's driver table and Apple's contexts, and the kernels the harness's own executors launch,
+ *  loaded once by the first harness step that touches a device. */
+struct gpu_harness_t {
+    util::gpu_drivers_t drivers;
+    util::kernel_tables<util::cuda_module_t> cuda_kernels;
+    util::kernel_tables<util::hip_module_t> hip_kernels;
+    util::kernel_tables<util::metal_module_t> metal_kernels;
+
+    /** The ceiling a harness executor's scratch grows to, zero for none. */
+    std::size_t scratch_limit = 0;
+};
+
+/** The one harness GPU state, built by the first step that touches a device. */
+inline gpu_harness_t& gpu_harness() noexcept {
+    static gpu_harness_t harness;
+    return harness;
+}
+
+/** Every vendor's driver table and Apple's contexts. */
+inline util::gpu_drivers_t& gpu_drivers() noexcept { return gpu_harness().drivers; }
+
+/** Spawns an executor of @p executor_type_ over @p devices through the harness's drivers, its
+ *  streams launching the harness's kernels. */
+template <typename executor_type_>
+util::expected<executor_type_> spawn_harness_executor(std::span<int const> devices) noexcept {
+    gpu_harness_t& harness = gpu_harness();
+    return executor_type_::spawn(util::driver_of(harness.drivers, std::type_identity<executor_type_> {}), devices, {},
+                                 harness, harness.scratch_limit);
 }
 
 /** Copies @p bytes of a call's output at @p source into @p destination: through the runtime of the

@@ -365,18 +365,21 @@ struct specialized_index {
                                   fu_memory_domain_id_t memory_domain) noexcept {
         if constexpr (viewed_k) return util::status_code_t::read_only_k;
         else if constexpr (is_ram_index<index_type_>) return of(index).emplace(memory_domain);
-        else {
-            // Init names devices and no executor yet. A Metal shard keeps a queue of its own, since
-            // Metal orders work only within one queue; CUDA and HIP name the device by its null
-            // legacy stream and open nothing.
+        else if constexpr (std::is_same_v<executor_t, util::metal_executor_t>) {
+            // Init names devices and no executor yet: the Metal device's own queue names it.
             int const device = static_cast<int>(residency.device);
-            std::span<int const> const devices {&device, 1};
-            auto [executor, status] = std::is_same_v<executor_t, util::metal_executor_t>
-                                          ? executor_t::spawn(
-                                                driver_of(gpu_drivers(), std::type_identity<executor_t> {}), devices)
-                                          : executor_t::on_default_streams(
-                                                driver_of(gpu_drivers(), std::type_identity<executor_t> {}), devices);
+            std::size_t no_limit = 0;
+            auto [executor, status] = on_default_streams(gpu_drivers().metal_contexts, {&device, 1}, gpu_runtime(),
+                                                         no_limit);
             return failed(status) ? status : of(index).emplace(executor.stream(0));
+        }
+        else {
+            // CUDA and HIP name the device by its null legacy stream and open nothing.
+            int const device = static_cast<int>(residency.device);
+            std::size_t no_limit = 0;
+            auto [executor, status] = on_default_streams(driver_of(gpu_drivers(), std::type_identity<executor_t> {}),
+                                                         {&device, 1}, gpu_runtime(), no_limit);
+            return failed(status) ? status : of(index).emplace(executor.stream(0), gpu_extensions_of(executor));
         }
     }
     static util::status_t view(void* index, std::string_view path, std::span<std::string_view const> paths,

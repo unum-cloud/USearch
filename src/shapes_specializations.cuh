@@ -453,8 +453,9 @@ struct shapes_vram_nvidia_build {
     nk_kernel_kind_t kernel = nk_kernel_unknown_k;
 
     std::unique_ptr<face_t> operator()(int device) const noexcept {
-        return std::unique_ptr<face_t> {new (std::nothrow) face_t(
-            kernel, util::cuda_virtual_memory_allocator<util::byte_t> {gpu_drivers().cuda, device})};
+        return std::unique_ptr<face_t> {
+            new (std::nothrow) face_t(kernel, util::cuda_virtual_memory_allocator<util::byte_t> {
+                                                  gpu_drivers().cuda, gpu_drivers().extensions.cuda, device})};
     }
 };
 
@@ -661,7 +662,7 @@ struct shapes_vram_apple_build {
         util::metal_context_t* const context = gpu_drivers().metal_contexts.context(device);
         if (!context) return {};
         return std::unique_ptr<face_t> {new (std::nothrow) face_t(
-            kernel, util::metal_shared_allocator_t {util::metal_stream_t {*context, device}})};
+            kernel, util::metal_shared_allocator_t {*context, device, gpu_runtime().metal_kernels})};
     }
 };
 
@@ -858,8 +859,9 @@ struct shapes_vram_amd_build {
     nk_kernel_kind_t kernel = nk_kernel_unknown_k;
 
     std::unique_ptr<face_t> operator()(int device) const noexcept {
-        return std::unique_ptr<face_t> {new (std::nothrow) face_t(
-            kernel, util::hip_virtual_memory_allocator<util::byte_t> {gpu_drivers().hip, device})};
+        return std::unique_ptr<face_t> {
+            new (std::nothrow) face_t(kernel, util::hip_virtual_memory_allocator<util::byte_t> {
+                                                  gpu_drivers().hip, gpu_drivers().extensions.hip, device})};
     }
 };
 

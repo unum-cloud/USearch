@@ -151,10 +151,11 @@ struct nvidia_cells_t {
     using executor_t = cuda_executor_t;
 
     static cuda_virtual_memory_allocator<byte_t> storage(executor_t& executor, int device) noexcept {
-        return cuda_virtual_memory_allocator<byte_t> {executor.api(), device};
+        return cuda_virtual_memory_allocator<byte_t> {executor.stream(0).handle.api(),
+                                                      test::gpu_drivers().extensions.cuda, device};
     }
     static cuda_arena_allocator_t arena(executor_t& executor) noexcept {
-        return cuda_arena_allocator_t {executor.stream(0).arena, executor.stream(0)};
+        return cuda_arena_allocator_t {executor.stream(0).memory.arena, executor.stream(0)};
     }
     static cuda_api_t const& api() noexcept { return test::gpu_drivers().cuda; }
     inline static constexpr gpu_vendor_t vendor_k = gpu_vendor_t::nvidia_k;
@@ -170,10 +171,11 @@ struct amd_cells_t {
     using executor_t = hip_executor_t;
 
     static hip_virtual_memory_allocator<byte_t> storage(executor_t& executor, int device) noexcept {
-        return hip_virtual_memory_allocator<byte_t> {executor.api(), device};
+        return hip_virtual_memory_allocator<byte_t> {executor.stream(0).handle.api(),
+                                                     test::gpu_drivers().extensions.hip, device};
     }
     static hip_arena_allocator_t arena(executor_t& executor) noexcept {
-        return hip_arena_allocator_t {executor.stream(0).arena, executor.stream(0)};
+        return hip_arena_allocator_t {executor.stream(0).memory.arena, executor.stream(0)};
     }
     static hip_api_t const& api() noexcept { return test::gpu_drivers().hip; }
     inline static constexpr gpu_vendor_t vendor_k = gpu_vendor_t::amd_k;
@@ -189,9 +191,12 @@ struct apple_cells_t {
     using executor_t = metal_executor_t;
 
     static metal_shared_allocator_t storage(executor_t& executor, int) noexcept {
-        return metal_shared_allocator_t {executor.stream(0).handle};
+        return metal_shared_allocator_t {*executor.stream(0).handle.context(),
+                                         static_cast<int>(executor.stream(0).ordinal), *executor.stream(0).kernels};
     }
-    static metal_stream_t arena(executor_t& executor) noexcept { return executor.stream(0).handle.share(); }
+    static metal_shared_allocator_t arena(executor_t& executor) noexcept {
+        return metal_shared_allocator_t {executor.stream(0)};
+    }
 };
 using cell_vendor_t = apple_cells_t;
 
@@ -291,7 +296,7 @@ static void test_shapes_vram_collection(u64_t seed, cell_vendor_t::executor_t& e
         ram_matched += matched_count(to_span(found).first(found_count), reaches[query], wanted_k);
     }
 
-    int const device = executor.device(0);
+    int const device = static_cast<int>(executor.stream(0).ordinal);
     vram_index_t vram_index {kernel, cell_vendor_t::storage(executor, device)};
     expect_equal(vram_index.reserve({count, connectivity_32_k, offsets[count] - offsets[0]}).status,
                  status_code_t::success_k);
@@ -301,8 +306,9 @@ static void test_shapes_vram_collection(u64_t seed, cell_vendor_t::executor_t& e
     for (std::size_t batch = 0; batch != batches_k && held(); ++batch) {
         std::size_t const first = count * batch / batches_k, bound = count * (batch + 1) / batches_k;
         std::span<std::size_t const> const batch_offsets {offsets.data() + first, bound - first + 1};
-        expect_equal(executor.reserve(vram_index.traversal_memory_usage(
-                         tape_view<byte_t const> {tape.data(), batch_offsets}, insert_config)),
+        expect_equal(reserve_scratch(executor.stream(0),
+                                     vram_index.traversal_memory_usage(
+                                         tape_view<byte_t const> {tape.data(), batch_offsets}, insert_config)),
                      status_code_t::success_k);
         typename vram_index_t::traversal_context_t context {cell_vendor_t::arena(executor)};
         auto const [inserted, status] = vram_index.insert({keys.data() + first, bound - first},
@@ -317,9 +323,10 @@ static void test_shapes_vram_collection(u64_t seed, cell_vendor_t::executor_t& e
     nk::matrix<f32_t> distances = make_matrix<f32_t>(recall_samples_k, wanted_k);
     std::span<std::size_t const> const query_offsets {offsets.data() + count, recall_samples_k + 1};
     typename vram_index_t::search_config_t const search_config {expansion_k, wanted_k};
-    expect_equal(executor.reserve(vram_index.traversal_memory_usage(
-                     tape_view<byte_t const> {tape.data(), query_offsets}, search_config)),
-                 status_code_t::success_k);
+    expect_equal(
+        reserve_scratch(executor.stream(0), vram_index.traversal_memory_usage(
+                                                tape_view<byte_t const> {tape.data(), query_offsets}, search_config)),
+        status_code_t::success_k);
     typename vram_index_t::traversal_context_t context {cell_vendor_t::arena(executor)};
     if (held())
         expect_equal(
@@ -407,8 +414,8 @@ template <>
 void run_shapes_vram_cases<cell_vendor_t::executor_t>(gpu_device_t const& device) {
     if (device.vendor != cell_vendor_t::vendor_k) return;
     int const ordinal = static_cast<int>(device.vendor_ordinal);
-    auto [executor, spawn_status] = cell_vendor_t::executor_t::spawn(cell_vendor_t::api(),
-                                                                     std::span<int const> {&ordinal, 1});
+    auto [executor,
+          spawn_status] = spawn_harness_executor<cell_vendor_t::executor_t>(std::span<int const> {&ordinal, 1});
     if (!expect_true(succeeded(spawn_status), "{} device #{} opens no stream", cell_vendor_t::runtime_k, ordinal))
         return;
 #if USEARCH_ARCH_CUDA_
@@ -443,8 +450,7 @@ template <>
 void run_shapes_vram_cases<metal_executor_t>(gpu_device_t const& device) {
     if (device.vendor != gpu_vendor_t::apple_k) return;
     int const ordinal = static_cast<int>(device.vendor_ordinal);
-    auto [executor, spawn_status] = metal_executor_t::spawn(test::gpu_drivers().metal_contexts,
-                                                            std::span<int const> {&ordinal, 1});
+    auto [executor, spawn_status] = spawn_harness_executor<metal_executor_t>(std::span<int const> {&ordinal, 1});
     if (!expect_true(succeeded(spawn_status), "Metal device #{} opens no stream", ordinal)) return;
     constexpr nk_kernel_kind_t chamfer_k = nk_kernel_chamfers_packed_k, hausdorff_k = nk_kernel_hausdorffs_packed_k;
     struct cell_t {

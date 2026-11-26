@@ -37,7 +37,7 @@ void run_vram_amd_cases(gpu_device_t const& device) {
     fmt::println("- ROCm: device #{} {}, gfx {}.{}, {}-lane waves, {} compute units, {} MiB", ordinal, device.name,
                  device.architecture_major, device.architecture_minor, device.warp_lanes, device.compute_units,
                  device.memory_bytes >> 20);
-    auto [executor, spawn_status] = hip_executor_t::spawn(api, std::span<int const> {&ordinal, 1});
+    auto [executor, spawn_status] = spawn_harness_executor<hip_executor_t>(std::span<int const> {&ordinal, 1});
     if (!expect_true(succeeded(spawn_status), "ROCm device #{} opens no stream", ordinal)) return;
     run_vram_indexes_cases(executor);
     test::sequence::run_sequence_vram_cases<hip_executor_t>(device);

@@ -28,7 +28,7 @@
 
 #include "usearch/utilities/ram_sorts.hpp" // `partial_sort` - a key's entries in insertion order
 #include "usearch/utilities/safegraphs_format.hpp"
-#include "usearch/basic/ram_indexes.hpp"  // `basic::ram_indexes` - every RAM variant's shards
+#include "usearch/basic/ram_indexes.hpp"       // `basic::ram_indexes` - every RAM variant's shards
 #include "usearch/basic/shard_checkpoints.hpp" // `basic::save`, `basic::load` - every RAM variant's checkpoints
 #include "usearch/basic/nvme_indexes.hpp" // `basic::nvme_indexes` and SmashTable's row kits, through its directories
 #if USEARCH_ARCH_CUDA_
@@ -924,7 +924,7 @@ util::status_t count_entries(variant_type_& variant, usearch_key_t key, stats_ty
  *  @p graph_type_ gathers its stored values into one tape on a CUDA stream. */
 template <typename traits_type_, typename graph_type_>
 concept a_cuda_gathering_graph = requires(typename variant_bodies<traits_type_>::kept_t& kept, graph_type_& graph,
-                                          util::cuda_executor_t::traversal_context_t const& context) {
+                                          util::cuda_scratch_t::traversal_context_t const& context) {
     variant_bodies<traits_type_>::keep_stored(util::bytes_view_t {}, kept);
     graph.launch_gather_tape_(std::span<typename graph_type_::node_id_t const> {}, nullptr, std::span<util::u64_t> {},
                               context);
@@ -968,8 +968,8 @@ util::expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t ke
             });
             std::size_t const count = found - first;
             if (!count) continue;
-            std::size_t stream = 0;
-            while (stream != executor.size() && executor.device(stream) != graph.device_specs().ordinal) ++stream;
+            std::size_t const stream = util::stream_on(executor,
+                                                       static_cast<std::size_t>(graph.device_specs().ordinal));
             if (stream == executor.size()) return {0, util::status_code_t::config_mismatch_k};
             util::cuda_api_t const& api = graph.api();
             // Each node's extent comes off the device's offsets column, so the tape is sized first.
@@ -988,12 +988,12 @@ util::expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t ke
             // The last gather was awaited, so its run rewinds for this carve, which grows it at
             // most once per call; a stream's first context is born on its device.
             std::size_t const staging_bytes = listed_bytes + offsets_bytes + tape_bytes;
-            if (util::status_t const reserved = executor.reserve(staging_bytes, 1); failed(reserved))
+            if (util::status_t const reserved = util::reserve_scratch(executor.stream(stream), staging_bytes, 1);
+                failed(reserved))
                 return {0, reserved};
             if (cuda_set_device(api, graph.device_specs().ordinal) != util::cuda_success_k)
                 return {0, util::status_code_t::device_k};
-            std::span<util::cuda_executor_t::traversal_context_t> const stream_traversals = executor.traversals(stream);
-            util::cuda_executor_t::traversal_context_t& context = stream_traversals[0];
+            util::cuda_scratch_t::traversal_context_t& context = executor.stream(stream).memory.contexts[0];
             util::byte_t* const staging = context.allocator().allocate(staging_bytes);
             util::u64_t* const host_offsets = carve<util::u64_t>(memory, count + 1);
             util::byte_t* const host_tape = carve<util::byte_t>(memory, tape_bytes);
@@ -1169,8 +1169,7 @@ util::expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t ke
         });
         std::size_t const count = found - first;
         if (!count) continue;
-        std::size_t stream = 0;
-        while (stream != executor.size() && executor.device(stream) != graph.device_specs().ordinal) ++stream;
+        std::size_t const stream = util::stream_on(executor, static_cast<std::size_t>(graph.device_specs().ordinal));
         if (stream == executor.size()) return {0, util::status_code_t::config_mismatch_k};
         util::hip_api_t const& api = graph.api();
         // Each node's extent comes off the device's offsets column, so the tape is sized first.
@@ -1190,10 +1189,13 @@ util::expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t ke
         // The last gather was awaited, so its run rewinds for this carve, which grows it at
         // most once per call; a stream's first context is born on its device.
         std::size_t const staging_bytes = listed_bytes + offsets_bytes + tape_bytes;
-        if (util::status_t const reserved = executor.reserve(staging_bytes, 1); failed(reserved)) return {0, reserved};
+        if (util::status_t const reserved = util::reserve_scratch(executor.stream(stream), staging_bytes, 1);
+            failed(reserved))
+            return {0, reserved};
         if (hip_set_device(api, graph.device_specs().ordinal) != util::hip_success_k)
             return {0, util::status_code_t::device_k};
-        std::span<util::hip_executor_t::traversal_context_t> const stream_traversals = executor.traversals(stream);
+        std::span<util::hip_scratch_t::traversal_context_t> const stream_traversals = util::to_writable_span(
+            executor.stream(stream).memory.contexts);
         util::hip_executor_t::traversal_context_t& context = stream_traversals[0];
         util::byte_t* const staging = context.allocator().allocate(staging_bytes);
         util::u64_t* const host_offsets = carve<util::u64_t>(memory, count + 1);

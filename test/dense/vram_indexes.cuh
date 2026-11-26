@@ -225,8 +225,8 @@ void test_dense_vram_indexes_device_outputs(u64_t seed, typename indexes_type_::
     dense_indexes_executor<indexes_type_> driver {placement};
     if (failed(driver.status)) return void(expect_true(false));
     indexes_type_ indexes {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
-    expect_true(succeeded(indexes.emplace(driver.executor.stream(0))));
-    expect_true(succeeded(indexes.emplace(driver.executor.stream(0))));
+    expect_true(succeeded(driver.place_on(indexes, driver.executor.stream(0))));
+    expect_true(succeeded(driver.place_on(indexes, driver.executor.stream(0))));
     expect_true(succeeded(indexes.reserve({rows_count}).status));
     nk::matrix<scalar_t> const vectors = make_vectors<scalar_t>(rows_count, dimensions,
                                                                 stream_key(seed, "indexes_device_merge"));
@@ -234,7 +234,7 @@ void test_dense_vram_indexes_device_outputs(u64_t seed, typename indexes_type_::
     for (std::size_t row = 0; row != rows_count; ++row) keys[row] = dense_key<key_t>(1 + row);
     expect_true(succeeded(indexes.insert(to_span(keys), vectors.view(), driver.executor).status));
 
-    typename indexes_type_::executor_t::device_arena_t arena {driver.executor.stream(0)};
+    typename util::gpu_device_arena_of<typename indexes_type_::executor_t>::type arena {driver.executor.stream(0)};
     key_t* const device_keys = arena.template allocate<key_t>(ranks_count);
     distance_t* const device_distances = arena.template allocate<distance_t>(ranks_count);
     std::size_t* const device_counts = arena.template allocate<std::size_t>(queries_count);
@@ -924,28 +924,29 @@ struct us::test::dense_indexes_executor<indexes_type_> {
     util::status_t status = util::status_code_t::uninitialized_k;
 
     explicit dense_indexes_executor(executor_t const& placement) noexcept {
-        int const device = placement.device(0);
-        auto [executor, spawn_status] = spawn_(std::span<int const> {&device, 1});
+        int const device = static_cast<int>(placement.stream(0).ordinal);
+        auto [spawned, spawn_status] = us::test::spawn_harness_executor<executor_t>(std::span<int const> {&device, 1});
         status = spawn_status;
-        this->executor = std::move(executor);
+        executor = std::move(spawned);
     }
     dense_indexes_executor(dense_indexes_executor const&) = delete;
     dense_indexes_executor& operator=(dense_indexes_executor const&) = delete;
 
-    /** Opens @p devices through the vendor's driver table the harness loaded. */
-    static util::expected<executor_t> spawn_(std::span<int const> devices) noexcept {
-        util::gpu_drivers_t& drivers = us::test::gpu_drivers();
-        if constexpr (executor_t::vendor_k == util::gpu_vendor_t::nvidia_k)
-            return executor_t::spawn(drivers.cuda, devices);
-        else if constexpr (executor_t::vendor_k == util::gpu_vendor_t::amd_k)
-            return executor_t::spawn(drivers.hip, devices);
-        else return executor_t::spawn(drivers.metal_contexts, devices);
-    }
-
     /** Places the shards one sharded scenario drives: one VRAM shard on the device of
      *  @p placement; each further call places one more beside it. */
     static util::status_t place_shards(indexes_type_& indexes, executor_t& placement) noexcept {
-        return indexes.emplace(placement.stream(0));
+        return place_on(indexes, placement.stream(0));
+    }
+
+    /** Places one shard on the device of @p stream, its storage mapping through the harness's
+     *  optional driver entries where its vendor has any. */
+    static util::status_t place_on(indexes_type_& indexes, typename executor_t::stream_t const& stream) noexcept {
+        util::gpu_driver_extensions_t const& extensions = us::test::gpu_drivers().extensions;
+        if constexpr (executor_t::vendor_k == util::gpu_vendor_t::nvidia_k)
+            return indexes.emplace(stream, extensions.cuda);
+        else if constexpr (executor_t::vendor_k == util::gpu_vendor_t::amd_k)
+            return indexes.emplace(stream, extensions.hip);
+        else return indexes.emplace(stream);
     }
 
     /** Runs @p verb over a copy of the host @p tape on the executor's device, where the tape verbs
@@ -954,7 +955,7 @@ struct us::test::dense_indexes_executor<indexes_type_> {
     util::expected<typename indexes_type_::search_result_t> on_device(
         us::dense::products_tape<key_type_, score_type_> tape, verb_type_&& verb) noexcept {
         using util::status_t;
-        typename executor_t::device_arena_t arena {executor.stream(0)};
+        typename util::gpu_device_arena_of<executor_t>::type arena {executor.stream(0)};
         key_type_* const keys = arena.template allocate<key_type_>(tape.keys.size());
         score_type_* const scores = arena.template allocate<score_type_>(tape.scores.size());
         std::size_t* const offsets = arena.template allocate<std::size_t>(tape.offsets.size());

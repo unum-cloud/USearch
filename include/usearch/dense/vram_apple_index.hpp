@@ -2489,21 +2489,22 @@ struct vram_apple_index {
      *  register-heavy to hold one threadgroup of four simdgroups refuses with @c unsupported_k. */
     status_t load_pipelines_() noexcept {
         metal_context_t* const context = vectors_allocator_.context();
-        if (!context) return status_code_t::device_k;
+        kernel_tables<metal_module_t>* const kernels = vectors_allocator_.kernels();
+        if (!context || !kernels) return status_code_t::device_k;
         char const* const source = metal_source<vector_dtype_, capability_>();
         vram_kernel_symbol_t symbol;
         for (metal_rung<vram_kernel_t> const rung : metal_rungs) {
             metal_kernel_symbol(symbol, rung);
-            auto const [state, status] = context->pipeline(source, symbol.text);
+            auto const [state, status] = kernels->pipeline(*context->api, context->device, source, symbol.text);
             if (failed(status)) return status;
-            if (state.max_threads < metal_simdgroups_k * context->wave_lanes) return status_code_t::unsupported_k;
+            if (state.max_threads < metal_simdgroups_k * metal_simdgroup_width_k) return status_code_t::unsupported_k;
             pipelines_[static_cast<u32_t>(rung.kernel)][gpu_rung_index(rung.slots)] = state;
         }
         for (metal_rung<vram_dense_kernel_t> const rung : metal_dense_rungs) {
             metal_kernel_symbol(symbol, rung);
-            auto const [state, status] = context->pipeline(source, symbol.text);
+            auto const [state, status] = kernels->pipeline(*context->api, context->device, source, symbol.text);
             if (failed(status)) return status;
-            if (state.max_threads < metal_simdgroups_k * context->wave_lanes) return status_code_t::unsupported_k;
+            if (state.max_threads < metal_simdgroups_k * metal_simdgroup_width_k) return status_code_t::unsupported_k;
             dense_pipelines_[static_cast<u32_t>(rung.kernel)][gpu_rung_index(rung.slots)] = state;
         }
         return status_code_t::success_k;

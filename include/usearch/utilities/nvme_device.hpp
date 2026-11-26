@@ -645,8 +645,7 @@ inline fu_memory_domain_id_t sysfs_memory_domain_(int disk) noexcept {
     ::close(attribute);
     if (length <= 0) return no_memory_domain_k;
     if (bus_id[length - 1] == '\n') bus_id[length - 1] = 0;
-    fu_memory_domain_id_t domain = no_memory_domain_k;
-    return fu_memory_domain_id_of_pci(bus_id, &domain) == fu_success_k ? domain : no_memory_domain_k;
+    return memory_domain_of_pci(bus_id);
 }
 
 /** Hardware queues the disk at @p disk spreads CPUs over: the entries of its @c mq/. */
@@ -1174,8 +1173,7 @@ inline fu_memory_domain_id_t memory_domain_of(spdk_medium_t const& medium) noexc
     std::snprintf(bus_id, sizeof(bus_id), "%04x:%02x:%02x.%x", static_cast<unsigned>(address.domain),
                   static_cast<unsigned>(address.bus), static_cast<unsigned>(address.dev),
                   static_cast<unsigned>(address.func));
-    fu_memory_domain_id_t domain = no_memory_domain_k;
-    return fu_memory_domain_id_of_pci(bus_id, &domain) == fu_success_k ? domain : no_memory_domain_k;
+    return memory_domain_of_pci(bus_id);
 }
 
 /** What the controller under @p medium granted this process, polled as SPDK always polls; its PCIe

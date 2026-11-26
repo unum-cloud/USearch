@@ -369,8 +369,10 @@ bool make_call_executor(punned_basic_index<traits_type_, residency_> const& punn
     for (std::size_t device = 0; device != devices_count; ++device)
         devices[device] = static_cast<int>(residencies[device].device);
     using executor_t = typename punned_basic_index<traits_type_, residency_>::executor_t;
-    auto [built, status] = executor_t::on_default_streams(driver_of(gpu_drivers(), std::type_identity<executor_t> {}),
-                                                          std::span<int const> {devices.data(), devices_count});
+    std::size_t no_limit = 0;
+    auto [built, status] = on_default_streams(driver_of(gpu_drivers(), std::type_identity<executor_t> {}),
+                                              std::span<int const> {devices.data(), devices_count}, gpu_runtime(),
+                                              no_limit);
     if (failed(status)) return propagate_error(status, outcome);
     call_executor = std::move(built);
     return true;

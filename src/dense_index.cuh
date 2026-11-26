@@ -1671,13 +1671,29 @@ USEARCH_EXPORT void usearch_executor_for_ram(usearch_executor_for_ram_t* argumen
 USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* arguments) {
     call_outcome_t outcome(*arguments);
     *arguments->executor = nullptr;
-    usearch_vram_options_t const& vram = arguments->vram;
-    if (arguments->streams)
-        return propagate_error(usearch_status_unsupported_k, outcome, "The executor drives only its own streams"),
-               void();
+    usearch_vram_options_t vram = arguments->vram;
+    std::span<util::gpu_device_t const> const listed = gpu_devices();
+    // An index naming no devices stays on device zero, as `named_ordinal` says; an executor drives
+    // every GPU `every_known_gpu` lists.
+    util::growing_buffer<std::int32_t> every {util::global_allocator};
+    if (!vram.devices || !vram.devices_count) {
+        if (arguments->streams)
+            return propagate_error(usearch_status_invalid_argument_k, outcome,
+                                   "Streams pair with the devices named beside them"),
+                   void();
+        if (failed(every_known_gpu(vram.gpu_class_ceiling, every)))
+            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to list the devices"), void();
+        if (!every.empty()) vram.devices = every.data(), vram.devices_count = every.size();
+    }
+    // Two adopted streams on one device would leave one unowned, whatever the listing holds.
+    for (std::size_t later = 1; arguments->streams && later != vram.devices_count; ++later)
+        for (std::size_t earlier = 0; earlier != later; ++earlier)
+            if (vram.devices[earlier] == vram.devices[later])
+                return propagate_error(usearch_status_invalid_argument_k, outcome,
+                                       "Each adopted stream needs its own device"),
+                       void();
     // The ABI names USearch ordinals, which the listing resolves to each vendor's own; the spawn
     // keeps one stream per distinct device.
-    std::span<util::gpu_device_t const> const listed = gpu_devices();
     util::growing_buffer<util::gpu_device_t> devices {util::global_allocator};
     if (failed(devices.resize(named_count(vram))))
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to list the devices"), void();
@@ -1690,11 +1706,16 @@ USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* argum
     auto const [placement, placed_status] = resolve_placement(vram);
     if (failed(placed_status) && placed_status != util::status_code_t::config_mismatch_k)
         return propagate_error(placed_status, outcome), void();
-    auto [spawned, status] = spawn_gpu_executor(gpu_drivers(), devices, arguments->scratch_limit);
-    if (failed(status)) return propagate_error(status, outcome), void();
+    std::span<void* const> const streams = arguments->streams
+                                               ? std::span<void* const> {arguments->streams, devices.size()}
+                                               : std::span<void* const> {};
+    // The handle comes first, so nothing fallible follows the spawn adopting the caller's streams.
     usearch_executor_t const executor = new (std::nothrow) usearch_executor_handle_t {};
     if (!executor)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
+    std::size_t scratch_limit = arguments->scratch_limit;
+    auto [spawned, status] = spawn_gpu_executor(gpu_drivers(), devices, streams, gpu_runtime(), scratch_limit);
+    if (failed(status)) return delete executor, propagate_error(status, outcome), void();
     executor->residency.emplace<util::gpu_executor_t>(std::move(spawned));
     *arguments->executor = executor;
     propagate_error(usearch_status_success_k, outcome, nullptr);

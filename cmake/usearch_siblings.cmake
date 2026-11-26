@@ -57,19 +57,19 @@ set(SMASHTABLE_CUDA_ARCH "${USEARCH_CUDA_ARCH}")
 # directories of the NVMe indexes.
 usearch_sibling(
     numkong FETCHCONTENT_SOURCE_DIR_NUMKONG https://github.com/ashvardanian/NumKong
-    310ee417fa73bf85baaac7e707910f081427ede5
+    d8df8d51b2f6250b8f3f1b8c9999884067050023
 )
 usearch_sibling(
     forkunion FETCHCONTENT_SOURCE_DIR_FORKUNION https://github.com/ashvardanian/ForkUnion
-    59662d01e66ee40a87d8f5b28387a29d16c78ddd
+    94969cc654e6a8855dfb27f85e3c19a92ca85212
 )
 usearch_sibling(
     stringzilla FETCHCONTENT_SOURCE_DIR_STRINGZILLA https://github.com/ashvardanian/StringZilla
-    135694cbbbb1b0fb06d807d7c1bf41596e98db82
+    930a52c38505d37165194b72009da2df15a4dcfa
 )
 usearch_sibling(
     smashtable FETCHCONTENT_SOURCE_DIR_SMASHTABLE https://github.com/ashvardanian/SmashTable
-    e44798287a3aca9a263ba4fd7a98076d7a803f7f
+    36ec681da1874d63ef4b57114405df00e426728a
 )
 
 # The siblings are what `dense/`, the NVMe and VRAM tiers and the modalities are written against, while `usearch::header`

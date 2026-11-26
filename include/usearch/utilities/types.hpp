@@ -1927,6 +1927,11 @@ struct gpu_device_t {
 /** Devices one vendor's listing holds at most, so the process-wide listing needs no heap. */
 inline constexpr std::size_t gpu_devices_capacity_k = 64;
 
+/** The kernels the process loaded with one vendor's @p module_type_ on every device of that
+ *  vendor, which each vendor's device header specializes and the GPU runtime holds. */
+template <typename module_type_>
+struct kernel_tables;
+
 /** Whether this build holds @p kit_ 's body: every kit but a stub, which alone states
  *  @c compiled_k, as false. */
 template <typename kit_>

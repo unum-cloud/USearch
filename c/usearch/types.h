@@ -1098,7 +1098,9 @@ typedef struct usearch_ram_options_t {
 typedef struct usearch_vram_options_t {
 
     /** USearch device ordinals to place shards on, NVIDIA devices first, then AMD, then Apple, as
-     *  @c usearch_gpu_devices lists them, read only during the call; @c NULL picks device zero. */
+     *  @c usearch_gpu_devices lists them, read only during the call. @c NULL places an index on
+     *  device zero, while an executor takes every listed device of the first vendor with a known
+     *  class, each of a known class itself. */
     int32_t const* devices;
 
     /** Number of entries in @c devices; zero derives. */
@@ -1365,31 +1367,43 @@ typedef struct usearch_executor_for_vram_t {
      *  the call returns. */
     usearch_vram_options_t vram;
 
-    /** The @b optional CUDA streams of the caller, one per device in @c vram order, which are not
-     *  wired yet; @c NULL lets the executor open its own. */
+    /** The @b optional streams to adopt, one per entry of @c vram.devices and on that device, an
+     *  @c id<MTLCommandQueue> on Apple. On success a CUDA or HIP stream becomes the executor's,
+     *  which synchronizes and destroys it in @c usearch_executor_free; a Metal queue is retained,
+     *  the executor releasing its own reference there while the caller keeps and releases theirs.
+     *  On failure every stream stays the caller's as it was. @c NULL has the executor open its
+     *  own; default streams are refused. */
     void* const* streams;
 
     /** The @b optional ceiling on each stream's run, which every call's scratch and outputs carve
      *  from, past which a call reports @c usearch_status_out_of_memory_k; zero lets the run grow as
-     *  the geometry asks. */
+     *  the geometry asks. It holds per device, so N devices hold up to N times it. */
     size_t scratch_limit;
 } usearch_executor_for_vram_t;
 
 /**
- *  @brief Opens one submission stream on every distinct device @c vram names, which it destroys
- *      when freed, all of them driven by whichever host thread submits.
+ *  @brief Opens or adopts one submission stream on every distinct device @c vram names, which it
+ *      destroys when freed, all of them driven by whichever host thread submits.
  *
  *  One stream per device is the whole design: every shard on a device queues on its stream in
  *  order, a single host thread keeps every device fed, and adding host threads would buy nothing,
  *  since the work has already left for the accelerator by the time one of them would return. A
  *  GPU executor never changes process-wide device flags.
  *
+ *  Every caller stream is checked against its device before any is adopted, so a refused creation
+ *  leaves all of them the caller's. A CUDA stream must sit on its device's primary context, which
+ *  the runtime API creates streams on. A stream under CUDA graph capture can't be waited on from
+ *  the host, so a call on it fails with @c usearch_status_device_k. Each call leaves the primary
+ *  context of the last device it drove current on the calling thread, as @c cuCtxSetCurrent does.
+ *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k A @c gpu_class_ceiling no class takes.
- *  - @c usearch_status_unsupported_k Caller @c streams: the executor drives only its own.
- *  - @c usearch_status_device_k An ordinal past the listing, no device named, or a device refused
+ *  - @c usearch_status_invalid_argument_k A @c gpu_class_ceiling no class takes, a null or
+ *    default stream, which no executor can destroy, a device named twice beside @c streams, or
+ *    @c streams beside no named device at all.
+ *  - @c usearch_status_device_k An ordinal past the listing, no device listed, or a device refused
  *    its stream.
- *  - @c usearch_status_config_mismatch_k Devices of more than one vendor.
+ *  - @c usearch_status_config_mismatch_k Devices of more than one vendor, or a stream on another
+ *    device than its entry names.
  */
 USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* arguments);
 

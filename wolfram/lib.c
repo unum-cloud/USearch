@@ -1076,9 +1076,10 @@ EXTERN_C DLLEXPORT int ExecutorForRam(WolframLibraryData library_data, mint argu
  *  @brief Calls @c usearch_executor_for_vram: @c executor → @c devices → @c streams →
  *      @c scratchLimit.
  *
- *  The streams are the caller's CUDA stream addresses, one per device, which answer unsupported,
- *  since the executor drives only its own; an empty store uses the executor's own stream per
- *  device, which it opens and destroys.
+ *  The streams are the caller's stream addresses, one per device: on CUDA and HIP the executor
+ *  takes each and destroys it when freed, on Metal it retains each queue and releases its own
+ *  reference, and a failed creation leaves them all the caller's. A store of another length than
+ *  the devices is refused; an empty one uses the executor's own stream per device.
  */
 EXTERN_C DLLEXPORT int ExecutorForVram(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                        MArgument result) {
@@ -1094,6 +1095,11 @@ EXTERN_C DLLEXPORT int ExecutorForVram(WolframLibraryData library_data, mint arg
     DataStore const store = MArgument_getDataStore(arguments[2]);
     WolframIOLibrary_Functions const io = library_data->ioLibraryFunctions;
     size_t const streams_count = (size_t)io->DataStore_getLength(store);
+    if (streams_count && streams_count != devices_count) {
+        free(devices);
+        return answer_failure(library_data, usearch_status_invalid_argument_k, "streams pair one by one with devices",
+                              result);
+    }
     void** const streams = (void**)malloc(sizeof(void*) * (streams_count ? streams_count : 1));
     usearch_status_t streamed = streams ? usearch_status_success_k : usearch_status_out_of_memory_k;
     size_t position = 0;

@@ -297,7 +297,7 @@ struct [[nodiscard]] vram_nvidia_reshard_plan {
     /** The executor's stream on the device of the source shard @p global numbers. */
     typename device_executor_t::stream_t& stream_at_(device_executor_t& executor, std::size_t global) const noexcept {
         located_shard_t const located = locate_(global);
-        return executor.stream(fanout_t::stream_of(located.indexes->shards_, executor, located.shard));
+        return executor.stream(utilities::stream_of(located.indexes->shards_, executor, located.shard));
     }
 
     /** Rows the members of @p bin hold together. */
@@ -471,7 +471,8 @@ struct [[nodiscard]] vram_nvidia_reshard_plan {
                             .template slice_bytes<node_id_t>() +
                     default_alignment_k;
                 typename device_executor_t::stream_t& stream = stream_at_(device_executor, members_[member]);
-                arenas_.push_back_reserved(typename device_executor_t::arena_t {stream.arena.upstream()});
+                arenas_.push_back_reserved(
+                    typename device_executor_t::scratch_t::arena_t {stream.memory.arena.upstream()});
                 if (failed(arenas_.back().reserve_exactly(walk_bytes))) return status_code_t::out_of_memory_k;
                 walks_.push_back_reserved(
                     walk_context_t {typename walk_context_t::allocator_t {arenas_.back(), stream}});
@@ -479,7 +480,8 @@ struct [[nodiscard]] vram_nvidia_reshard_plan {
 
                 std::size_t const row_words = own_rows * connectivity;
                 std::size_t const bytes = table_bytes + (3 * row_words + rows - own_rows) * sizeof(u32_t);
-                folds_.push_back_reserved(cuda_virtual_memory_allocator<byte_t> {index.api(), device});
+                folds_.push_back_reserved(
+                    cuda_virtual_memory_allocator<byte_t> {index.api(), index.extensions(), device});
                 cuda_virtual_memory_allocator<byte_t>& buffer = folds_.back();
                 if (status_t const granted = buffer.grant(devices); failed(granted)) return granted;
                 if (failed(buffer.reserve_range(bytes)) || failed(buffer.commit(bytes)))
@@ -700,7 +702,7 @@ struct [[nodiscard]] vram_nvidia_reshard_plan {
                     bytes_of(neighbors + offset * neighbors_row_bytes, part_rows * neighbors_row_bytes),
                     {}};
                 typename device_executor_t::stream_t& stream = device_executor.stream(
-                    fanout_t::stream_of(source.shards_, device_executor, from));
+                    utilities::stream_of(source.shards_, device_executor, from));
                 if (status_t const entered = fanout_t::enter(source.shards_, from); failed(entered)) return entered;
                 auto [saving, save_status] = from_slot.index->plan_save(staged, synchronization_t::immutable_k, stream);
                 if (failed(save_status)) return save_status;
@@ -812,7 +814,8 @@ struct [[nodiscard]] vram_nvidia_reshard_plan {
 
     /** Every folding member's run of device scratch on its stream, and the context its searches and
      *  fold launches ride; the runs die after the contexts carved from them. */
-    growing_buffer<typename device_executor_t::arena_t, forkunion_allocator_t> arenas_ {forkunion_allocator_t {}};
+    growing_buffer<typename device_executor_t::scratch_t::arena_t, forkunion_allocator_t> arenas_ {
+        forkunion_allocator_t {}};
     growing_buffer<walk_context_t, forkunion_allocator_t> walks_ {forkunion_allocator_t {}};
 
     /** One move per source shard, numbered across the sources, as the packing placed it. */

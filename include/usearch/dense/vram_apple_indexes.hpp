@@ -41,6 +41,7 @@
 #include "usearch/utilities/ram_device.hpp"        // `forkunion_allocator` - the host columns' placement
 #include "usearch/utilities/safegraphs_format.hpp" // `save_config_t`, `load_config_t`, `safegraphs_read_metadata`
 #include "usearch/utilities/ram_shards.hpp"        // `shard_set` - the shards, their keys & routing
+#include "usearch/utilities/vram_shards.hpp"       // `stream_of` - the pairing lookup
 #include "usearch/utilities/ram_walks.hpp"         // `cursor_walk` - the cursor's walk
 #include "usearch/dense/types.hpp"
 #include "usearch/dense/shard_checkpoints.hpp"
@@ -236,7 +237,7 @@ struct vram_apple_indexes {
      *    flight.
      */
     status_t emplace(typename executor_t::stream_t const& stream) noexcept {
-        std::unique_ptr<index_t> shard = build_(stream.handle);
+        std::unique_ptr<index_t> shard = build_(stream);
         if (!shard) return status_code_t::out_of_memory_k;
         return emplace(std::move(shard));
     }
@@ -1157,7 +1158,7 @@ struct vram_apple_indexes {
         plan.owner_ = this;
         plan.config_ = config;
         // Tiles follow the devices the call runs on unless the caller overrides them, as on RAM.
-        if (!plan.config_.cache_bytes) plan.config_.cache_bytes = executor.cache_bytes_per_core();
+        if (!plan.config_.cache_bytes) plan.config_.cache_bytes = cache_bytes_per_core(executor);
         if (failed(plan.shard_plans_.reserve_exactly(shards))) return {{}, status_code_t::out_of_memory_k};
         // A refine's contexts own their buffers, so they open as any verb's do.
         if (status_t const opened = fanout_t::reserve_traversals(shards_, plan.traversals_, executor); failed(opened))
@@ -1634,7 +1635,8 @@ struct vram_apple_indexes {
             return {{}, status_code_t::config_mismatch_k};
         if (!rows_count) return {{}, status_code_t::success_k};
         if (queries.columns != dimensions()) return {{}, status_code_t::config_mismatch_k};
-        traversal_context_t traversal {executor.stream(fanout_t::stream_of(shards_, executor, 0)).handle.share()};
+        traversal_context_t traversal {
+            metal_shared_allocator_t {executor.stream(utilities::stream_of(shards_, executor, 0))}};
         return shards_[0].index->attend(queries, head_count, std::forward<value_lookup_type_>(value_lookup),
                                         score_scale, outputs, carry, config, traversal);
     }
@@ -2101,17 +2103,9 @@ struct vram_apple_indexes {
         static status_t pairs_with(shards_t const& shards, executor_t const& executor) noexcept {
             if (shards.empty()) return status_code_t::uninitialized_k;
             for (std::size_t shard = 0; shard != shards.size(); ++shard)
-                if (stream_of(shards, executor, shard) == executor.size()) return status_code_t::config_mismatch_k;
+                if (utilities::stream_of(shards, executor, shard) == executor.size())
+                    return status_code_t::config_mismatch_k;
             return status_code_t::success_k;
-        }
-
-        /** The position of the stream on shard @p shard 's device in @p executor, or its size when
-         *  it drives none there. */
-        static std::size_t stream_of(shards_t const& shards, executor_t const& executor, std::size_t shard) noexcept {
-            int const device = shards[shard].index->device_specs().ordinal;
-            std::size_t stream = 0;
-            while (stream != executor.size() && executor.device(stream) != device) ++stream;
-            return stream;
         }
 
         /** Opens one traversal context per shard over its device's stream, so a fan-out never
@@ -2120,8 +2114,8 @@ struct vram_apple_indexes {
                                            executor_t& executor) noexcept {
             if (failed(traversals.reserve_exactly(shards.size()))) return status_code_t::out_of_memory_k;
             for (std::size_t shard = 0; shard != shards.size(); ++shard) {
-                traversals.push_back_reserved(
-                    traversal_context_t {executor.stream(stream_of(shards, executor, shard)).handle.share()});
+                traversals.push_back_reserved(traversal_context_t {
+                    metal_shared_allocator_t {executor.stream(utilities::stream_of(shards, executor, shard))}});
                 if (!traversals.back()) return status_code_t::out_of_memory_k;
             }
             return status_code_t::success_k;
@@ -2272,8 +2266,10 @@ struct vram_apple_indexes {
     };
 
     /** One unreserved shard placed on the device of @p stream; null when the allocation fails. */
-    std::unique_ptr<index_t> build_(metal_stream_t const& stream) const noexcept {
-        metal_shared_allocator_t const allocator {stream};
+    std::unique_ptr<index_t> build_(typename executor_t::stream_t const& stream) const noexcept {
+        // Storage commits to no queue of its own, so it outlives the executor that placed it.
+        metal_shared_allocator_t const allocator {*stream.handle.context(), static_cast<int>(stream.ordinal),
+                                                  *stream.kernels};
         return std::unique_ptr<index_t>(new (std::nothrow)
                                             index_t(kernel(), geometry_, allocator, allocator, shards_.allocator()));
     }
@@ -2382,7 +2378,7 @@ struct vram_apple_indexes {
         rounds.owner_ = this;
         rounds.config_ = config.refine;
         // Tiles follow the devices the call runs on unless the caller overrides them, as on RAM.
-        if (!rounds.config_.cache_bytes) rounds.config_.cache_bytes = executor.cache_bytes_per_core();
+        if (!rounds.config_.cache_bytes) rounds.config_.cache_bytes = cache_bytes_per_core(executor);
         for (std::size_t closing = 0; closing != packed; ++closing)
             if (status_t const closed = plan.incoming_source_(closing)->close_gated_(); failed(closed)) {
                 // Only the sources closed so far reopen; the plan's own release reopens the rest.

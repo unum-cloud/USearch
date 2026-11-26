@@ -1209,8 +1209,8 @@ struct geospatial_vram_nvidia_build_t {
         geospatial_nvidia_fatbin_t>;
 
     std::unique_ptr<face_t> operator()(int device) const noexcept {
-        return std::unique_ptr<face_t> {
-            new (std::nothrow) face_t(util::cuda_virtual_memory_allocator<util::byte_t> {gpu_drivers().cuda, device})};
+        return std::unique_ptr<face_t> {new (std::nothrow) face_t(util::cuda_virtual_memory_allocator<util::byte_t> {
+            gpu_drivers().cuda, gpu_drivers().extensions.cuda, device})};
     }
 };
 
@@ -1750,8 +1750,8 @@ struct geospatial_vram_amd_build {
         geospatial_amd_code_object<gpu_class_>>;
 
     std::unique_ptr<face_t> operator()(int device) const noexcept {
-        return std::unique_ptr<face_t> {
-            new (std::nothrow) face_t(util::hip_virtual_memory_allocator<util::byte_t> {gpu_drivers().hip, device})};
+        return std::unique_ptr<face_t> {new (std::nothrow) face_t(util::hip_virtual_memory_allocator<util::byte_t> {
+            gpu_drivers().hip, gpu_drivers().extensions.hip, device})};
     }
 };
 

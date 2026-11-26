@@ -444,8 +444,8 @@ struct sequence_vram_nvidia_build {
     us::sequence::needleman_wunsch_costs_t const* costs = nullptr;
 
     std::unique_ptr<face_t> operator()(int device) const noexcept {
-        std::unique_ptr<face_t> face {
-            new (std::nothrow) face_t(util::cuda_virtual_memory_allocator<util::byte_t> {gpu_drivers().cuda, device})};
+        std::unique_ptr<face_t> face {new (std::nothrow) face_t(util::cuda_virtual_memory_allocator<util::byte_t> {
+            gpu_drivers().cuda, gpu_drivers().extensions.cuda, device})};
         util::growing_buffer<util::u32_t, std::allocator<util::byte_t>> widths {std::allocator<util::byte_t> {}};
         auto const [parameters, parameters_status] = parameters_of(std::type_identity<typename face_t::parameters_t> {},
                                                                    *geometry, *costs, widths);
@@ -563,7 +563,7 @@ struct sequence_vram_apple_build {
         util::metal_context_t* const context = gpu_drivers().metal_contexts.context(device);
         if (!context) return {};
         std::unique_ptr<face_t> face {
-            new (std::nothrow) face_t(util::metal_shared_allocator_t {util::metal_stream_t {*context, device}})};
+            new (std::nothrow) face_t(util::metal_shared_allocator_t {*context, device, gpu_runtime().metal_kernels})};
         util::growing_buffer<util::u32_t, std::allocator<util::byte_t>> widths {std::allocator<util::byte_t> {}};
         auto const [parameters, parameters_status] = parameters_of(std::type_identity<typename face_t::parameters_t> {},
                                                                    *geometry, *costs, widths);
@@ -707,8 +707,8 @@ struct sequence_vram_amd_build {
     us::sequence::needleman_wunsch_costs_t const* costs = nullptr;
 
     std::unique_ptr<face_t> operator()(int device) const noexcept {
-        std::unique_ptr<face_t> face {
-            new (std::nothrow) face_t(util::hip_virtual_memory_allocator<util::byte_t> {gpu_drivers().hip, device})};
+        std::unique_ptr<face_t> face {new (std::nothrow) face_t(util::hip_virtual_memory_allocator<util::byte_t> {
+            gpu_drivers().hip, gpu_drivers().extensions.hip, device})};
         util::growing_buffer<util::u32_t, std::allocator<util::byte_t>> widths {std::allocator<util::byte_t> {}};
         auto const [parameters, parameters_status] = parameters_of(std::type_identity<typename face_t::parameters_t> {},
                                                                    *geometry, *costs, widths);

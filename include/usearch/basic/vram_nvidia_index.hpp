@@ -516,6 +516,9 @@ struct vram_ragged_graph {
     /** The driver table every call on this index goes through, the storage allocator's. */
     cuda_api_t const& api() const noexcept { return neighbors_matrix_.api(); }
 
+    /** The optional driver entries its storage maps through, cuFile's among them. */
+    cuda_extensions_t const& extensions() const noexcept { return neighbors_matrix_.extensions(); }
+
     /** The metric the kits score under where they cover several, unknown otherwise. */
     nk_kernel_kind_t kernel() const noexcept { return kernel_; }
 

@@ -36,7 +36,7 @@ void run_vram_nvidia_cases(gpu_device_t const& device) {
         return;
     fmt::println("- CUDA: {} sm_{}{} #{}, {} SMs, {} MiB", device.name, device.architecture_major,
                  device.architecture_minor, ordinal, device.compute_units, device.memory_bytes >> 20);
-    auto [executor, spawn_status] = cuda_executor_t::spawn(api, std::span<int const> {&ordinal, 1});
+    auto [executor, spawn_status] = spawn_harness_executor<cuda_executor_t>(std::span<int const> {&ordinal, 1});
     if (!expect_true(succeeded(spawn_status), "CUDA device #{} opens no stream", ordinal)) return;
     if (dense_nvidia_runs(device)) run_vram_indexes_cases(executor);
     else

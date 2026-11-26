@@ -2120,7 +2120,8 @@ impl Executor {
 
     /// Opens one non-blocking stream on every named device, created and destroyed with the
     /// executor, all of them driven by the one host thread that calls the verbs - which is why this
-    /// takes no thread count.
+    /// takes no thread count. Empty `devices` drives every listed device of the first vendor with a
+    /// known class.
     ///
     /// Zero `scratch_limit` lets scratch grow as geometry asks. A `gpu_class_ceiling` no named
     /// device loads is refused with [`Status::Unsupported`].
@@ -2128,13 +2129,15 @@ impl Executor {
         unsafe { Self::for_vram_on_streams(devices, gpu_class_ceiling, &[], scratch_limit) }
     }
 
-    /// Names the caller's CUDA streams, one per device in `devices` order, in place of the ones
-    /// [`Executor::for_vram`] opens; the library answers [`Status::Unsupported`] until caller
-    /// streams are wired.
+    /// Adopts the caller's streams, one per device in `devices` order, in place of the ones
+    /// [`Executor::for_vram`] opens: CUDA or HIP streams, or `id<MTLCommandQueue>` on Apple.
     ///
     /// # Safety
-    /// Every stream must be a live CUDA stream on its device, which the caller destroys only after
-    /// dropping the executor.
+    /// Every stream must be a live stream on its device. On success a CUDA or HIP stream becomes
+    /// the executor's, which synchronizes and destroys it when dropped, so the caller never
+    /// destroys it; a Metal queue is retained, the executor releasing its own reference when
+    /// dropped while the caller keeps and releases theirs. On an error every stream stays the
+    /// caller's.
     pub unsafe fn for_vram_on_streams(
         devices: &[i32],
         gpu_class_ceiling: Option<GPUClass>,
@@ -2143,7 +2146,7 @@ impl Executor {
     ) -> Result<Self> {
         unsafe {
             if !streams.is_empty() && streams.len() != devices.len() {
-                return Err(fail(Status::ShapeMismatch, "pass no streams or one per device"));
+                return Err(fail(Status::InvalidArgument, "pass no streams or one per device"));
             }
             let mut handle = ptr::null_mut();
             let mut outcome = usearch_outcome_t::default();

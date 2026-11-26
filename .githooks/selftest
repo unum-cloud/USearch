@@ -18,8 +18,10 @@ hooks_directory=$(cd "$(dirname "$0")" && pwd)
 # in each sibling project checked out beside this one, as `../NumKong-v8/.githooks/`, and prints `identical` or how
 # many lines differ. Project Settings and this project's own Rules and Fixtures regions are skipped, a region a
 # sibling lacks prints `absent`, and any difference exits nonzero. It also compares the `Shared Core` region of
-# `cpp/<prefix>/types.hpp` and the `Calls` and `Receivers` regions of `golang/types.go`, with each project's
-# prefix and name read as one. With `--sync`, writes each shared hook region over the sibling's instead.
+# `cpp/<prefix>/types.hpp`, the `Calls` and `Receivers` regions of `golang/types.go`, every region named from
+# `Shared VRAM` in the GPU runtime and the vendor device headers, with each project's prefix and name read as one,
+# and the vendored DLPack and Arrow C interface headers byte for byte. With `--sync`, writes each shared hook region over the
+# sibling's instead.
 if [ "${1:-}" = --siblings ] || [ "${1:-}" = --sync ]; then
     mode=$1
     project_name=$(sed -n 's/^project_name="\(.*\)"$/\1/p' "$hooks_directory/pre-commit")
@@ -27,11 +29,37 @@ if [ "${1:-}" = --siblings ] || [ "${1:-}" = --sync ]; then
     region_text() { # region_text <name> <file>
         awk -v name="$1" '$0 == "# region " name { inside = 1 } inside { print } $0 == "# endregion " name { exit }' "$2"
     }
-    # Prints a source region with the project's lowercase, uppercase and checkout names replaced by placeholders.
+    # Projects that must all carry every compared source region and vendored header: between two of them, an absent
+    # region is a difference, and so is a vendored header one of them holds and the other lacks. Emptying it tolerates
+    # every absence while a new shared region spreads.
+    strict_region_projects='usearch|uform|ustore'
+    # Prints one `path|opener|closer` line per compared source region: the fixed ones, then every region whose name
+    # starts with `Shared VRAM` in either project's copy of each GPU file, or `Shared VRAM` itself while neither has
+    # one, and last the vendored headers, whose opener is empty.
+    source_regions() { # source_regions <own-root> <own-lowercase-name> <sibling-root> <sibling-lowercase-name>
+        local source_path region_names
+        printf '%s\n' "cpp/@name@/types.hpp|#pragma region Shared Core|#pragma endregion Shared Core" \
+            "golang/types.go|// region: Calls|// endregion: Calls" "golang/types.go|// region: Receivers|// endregion: Receivers"
+        for source_path in include/@name@/utilities/vram_device.hpp include/@name@/utilities/vram_{nvidia,amd,apple}_device.hpp src/lib.hpp; do
+            region_names=$(cat "$1/${source_path//@name@/$2}" "$3/${source_path//@name@/$4}" 2> /dev/null |
+                sed -n 's/^#pragma region \(Shared VRAM.*\)$/\1/p' | sort -u)
+            printf '%s\n' "${region_names:-Shared VRAM}" |
+                awk -v path="$source_path" '{ print path "|#pragma region " $0 "|#pragma endregion " $0 }'
+        done
+        printf '%s\n' "c/@name@/dlpack.h||" "c/@name@/arrow_abi.h||"
+    }
+    # Succeeds when the file holds the opener line, or exists at all when the opener is empty, as a vendored file.
+    carries_region() { # carries_region <opener> <file>
+        if [ -z "$1" ]; then [ -f "$2" ]; else grep -qxF "$1" "$2" 2> /dev/null; fi
+    }
+    # Prints a source region, or a whole vendored file when the opener is empty, with the project's lowercase,
+    # uppercase and checkout names replaced by placeholders. A vendored file names no project, so it compares
+    # byte for byte.
     source_region_text() { # source_region_text <opener> <closer> <file> <project-name>
         local lower
         lower=$(printf '%s' "$4" | tr '[:upper:]' '[:lower:]')
-        awk -v opener="$1" -v closer="$2" '$0 == opener { inside = 1 } inside { print } $0 == closer { exit }' "$3" |
+        { if [ -z "$1" ]; then cat "$3"; else awk -v opener="$1" -v closer="$2" \
+            '$0 == opener { inside = 1 } inside { print } $0 == closer { exit }' "$3"; fi; } |
             sed -e "s/$4/@Name@/g" -e "s/$lower/@name@/g" -e "s/$(printf '%s' "$lower" | tr '[:lower:]' '[:upper:]')/@NAME@/g"
     }
     differing_count=0
@@ -64,21 +92,25 @@ if [ "${1:-}" = --siblings ] || [ "${1:-}" = --sync ]; then
         [ "$mode" = --siblings ] || continue
         project_lower=$(printf '%s' "$project_name" | tr '[:upper:]' '[:lower:]')
         sibling_lower=$(printf '%s' "$sibling_name" | tr '[:upper:]' '[:lower:]')
-        for source_region in "cpp/@name@/types.hpp|#pragma region Shared Core|#pragma endregion Shared Core" \
-            "golang/types.go|// region: Calls|// endregion: Calls" "golang/types.go|// region: Receivers|// endregion: Receivers"; do
-            IFS='|' read -r source_path opener closer <<< "$source_region"
+        while IFS='|' read -r source_path opener closer; do
             own_path=$hooks_directory/../${source_path//@name@/$project_lower}
             sibling_path=$sibling_hooks/../${source_path//@name@/$sibling_lower}
-            if ! grep -qxF "$opener" "$own_path" 2> /dev/null || ! grep -qxF "$opener" "$sibling_path" 2> /dev/null; then
+            region_label=${opener#* region* }
+            if ! carries_region "$opener" "$own_path" || ! carries_region "$opener" "$sibling_path"; then
                 verdict=absent
+                if printf '%s\n' "$project_lower" "$sibling_lower" | grep -cxE "${strict_region_projects:-^$}" | grep -qx 2 &&
+                    { [ -n "$opener" ] || [ -f "$own_path" ] || [ -f "$sibling_path" ]; }; then
+                    verdict="absent, though both must carry it"
+                    differing_count=$((differing_count + 1))
+                fi
             else
                 differing_lines=$(diff <(source_region_text "$opener" "$closer" "$own_path" "$project_name") \
                     <(source_region_text "$opener" "$closer" "$sibling_path" "$sibling_name") | grep -c '^[<>]')
                 verdict=identical
                 [ "$differing_lines" -eq 0 ] || { verdict="$differing_lines lines differ"; differing_count=$((differing_count + 1)); }
             fi
-            printf '%s: %s against %s: %s\n' "${source_path//@name@/$project_lower}" "${opener#* region* }" "$sibling_checkout" "$verdict"
-        done
+            printf '%s: %s against %s: %s\n' "${source_path//@name@/$project_lower}" "${region_label:-whole file}" "$sibling_checkout" "$verdict"
+        done < <(source_regions "$hooks_directory/.." "$project_lower" "$sibling_hooks/.." "$sibling_lower")
     done
     printf '%d region comparisons differ\n' "$differing_count"
     [ "$differing_count" -eq 0 ]

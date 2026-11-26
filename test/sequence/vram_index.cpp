@@ -193,10 +193,11 @@ struct nvidia_cells_t {
     using index_t = vram_nvidia_index<vram_kit_of<metric_>, node_id_type_, sequence_nvidia_fatbin<metric_>>;
 
     static cuda_virtual_memory_allocator<byte_t> storage(executor_t& executor, int device) noexcept {
-        return cuda_virtual_memory_allocator<byte_t> {executor.api(), device};
+        return cuda_virtual_memory_allocator<byte_t> {executor.stream(0).handle.api(),
+                                                      test::gpu_drivers().extensions.cuda, device};
     }
     static cuda_arena_allocator_t arena(executor_t& executor) noexcept {
-        return cuda_arena_allocator_t {executor.stream(0).arena, executor.stream(0)};
+        return cuda_arena_allocator_t {executor.stream(0).memory.arena, executor.stream(0)};
     }
 
     /** The sharded collections' shards, their storage on a device alone, and the runtime opening
@@ -204,7 +205,8 @@ struct nvidia_cells_t {
     template <typename index_type_, typename build_type_>
     using indexes_t = us::basic::vram_nvidia_indexes<index_type_, util::uuid128_t, build_type_>;
     static cuda_virtual_memory_allocator<byte_t> storage(int device) noexcept {
-        return cuda_virtual_memory_allocator<byte_t> {test::gpu_drivers().cuda, device};
+        return cuda_virtual_memory_allocator<byte_t> {test::gpu_drivers().cuda, test::gpu_drivers().extensions.cuda,
+                                                      device};
     }
     static cuda_api_t const& api() noexcept { return test::gpu_drivers().cuda; }
     inline static constexpr gpu_vendor_t vendor_k = gpu_vendor_t::nvidia_k;
@@ -225,10 +227,11 @@ struct amd_cells_t {
                                    node_id_type_, sequence_amd_code_object<metric_, gpu_class_t::amd_cdna3_k>>;
 
     static hip_virtual_memory_allocator<byte_t> storage(executor_t& executor, int device) noexcept {
-        return hip_virtual_memory_allocator<byte_t> {executor.api(), device};
+        return hip_virtual_memory_allocator<byte_t> {executor.stream(0).handle.api(),
+                                                     test::gpu_drivers().extensions.hip, device};
     }
     static hip_arena_allocator_t arena(executor_t& executor) noexcept {
-        return hip_arena_allocator_t {executor.stream(0).arena, executor.stream(0)};
+        return hip_arena_allocator_t {executor.stream(0).memory.arena, executor.stream(0)};
     }
 
     /** The sharded collections' shards, their storage on a device alone, and the runtime opening
@@ -236,7 +239,8 @@ struct amd_cells_t {
     template <typename index_type_, typename build_type_>
     using indexes_t = us::basic::vram_amd_indexes<index_type_, util::uuid128_t, build_type_>;
     static hip_virtual_memory_allocator<byte_t> storage(int device) noexcept {
-        return hip_virtual_memory_allocator<byte_t> {test::gpu_drivers().hip, device};
+        return hip_virtual_memory_allocator<byte_t> {test::gpu_drivers().hip, test::gpu_drivers().extensions.hip,
+                                                     device};
     }
     static hip_api_t const& api() noexcept { return test::gpu_drivers().hip; }
     inline static constexpr gpu_vendor_t vendor_k = gpu_vendor_t::amd_k;
@@ -255,9 +259,12 @@ struct apple_cells_t {
     using index_t = vram_apple_index<vram_kit_of<metric_, sz_cap_metal_k>, node_id_type_>;
 
     static metal_shared_allocator_t storage(executor_t& executor, int) noexcept {
-        return metal_shared_allocator_t {executor.stream(0).handle};
+        return metal_shared_allocator_t {*executor.stream(0).handle.context(),
+                                         static_cast<int>(executor.stream(0).ordinal), *executor.stream(0).kernels};
     }
-    static metal_stream_t arena(executor_t& executor) noexcept { return executor.stream(0).handle.share(); }
+    static metal_shared_allocator_t arena(executor_t& executor) noexcept {
+        return metal_shared_allocator_t {executor.stream(0)};
+    }
 };
 using cell_vendor_t = apple_cells_t;
 
@@ -349,7 +356,7 @@ static void test_sequence_vram_collection(u64_t seed, cell_vendor_t::executor_t&
     }
 
     // The GPU index, in three batches, each over a context carved from the executor's run.
-    int const device = executor.device(0);
+    int const device = static_cast<int>(executor.stream(0).ordinal);
     vram_index_t vram_index {cell_vendor_t::storage(executor, device)};
     if constexpr (metric_ == usearch_sequence_metric_overlap_k) {
         u32_t widths[std::size(vram_overlap_widths_k)];
@@ -367,8 +374,9 @@ static void test_sequence_vram_collection(u64_t seed, cell_vendor_t::executor_t&
     for (std::size_t batch = 0; batch != batches_k && held(); ++batch) {
         std::size_t const first = count * batch / batches_k, bound = count * (batch + 1) / batches_k;
         std::span<std::size_t const> const batch_offsets {offsets.data() + first, bound - first + 1};
-        expect_equal(executor.reserve(vram_index.traversal_memory_usage(
-                         tape_view<byte_t const> {tape_bytes, batch_offsets}, insert_config)),
+        expect_equal(reserve_scratch(executor.stream(0),
+                                     vram_index.traversal_memory_usage(
+                                         tape_view<byte_t const> {tape_bytes, batch_offsets}, insert_config)),
                      status_code_t::success_k);
         typename vram_index_t::traversal_context_t context {cell_vendor_t::arena(executor)};
         auto const [inserted, status] = vram_index.insert({keys.data() + first, bound - first},
@@ -384,9 +392,10 @@ static void test_sequence_vram_collection(u64_t seed, cell_vendor_t::executor_t&
     nk::matrix<f32_t> distances = make_matrix<f32_t>(queries_count, wanted_k);
     std::span<std::size_t const> const query_offsets {offsets.data() + count, queries_count + 1};
     typename vram_index_t::search_config_t const search_config {expansion_k, wanted_k};
-    expect_equal(executor.reserve(vram_index.traversal_memory_usage(tape_view<byte_t const> {tape_bytes, query_offsets},
-                                                                    search_config)),
-                 status_code_t::success_k);
+    expect_equal(
+        reserve_scratch(executor.stream(0), vram_index.traversal_memory_usage(
+                                                tape_view<byte_t const> {tape_bytes, query_offsets}, search_config)),
+        status_code_t::success_k);
     typename vram_index_t::traversal_context_t context {cell_vendor_t::arena(executor)};
     if (held())
         expect_equal(
@@ -451,7 +460,7 @@ static void expect_sequence_vram_reloaded(indexes_type_& saved, std::size_t shar
     expect_equal(saved.save(first_path, codec_t {}, executor, config, "levenshtein"), status_code_t::success_k);
     indexes_type_ loaded {forkunion_allocator_t {no_memory_domain_k}, sequence_vram_shards_t {}};
     loaded.bound_shards(shard_capacity);
-    expect_equal(loaded.emplace(executor.stream(0).device), status_code_t::success_k);
+    expect_equal(loaded.emplace(static_cast<int>(executor.stream(0).ordinal)), status_code_t::success_k);
     expect_equal(loaded.load(std::string_view {first_path}, codec_t {}, executor, load_config_t {}, connectivity_32_k),
                  status_code_t::success_k);
     expect_equal(loaded.size(), saved.size());
@@ -506,8 +515,8 @@ static void test_sequence_vram_sharded(u64_t seed, cell_vendor_t::executor_t& ex
 
     indexes_t indexes {forkunion_allocator_t {no_memory_domain_k}, sequence_vram_shards_t {}};
     indexes.bound_shards(shard_capacity_k);
-    expect_equal(indexes.emplace(executor.stream(0).device), status_code_t::success_k);
-    expect_equal(indexes.emplace(executor.stream(0).device), status_code_t::success_k);
+    expect_equal(indexes.emplace(static_cast<int>(executor.stream(0).ordinal)), status_code_t::success_k);
+    expect_equal(indexes.emplace(static_cast<int>(executor.stream(0).ordinal)), status_code_t::success_k);
     expect_equal(indexes.reserve({entries_k, connectivity_32_k, offsets[entries_k]}).status, status_code_t::success_k);
     auto const [inserted, insert_status] = indexes.insert(to_span(keys), sequences, executor, {expansion_k});
     expect_equal(insert_status, status_code_t::success_k);
@@ -539,11 +548,11 @@ static void test_sequence_vram_sharded(u64_t seed, cell_vendor_t::executor_t& ex
         sharded_matched += matched_count(found, exact.view().row(query).as_vector(), wanted_k);
     }
 
-    index_t single {cell_vendor_t::storage(executor, executor.device(0))};
+    index_t single {cell_vendor_t::storage(executor, static_cast<int>(executor.stream(0).ordinal))};
     expect_equal(single.reserve({0, connectivity_32_k, 0}).status, status_code_t::success_k);
     typename index_t::insert_config_t const insert_config {expansion_k};
-    expect_equal(executor.reserve(max_of(single.traversal_memory_usage(sequences, insert_config),
-                                         single.traversal_memory_usage(queries, search_config))),
+    expect_equal(reserve_scratch(executor.stream(0), max_of(single.traversal_memory_usage(sequences, insert_config),
+                                                            single.traversal_memory_usage(queries, search_config))),
                  status_code_t::success_k);
     typename index_t::traversal_context_t context {cell_vendor_t::arena(executor)};
     expect_equal(single.insert(to_span(keys), sequences, context, insert_config).status, status_code_t::success_k);
@@ -587,15 +596,15 @@ static void test_sequence_vram_rounds(u64_t seed, cell_vendor_t::executor_t& exe
     auto placed = [&]() {
         auto indexes = std::make_unique<indexes_t>(forkunion_allocator_t {no_memory_domain_k},
                                                    sequence_vram_shards_t {});
-        expect_equal(indexes->emplace(executor.stream(0).device), status_code_t::success_k);
-        expect_equal(indexes->emplace(executor.stream(0).device), status_code_t::success_k);
+        expect_equal(indexes->emplace(static_cast<int>(executor.stream(0).ordinal)), status_code_t::success_k);
+        expect_equal(indexes->emplace(static_cast<int>(executor.stream(0).ordinal)), status_code_t::success_k);
         return indexes;
     };
     std::unique_ptr<indexes_t> const source = placed(), first = placed(), second = placed(), lone = placed();
     expect_equal(source->reserve({entries_k, connectivity_32_k, offsets[entries_k]}).status, status_code_t::success_k);
     expect_equal(source->insert(to_span(keys), sequences, executor, {expansion_k}).status, status_code_t::success_k);
     auto narrow = std::make_unique<indexes_t>(forkunion_allocator_t {no_memory_domain_k}, sequence_vram_shards_t {});
-    expect_equal(narrow->emplace(executor.stream(0).device), status_code_t::success_k);
+    expect_equal(narrow->emplace(static_cast<int>(executor.stream(0).ordinal)), status_code_t::success_k);
 
     // The second source holds keys of its own, so a refusal that moved it would show in its size.
     std::vector<std::string> const lone_strings = generate_nucleotides(lone_k, 100, seed + 1);
@@ -685,8 +694,8 @@ static void test_sequence_vram_cut_refused(u64_t seed, cell_vendor_t::executor_t
     indexes_t source {forkunion_allocator_t {no_memory_domain_k}, sequence_vram_shards_t {}};
     indexes_t lone {forkunion_allocator_t {no_memory_domain_k}, sequence_vram_shards_t {}};
     for (indexes_t* placed : {&source, &lone}) {
-        expect_equal(placed->emplace(executor.stream(0).device), status_code_t::success_k);
-        expect_equal(placed->emplace(executor.stream(0).device), status_code_t::success_k);
+        expect_equal(placed->emplace(static_cast<int>(executor.stream(0).ordinal)), status_code_t::success_k);
+        expect_equal(placed->emplace(static_cast<int>(executor.stream(0).ordinal)), status_code_t::success_k);
     }
     expect_equal(source.reserve({entries_k, connectivity_32_k, offsets[entries_k]}).status, status_code_t::success_k);
     expect_equal(source.insert(to_span(keys), sequences, executor, {expansion_k}).status, status_code_t::success_k);
@@ -790,8 +799,8 @@ void run_sequence_vram_cases<cell_vendor_t::executor_t>(gpu_device_t const& devi
         return run_test_case(fmt::format("run_sequence_vram_cases({})", vendor).c_str(),
                              [] { return case_result_t::skipped(needs_64_lane_waves_k); });
     int const ordinal = static_cast<int>(device.vendor_ordinal);
-    auto [executor, spawn_status] = cell_vendor_t::executor_t::spawn(cell_vendor_t::api(),
-                                                                     std::span<int const> {&ordinal, 1});
+    auto [executor,
+          spawn_status] = spawn_harness_executor<cell_vendor_t::executor_t>(std::span<int const> {&ordinal, 1});
     if (!expect_true(succeeded(spawn_status), "{} device #{} opens no stream", cell_vendor_t::runtime_k, ordinal))
         return;
     u64_t const seed = test_run.settings.seed;
@@ -846,8 +855,7 @@ template <>
 void run_sequence_vram_cases<metal_executor_t>(gpu_device_t const& device) {
     if (device.vendor != gpu_vendor_t::apple_k) return;
     int const ordinal = static_cast<int>(device.vendor_ordinal);
-    auto [executor, spawn_status] = metal_executor_t::spawn(test::gpu_drivers().metal_contexts,
-                                                            std::span<int const> {&ordinal, 1});
+    auto [executor, spawn_status] = spawn_harness_executor<metal_executor_t>(std::span<int const> {&ordinal, 1});
     if (!expect_true(succeeded(spawn_status), "Metal device #{} opens no stream", ordinal)) return;
     u64_t const seed = test_run.settings.seed;
     auto const run = [&](char const* call, std::string_view arguments, auto&& check) {

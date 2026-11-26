@@ -430,10 +430,13 @@ struct vram_nvidia_indexes {
 
         /** Opens a source per mapped part, cuFile-registered where the file takes O_DIRECT. */
         status_t open_sources(std::span<mapped_file_t> mappings) noexcept {
+            if (owner->shards_.empty()) return status_code_t::uninitialized_k;
             if (failed(sources.resize(mappings.size()))) return status_code_t::out_of_memory_k;
             bool every_part_registered = !mappings.empty();
             for (std::size_t part = 0; part != mappings.size(); ++part) {
-                sources[part] = {linux_cufile_file_t::open(executor->api(), mappings[part]), mappings[part].view()};
+                sources[part] = {
+                    linux_cufile_file_t::open(owner->shards_[0].index->extensions().cufile, mappings[part]),
+                    mappings[part].view()};
                 every_part_registered = every_part_registered && sources[part].file;
             }
             owner->loaded_through_ = every_part_registered ? vram_load_path_t::cufile_k : vram_load_path_t::host_copy_k;
@@ -444,7 +447,7 @@ struct vram_nvidia_indexes {
         expected<columns_extents_t> columns_extents(shards_t& shards, std::size_t shard, codec_type_ const&) noexcept {
             typename executor_t::stream_t* const stream = stream_(shards, shard);
             if (!stream) return {{}, status_code_t::config_mismatch_k};
-            traversal_context_t context {typename traversal_context_t::allocator_t {stream->arena, *stream}};
+            traversal_context_t context {typename traversal_context_t::allocator_t {stream->memory.arena, *stream}};
             return shards[shard].index->columns_extents(context);
         }
         template <typename codec_type_>
@@ -453,14 +456,14 @@ struct vram_nvidia_indexes {
                                                                 codec_type_ const&) noexcept {
             typename executor_t::stream_t* const stream = stream_(shards, shard);
             if (!stream) return {{}, status_code_t::config_mismatch_k};
-            traversal_context_t context {typename traversal_context_t::allocator_t {stream->arena, *stream}};
+            traversal_context_t context {typename traversal_context_t::allocator_t {stream->memory.arena, *stream}};
             return shards[shard].index->plan_save(columns, context);
         }
         expected<typename index_t::load_plan_t> open_shard_load(
             shards_t& shards, std::size_t shard, safegraphs_saved_columns<node_id_t> const& saved) noexcept {
             typename executor_t::stream_t* const stream = stream_(shards, shard);
             if (!stream) return {{}, status_code_t::config_mismatch_k};
-            traversal_context_t context {typename traversal_context_t::allocator_t {stream->arena, *stream}};
+            traversal_context_t context {typename traversal_context_t::allocator_t {stream->memory.arena, *stream}};
             return shards[shard].index->plan_load(saved, context, to_span(sources));
         }
         expected<std::size_t> reserve(shards_t& shards, std::size_t shard, std::size_t entries) noexcept {
@@ -497,7 +500,7 @@ struct vram_nvidia_indexes {
         /** The stream on shard @p shard 's device, made current; null when the executor drives
          *  none there. */
         typename executor_t::stream_t* stream_(shards_t const& shards, std::size_t shard) noexcept {
-            std::size_t const stream = fanout_t::stream_of(shards, *executor, shard);
+            std::size_t const stream = utilities::stream_of(shards, *executor, shard);
             if (stream == executor->size() || failed(fanout_t::enter(shards, shard))) return nullptr;
             return &executor->stream(stream);
         }
@@ -820,7 +823,7 @@ struct vram_nvidia_indexes {
 
         /** One run per live shard, which the plan's contexts carve from, so no other call's
          *  rewind of the executor's runs reaches them. */
-        growing_buffer<typename executor_t::arena_t, forkunion_allocator_t> arenas_;
+        growing_buffer<typename executor_t::scratch_t::arena_t, forkunion_allocator_t> arenas_;
         growing_buffer<traversal_context_t, forkunion_allocator_t> traversals_;
         growing_buffer<typename index_t::refine_plan_t, forkunion_allocator_t> shard_plans_;
         vram_nvidia_indexes* owner_ = nullptr;
@@ -928,7 +931,7 @@ struct vram_nvidia_indexes {
             }
         }
 
-        growing_buffer<typename executor_t::arena_t, forkunion_allocator_t> arenas_;
+        growing_buffer<typename executor_t::scratch_t::arena_t, forkunion_allocator_t> arenas_;
         growing_buffer<traversal_context_t, forkunion_allocator_t> traversals_;
         growing_buffer<typename index_t::reshard_plan_t, forkunion_allocator_t> shard_plans_;
 
@@ -1159,8 +1162,8 @@ struct vram_nvidia_indexes {
             // The run grows on the current device's stream, so that device is bound first.
             if (status_t const entered = fanout_t::enter(shards_, first + shard); failed(entered)) return entered;
             typename executor_t::stream_t& stream = executor.stream(
-                fanout_t::stream_of(shards_, executor, first + shard));
-            plan.arenas_.push_back_reserved(typename executor_t::arena_t {stream.arena.upstream()});
+                utilities::stream_of(shards_, executor, first + shard));
+            plan.arenas_.push_back_reserved(typename executor_t::scratch_t::arena_t {stream.memory.arena.upstream()});
             if (failed(plan.arenas_[shard].reserve_exactly(walk_bytes))) return status_code_t::out_of_memory_k;
             plan.traversals_.push_back_reserved(
                 traversal_context_t {typename traversal_context_t::allocator_t {plan.arenas_[shard], stream}});

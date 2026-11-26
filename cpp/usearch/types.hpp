@@ -618,8 +618,9 @@ class executor_t {
         return opened_<executor_t>(usearch_executor_for_ram, arguments, &usearch_executor_for_ram_t::executor);
     }
 
-    /** Opens one non-blocking stream on every distinct device @p arguments names, created with the
-     *  executor and destroyed with it; caller @c streams answer @c status_code_t::unsupported_k. */
+    /** Opens or adopts one non-blocking stream on every distinct device @p arguments names: CUDA
+     *  and HIP streams die with the executor, Metal queues are retained and the executor releases
+     *  its own reference, and caller @c streams stay the caller's when creation fails. */
     static expected<executor_t> for_vram(usearch_executor_for_vram_t arguments = {}) noexcept {
         return opened_<executor_t>(usearch_executor_for_vram, arguments, &usearch_executor_for_vram_t::executor);
     }

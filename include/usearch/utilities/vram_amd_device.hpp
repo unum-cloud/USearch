@@ -19,19 +19,20 @@
 #pragma once
 
 #include <cstddef> // `std::size_t`
+#include <cstdint> // `std::uintptr_t` - the default streams' handles
 
 #include <bitset>      // `std::bitset` - the devices a range maps its slabs for
 #include <memory>      // `std::unique_ptr` for owned device allocations
-#include <mutex>       // `std::unique_lock`, `std::adopt_lock` - the executor's one-caller hold
+#include <mutex>       // `std::lock_guard` - the pinned slots' hold
 #include <span>        // `std::span` - the device list an executor opens over, a code object's bytes
 #include <type_traits> // `std::is_trivially_copyable_v` - a launch's arguments travel as bytes
-#include <utility>     // `std::move`, `std::exchange`
+#include <utility>     // `std::move`, `std::exchange`, `std::swap`
 
 #include <numkong/capabilities.h> // `nk_capability_t` - the ceilings the classes grant
 
 #include <forkunion/atomics.hpp>  // `fu::standard_atomic_ref` - the mapped and committed byte counts
+#include <forkunion/locks.hpp>    // `fu::spin_mutex_t`, `fu::fair_mutex_t` - the pinned slots, the kernel tables
 #include <forkunion/topology.hpp> // `fu::volume_ram` - the managed storage's host-memory budget
-#include <forkunion/locks.hpp>    // `fu::spin_mutex_t` - the hold
 #include <forkunion/types.hpp>    // `fu::round_up_to_multiple`
 
 #include "usearch/utilities/blocking_files.hpp" // `shared_library_t` - the HIP runtime opened by `hip_api_t::load`
@@ -124,16 +125,29 @@ inline constexpr unsigned hip_attach_global_k = 1;
 inline constexpr int hip_granularity_minimum_k = 0;
 inline constexpr int hip_host_device_k = -1;
 inline constexpr int hip_pointer_memory_type_k = 2;
+
+/** The runtime's legacy and per-thread default streams, which no executor adopts. */
+inline hip_stream_handle_t const hip_stream_legacy_handle_k = reinterpret_cast<hip_stream_handle_t>(
+    std::uintptr_t {0x1});
+inline hip_stream_handle_t const hip_stream_per_thread_handle_k = reinterpret_cast<hip_stream_handle_t>(
+    std::uintptr_t {0x2});
 inline constexpr int hip_pointer_device_ordinal_k = 9;
 inline constexpr unsigned hip_memory_type_device_k = 2;
 
 #pragma endregion Runtime ABI
 
+#pragma region Shared VRAM Driver
+
+/** What the runtime calls in stream order once the work queued before it finished, with that
+ *  work's status and the pointer given beside it; it must make no runtime call. */
+using hip_stream_callback_t = void (*)(hip_stream_handle_t, hip_result_t, void*);
+
 /**
- *  @brief The HIP entry points USearch calls, resolved from @c libamdhip64 by @ref load.
+ *  @brief The HIP entry points every engine calls, resolved from @c libamdhip64 once per process.
  *
  *  Every entry is null when the library is absent or lacks any of them, which leaves AMD with no
- *  devices; each spells the C prototype of the exported symbol it is resolved by.
+ *  devices; each spells the C prototype of the exported symbol it is resolved by. An engine's
+ *  optional entries resolve apart from these, so a runtime lacking one keeps this table whole.
  */
 struct hip_api_t {
     hip_result_t (*get_device_count)(int*) = nullptr;
@@ -144,9 +158,11 @@ struct hip_api_t {
     hip_result_t (*get_device_memory)(std::size_t*, int) = nullptr;
     hip_result_t (*can_access_peer)(int*, int, int) = nullptr;
     hip_result_t (*set_device)(int) = nullptr;
+    hip_result_t (*pointer_attribute)(void*, int, void const*) = nullptr;
     hip_result_t (*malloc_async)(void**, std::size_t, hip_stream_handle_t) = nullptr;
     hip_result_t (*free_async)(void*, hip_stream_handle_t) = nullptr;
     hip_result_t (*malloc_managed)(void**, std::size_t, unsigned) = nullptr;
+    hip_result_t (*malloc)(void**, std::size_t) = nullptr;
     hip_result_t (*memory_advise)(void const*, std::size_t, hip_memory_advice_t, int) = nullptr;
     hip_result_t (*free)(void*) = nullptr;
     hip_result_t (*host_malloc)(void**, std::size_t, unsigned) = nullptr;
@@ -164,8 +180,9 @@ struct hip_api_t {
     hip_result_t (*stream_destroy)(hip_stream_handle_t) = nullptr;
     hip_result_t (*stream_synchronize)(hip_stream_handle_t) = nullptr;
     hip_result_t (*stream_query)(hip_stream_handle_t) = nullptr;
-    hip_result_t (*pointer_attribute)(void*, int, void const*) = nullptr;
+    hip_result_t (*stream_get_device)(hip_stream_handle_t, int*) = nullptr;
     hip_result_t (*stream_wait_event)(hip_stream_handle_t, hip_event_handle_t, unsigned) = nullptr;
+    hip_result_t (*stream_add_callback)(hip_stream_handle_t, hip_stream_callback_t, void*, unsigned) = nullptr;
     hip_result_t (*event_create_with_flags)(hip_event_handle_t*, unsigned) = nullptr;
     hip_result_t (*event_record)(hip_event_handle_t, hip_stream_handle_t) = nullptr;
     hip_result_t (*event_query)(hip_event_handle_t) = nullptr;
@@ -173,32 +190,26 @@ struct hip_api_t {
     hip_result_t (*event_destroy)(hip_event_handle_t) = nullptr;
     hip_result_t (*module_load_data)(hip_module_handle_t*, void const*) = nullptr;
     hip_result_t (*module_unload)(hip_module_handle_t) = nullptr;
-    hip_result_t (*module_get_function)(hip_function_handle_t*, hip_module_handle_t, char const*) = nullptr;
+    hip_result_t (*module_get_function)(hip_function_handle_t*, hip_module_handle_t,
+                                        char const*) = nullptr; // vendor-boundary
+    hip_result_t (*function_get_attribute)(int*, int, hip_function_handle_t) = nullptr;
+    hip_result_t (*function_set_attribute)(void const*, int, int) = nullptr;
     hip_result_t (*module_launch_kernel)(hip_function_handle_t, unsigned, unsigned, unsigned, unsigned, unsigned,
                                          unsigned, unsigned, hip_stream_handle_t, void**, void**) = nullptr;
-    hip_result_t (*memory_granularity)(std::size_t*, hip_allocation_properties_t const*, int) = nullptr;
-    hip_result_t (*memory_address_reserve)(void**, std::size_t, std::size_t, void*, unsigned long long) = nullptr;
-    hip_result_t (*memory_address_free)(void*, std::size_t) = nullptr;
-    hip_result_t (*memory_create)(hip_allocation_handle_t*, std::size_t, hip_allocation_properties_t const*,
-                                  unsigned long long) = nullptr;
-    hip_result_t (*memory_release)(hip_allocation_handle_t) = nullptr;
-    hip_result_t (*memory_map)(void*, std::size_t, std::size_t, hip_allocation_handle_t, unsigned long long) = nullptr;
-    hip_result_t (*memory_unmap)(void*, std::size_t) = nullptr;
-    hip_result_t (*memory_set_access)(void*, std::size_t, hip_access_descriptor_t const*, std::size_t) = nullptr;
 
     /** The memory domain nearest each device, where its pinned host bytes go, or
      *  @c no_memory_domain_k where none is known. */
     fu_memory_domain_id_t memory_domains[gpu_devices_capacity_k] = {};
 
     /** Whether the runtime loaded with every entry resolved. */
-    explicit operator bool() const noexcept { return memory_set_access != nullptr; }
+    explicit operator bool() const noexcept { return module_launch_kernel != nullptr; }
 
     /** Opens the runtime and resolves every entry, or answers the empty table. The library stays
      *  open for the life of the process, as the table points into it. */
     static hip_api_t load() noexcept {
         // Each system names the runtime its own way, and opening another's name merely fails.
         shared_library_t library;
-        for (char const* name :
+        for (char const* name : // vendor-boundary
              {"libamdhip64.so", "libamdhip64.so.7", "libamdhip64.so.6", "amdhip64_7.dll", "amdhip64_6.dll"})
             if ((library = shared_library_t::open(name))) break;
         if (!library) return {};
@@ -212,11 +223,12 @@ struct hip_api_t {
             library.resolve("hipDeviceTotalMem", runtime.get_device_memory) &&
             library.resolve("hipDeviceCanAccessPeer", runtime.can_access_peer) &&
             library.resolve("hipSetDevice", runtime.set_device) &&
+            library.resolve("hipPointerGetAttribute", runtime.pointer_attribute) &&
             library.resolve("hipMallocAsync", runtime.malloc_async) &&
             library.resolve("hipFreeAsync", runtime.free_async) &&
             library.resolve("hipMallocManaged", runtime.malloc_managed) &&
-            library.resolve("hipMemAdvise", runtime.memory_advise) && library.resolve("hipFree", runtime.free) &&
-            library.resolve("hipHostMalloc", runtime.host_malloc) &&
+            library.resolve("hipMalloc", runtime.malloc) && library.resolve("hipMemAdvise", runtime.memory_advise) &&
+            library.resolve("hipFree", runtime.free) && library.resolve("hipHostMalloc", runtime.host_malloc) &&
             library.resolve("hipHostFree", runtime.host_free) &&
             library.resolve("hipHostRegister", runtime.host_register) &&
             library.resolve("hipHostUnregister", runtime.host_unregister) &&
@@ -228,8 +240,9 @@ struct hip_api_t {
             library.resolve("hipStreamDestroy", runtime.stream_destroy) &&
             library.resolve("hipStreamSynchronize", runtime.stream_synchronize) &&
             library.resolve("hipStreamQuery", runtime.stream_query) &&
-            library.resolve("hipPointerGetAttribute", runtime.pointer_attribute) &&
+            library.resolve("hipStreamGetDevice", runtime.stream_get_device) &&
             library.resolve("hipStreamWaitEvent", runtime.stream_wait_event) &&
+            library.resolve("hipStreamAddCallback", runtime.stream_add_callback) &&
             library.resolve("hipEventCreateWithFlags", runtime.event_create_with_flags) &&
             library.resolve("hipEventRecord", runtime.event_record) &&
             library.resolve("hipEventQuery", runtime.event_query) &&
@@ -238,21 +251,15 @@ struct hip_api_t {
             library.resolve("hipModuleLoadData", runtime.module_load_data) &&
             library.resolve("hipModuleUnload", runtime.module_unload) &&
             library.resolve("hipModuleGetFunction", runtime.module_get_function) &&
-            library.resolve("hipModuleLaunchKernel", runtime.module_launch_kernel) &&
-            library.resolve("hipMemGetAllocationGranularity", runtime.memory_granularity) &&
-            library.resolve("hipMemAddressReserve", runtime.memory_address_reserve) &&
-            library.resolve("hipMemAddressFree", runtime.memory_address_free) &&
-            library.resolve("hipMemCreate", runtime.memory_create) &&
-            library.resolve("hipMemRelease", runtime.memory_release) &&
-            library.resolve("hipMemMap", runtime.memory_map) && library.resolve("hipMemUnmap", runtime.memory_unmap) &&
-            library.resolve("hipMemSetAccess", runtime.memory_set_access);
+            library.resolve("hipFuncGetAttribute", runtime.function_get_attribute) &&
+            library.resolve("hipFuncSetAttribute", runtime.function_set_attribute) &&
+            library.resolve("hipModuleLaunchKernel", runtime.module_launch_kernel);
         if (!resolved) return {};
         // A bus that names no memory domain leaves the device's pinned bytes on the heap.
         for (int device = 0; static_cast<std::size_t>(device) != gpu_devices_capacity_k; ++device) {
             char bus_id[32] = {};
             [[maybe_unused]] hip_result_t const named = runtime.get_pci_bus_id(bus_id, sizeof(bus_id), device);
-            [[maybe_unused]] fu_status_t const placed = fu_memory_domain_id_of_pci(bus_id,
-                                                                                   &runtime.memory_domains[device]);
+            runtime.memory_domains[device] = memory_domain_of_pci(bus_id);
         }
         return runtime;
     }
@@ -260,12 +267,235 @@ struct hip_api_t {
 
 /** Makes HIP ordinal @p ordinal current on the calling thread, which every stream, allocation and
  *  launch after it runs on - the twin of @c cuda_set_device. Asked on every entry, so a caller
- *  switching devices between USearch calls is rebound, and finds the last device USearch bound
- *  left current. */
+ *  switching devices between calls is rebound. */
 inline hip_result_t hip_set_device(hip_api_t const& api, int ordinal) noexcept {
     if (!api) return hip_error_not_initialized_k;
     return api.set_device(ordinal);
 }
+
+/** One device's ordering identity: a non-blocking stream an executor opens or adopts and drains and
+ *  destroys when it dies, or the device's null legacy stream, which owns nothing. */
+struct hip_stream_t {
+
+    /**
+     *  @brief Opens a non-blocking stream on the current device, owned from now on.
+     *
+     *  @par Statuses:
+     *  - @c device_k The runtime refused the stream.
+     */
+    static expected<hip_stream_t> open(hip_api_t const& api) noexcept {
+        hip_stream_t stream;
+        stream.api_ = &api;
+        if (!api || api.stream_create_with_flags(&stream.handle_, hip_stream_non_blocking_k) != hip_success_k)
+            return {{}, {status_code_t::device_k, "Runtime refused a stream"}};
+        return {std::move(stream), status_code_t::success_k};
+    }
+
+    /**
+     *  @brief Checks that @p handle, a caller's stream, may be adopted as the stream of HIP ordinal
+     *      @p ordinal, without taking it.
+     *
+     *  @par Statuses:
+     *  - @c device_k There is no runtime.
+     *  - @c invalid_argument_k The @p handle is null or a default stream, which no owner destroys.
+     *  - @c config_mismatch_k The stream sits on another device than @p ordinal.
+     */
+    static status_t adoptable(hip_api_t const& api, std::size_t ordinal, void* handle) noexcept {
+        if (!api) return {status_code_t::device_k, "No HIP runtime"};
+        auto const stream = static_cast<hip_stream_handle_t>(handle);
+        if (!stream || stream == hip_stream_legacy_handle_k || stream == hip_stream_per_thread_handle_k)
+            return {status_code_t::invalid_argument_k, "A default stream cannot be adopted"};
+        int device = -1;
+        if (api.stream_get_device(stream, &device) != hip_success_k || device < 0 ||
+            static_cast<std::size_t>(device) != ordinal)
+            return {status_code_t::config_mismatch_k, "A stream sits on another device"};
+        return {};
+    }
+
+    /** Adopts @p handle, a stream the caller created, which it synchronizes and destroys. */
+    explicit hip_stream_t(hip_api_t const& api, hip_stream_handle_t handle) noexcept : api_(&api), handle_(handle) {}
+
+    hip_stream_t() noexcept = default;
+    hip_stream_t(hip_stream_t&& other) noexcept : api_(other.api_), handle_(std::exchange(other.handle_, nullptr)) {}
+    hip_stream_t& operator=(hip_stream_t&& other) noexcept {
+        std::swap(api_, other.api_), std::swap(handle_, other.handle_);
+        return *this;
+    }
+    hip_stream_t(hip_stream_t const&) = delete;
+    hip_stream_t& operator=(hip_stream_t const&) = delete;
+    ~hip_stream_t() noexcept {
+        if (handle_) api_->stream_synchronize(handle_), api_->stream_destroy(handle_);
+    }
+
+    /** The runtime table every call on this stream goes through. */
+    hip_api_t const& api() const noexcept { return *api_; }
+
+    operator hip_stream_handle_t() const noexcept { return handle_; }
+
+  private:
+    hip_api_t const* api_ = nullptr;
+    hip_stream_handle_t handle_ = nullptr;
+};
+
+/** Owned event, born on the current device, marking a point on a stream that the host polls or
+ *  awaits. It blocks on sync, so a drain sleeps instead of spinning a core, and destroying it
+ *  never waits for the work it marked. */
+struct hip_event_t {
+
+    /** An empty event, which records nothing. */
+    hip_event_t() noexcept = default;
+
+    explicit hip_event_t(hip_api_t const& api) noexcept : api_(&api) {
+        if (api) api.event_create_with_flags(&handle_, hip_event_blocking_sync_k | hip_event_disable_timing_k);
+    }
+    hip_event_t(hip_event_t&& other) noexcept : api_(other.api_), handle_(std::exchange(other.handle_, nullptr)) {}
+    hip_event_t& operator=(hip_event_t&& other) noexcept {
+        std::swap(api_, other.api_), std::swap(handle_, other.handle_);
+        return *this;
+    }
+    hip_event_t(hip_event_t const&) = delete;
+    hip_event_t& operator=(hip_event_t const&) = delete;
+    ~hip_event_t() noexcept {
+        if (handle_) api_->event_destroy(handle_);
+    }
+
+    operator hip_event_handle_t() const noexcept { return handle_; }
+
+    /**
+     *  @brief Marks everything queued on @p stream so far, which @ref finished and @ref wait
+     *      then await in order.
+     *
+     *  @par Statuses:
+     *  - @c device_k The event was never created.
+     */
+    status_t record(hip_stream_handle_t stream) noexcept {
+        if (!handle_ || api_->event_record(handle_, stream) != hip_success_k)
+            return {status_code_t::device_k, "The event recorded nothing"};
+        return {};
+    }
+
+    /**
+     *  @brief Polls the recorded work without blocking; nothing recorded has nothing to run.
+     *
+     *  @par Statuses:
+     *  - @c deferred_k The recorded work still runs.
+     *  - @c device_k The event was never created.
+     */
+    status_t finished() const noexcept {
+        if (!handle_) return {status_code_t::device_k, "The event was never created"};
+        hip_result_t const queried = api_->event_query(handle_);
+        if (queried == hip_error_not_ready_k) return {status_code_t::deferred_k};
+        if (queried != hip_success_k) return {status_code_t::device_k, "The device failed the recorded work"};
+        return {};
+    }
+
+    /**
+     *  @brief Sleeps until the recorded work finishes and answers whether the device finished it.
+     *
+     *  @par Statuses:
+     *  - @c device_k The event was never created.
+     */
+    status_t wait() noexcept {
+        if (!handle_ || api_->event_synchronize(handle_) != hip_success_k)
+            return {status_code_t::device_k, "The device failed the recorded work"};
+        return {};
+    }
+
+  private:
+    hip_api_t const* api_ = nullptr;
+    hip_event_handle_t handle_ = nullptr;
+};
+
+/** One code object loaded onto one GPU and unloaded with this owner; kernels are found by name. */
+struct hip_module_t {
+    using function_t = hip_function_handle_t;
+
+    hip_module_t() noexcept = default;
+    hip_module_t(hip_module_t&& other) noexcept : api_(other.api_), handle_(std::exchange(other.handle_, nullptr)) {}
+    hip_module_t& operator=(hip_module_t&& other) noexcept {
+        std::swap(api_, other.api_), std::swap(handle_, other.handle_);
+        return *this;
+    }
+    hip_module_t(hip_module_t const&) = delete;
+    hip_module_t& operator=(hip_module_t const&) = delete;
+    ~hip_module_t() noexcept {
+        if (handle_) api_->module_unload(handle_);
+    }
+
+    /**
+     *  @brief Loads @p code_object onto HIP ordinal @p device, binding it first, since a module
+     *      loads into the current device; an offload bundle loads its entry for that device.
+     *
+     *  @par Statuses:
+     *  - @c device_k The @p code_object is empty, or the runtime refused it.
+     */
+    static expected<hip_module_t> load(hip_api_t const& api, int device, bytes_view_t code_object) noexcept {
+        hip_module_t module;
+        module.api_ = &api;
+        if (code_object.empty() || hip_set_device(api, device) != hip_success_k ||
+            api.module_load_data(&module.handle_, code_object.data()) != hip_success_k)
+            return {{}, {status_code_t::device_k, "The runtime refused a code object"}};
+        return {std::move(module), status_code_t::success_k};
+    }
+
+    /** The runtime table the code object was loaded through, which launches of its kernels go
+     *  through. */
+    hip_api_t const& api() const noexcept { return *api_; }
+
+    /** The kernel exported as @p name, or null when the code object has none. */
+    function_t function(char const* name) const noexcept { // vendor-boundary
+        function_t function = nullptr;
+        return handle_ && api_->module_get_function(&function, handle_, name) == hip_success_k ? function : nullptr;
+    }
+
+  private:
+    hip_api_t const* api_ = nullptr;
+    hip_module_handle_t handle_ = nullptr;
+};
+
+#pragma endregion Shared VRAM Driver
+
+/**
+ *  @brief USearch's optional AMD entries beyond @ref hip_api_t: the virtual-memory ones that
+ *      @c libamdhip64 exports.
+ *
+ *  They resolve apart from the shared table, so a runtime lacking one keeps it whole; USearch then
+ *  lists no AMD devices, as its storage reserves virtual memory.
+ */
+struct hip_extensions_t {
+    hip_result_t (*memory_granularity)(std::size_t*, hip_allocation_properties_t const*, int) = nullptr;
+    hip_result_t (*memory_address_reserve)(void**, std::size_t, std::size_t, void*, unsigned long long) = nullptr;
+    hip_result_t (*memory_address_free)(void*, std::size_t) = nullptr;
+    hip_result_t (*memory_create)(hip_allocation_handle_t*, std::size_t, hip_allocation_properties_t const*,
+                                  unsigned long long) = nullptr;
+    hip_result_t (*memory_release)(hip_allocation_handle_t) = nullptr;
+    hip_result_t (*memory_map)(void*, std::size_t, std::size_t, hip_allocation_handle_t, unsigned long long) = nullptr;
+    hip_result_t (*memory_unmap)(void*, std::size_t) = nullptr;
+    hip_result_t (*memory_set_access)(void*, std::size_t, hip_access_descriptor_t const*, std::size_t) = nullptr;
+
+    /** Whether every entry resolved. */
+    explicit operator bool() const noexcept { return memory_set_access != nullptr; }
+
+    /** Resolves every entry from the runtime, leaving the table empty where one is missing. */
+    static hip_extensions_t load() noexcept {
+        shared_library_t library;
+        for (char const* name :
+             {"libamdhip64.so", "libamdhip64.so.7", "libamdhip64.so.6", "amdhip64_7.dll", "amdhip64_6.dll"})
+            if ((library = shared_library_t::open(name))) break;
+        if (!library) return {};
+        hip_extensions_t extensions;
+        bool const resolved = //
+            library.resolve("hipMemGetAllocationGranularity", extensions.memory_granularity) &&
+            library.resolve("hipMemAddressReserve", extensions.memory_address_reserve) &&
+            library.resolve("hipMemAddressFree", extensions.memory_address_free) &&
+            library.resolve("hipMemCreate", extensions.memory_create) &&
+            library.resolve("hipMemRelease", extensions.memory_release) &&
+            library.resolve("hipMemMap", extensions.memory_map) &&
+            library.resolve("hipMemUnmap", extensions.memory_unmap) &&
+            library.resolve("hipMemSetAccess", extensions.memory_set_access);
+        return resolved ? extensions : hip_extensions_t {};
+    }
+};
 
 /** The ordinal of the AMD device whose memory holds @p pointer, or -1 for host memory, pinned or
  *  not - the twin of @c cuda_device_of. */
@@ -437,41 +667,50 @@ struct hip_virtual_memory_allocator {
     /** The runtime every mapping goes through; null in a default-built one, which owns nothing. */
     hip_api_t const* api_ = nullptr;
 
+    /** The virtual-memory entries every mapping goes through, beside @c api_. */
+    hip_extensions_t const* extensions_ = nullptr;
+
     hip_virtual_memory_allocator() = default;
 
-    /** Names the GPU the future reservation pins to - placement only, no runtime call. */
-    explicit hip_virtual_memory_allocator(hip_api_t const& api, int device) noexcept : device_(device), api_(&api) {}
+    /** Names the GPU the future reservation pins to, through @p api and the virtual-memory entries
+     *  of @p extensions - placement only, no runtime call. */
+    explicit hip_virtual_memory_allocator(hip_api_t const& api, hip_extensions_t const& extensions, int device) noexcept
+        : device_(device), api_(&api), extensions_(&extensions) {}
 
     /** Copies the placement only, never a live reservation. */
     hip_virtual_memory_allocator(hip_virtual_memory_allocator const& other) noexcept
-        : device_(other.device_), peers_(other.peers_), api_(other.api_) {}
+        : device_(other.device_), peers_(other.peers_), api_(other.api_), extensions_(other.extensions_) {}
 
     /** Takes over a live reservation, so a table of them relocates without remapping. */
     hip_virtual_memory_allocator(hip_virtual_memory_allocator&& other) noexcept
         : base_(std::exchange(other.base_, nullptr)),
           virtual_address_bytes_(std::exchange(other.virtual_address_bytes_, 0)),
           mapped_bytes_(std::exchange(other.mapped_bytes_, 0)), granularity_(other.granularity_),
-          slab_bytes_(other.slab_bytes_), device_(other.device_), peers_(other.peers_), api_(other.api_) {}
+          slab_bytes_(other.slab_bytes_), device_(other.device_), peers_(other.peers_), api_(other.api_),
+          extensions_(other.extensions_) {}
     template <typename other_>
     hip_virtual_memory_allocator(hip_virtual_memory_allocator<other_> const& other) noexcept
-        : device_(other.device_), peers_(other.peers_), api_(other.api_) {}
+        : device_(other.device_), peers_(other.peers_), api_(other.api_), extensions_(other.extensions_) {}
     hip_virtual_memory_allocator& operator=(hip_virtual_memory_allocator const&) = delete;
     ~hip_virtual_memory_allocator() noexcept { release(); }
 
     hip_api_t const& api() const noexcept { return *api_; }
+
+    /** The optional entries its reservation maps through. */
+    hip_extensions_t const& extensions() const noexcept { return *extensions_; }
 
     /** Reserves @p virtual_address_bytes of virtual address space on the device named at
      *  construction - no physical memory yet, so the ceiling costs nothing and should be
      *  generous. */
     status_t reserve_range(std::size_t virtual_address_bytes) noexcept {
         hip_allocation_properties_t const properties = allocation_properties_(device_);
-        if (!api_ || !*api_ ||
-            api_->memory_granularity(&granularity_, &properties, hip_granularity_minimum_k) != hip_success_k)
+        if (!api_ || !*api_ || !extensions_ || !*extensions_ ||
+            extensions_->memory_granularity(&granularity_, &properties, hip_granularity_minimum_k) != hip_success_k)
             return status_code_t::device_k;
         slab_bytes_ = max_of(granularity_, preferred_slab_bytes_k / granularity_ * granularity_);
         virtual_address_bytes_ = fu::round_up_to_multiple(virtual_address_bytes, slab_bytes_);
         void* base = nullptr;
-        if (api_->memory_address_reserve(&base, virtual_address_bytes_, 0, nullptr, 0) != hip_success_k)
+        if (extensions_->memory_address_reserve(&base, virtual_address_bytes_, 0, nullptr, 0) != hip_success_k)
             return status_code_t::out_of_memory_k;
         base_ = static_cast<byte_t*>(base);
         return status_code_t::success_k;
@@ -503,7 +742,7 @@ struct hip_virtual_memory_allocator {
         std::size_t const readers = access_of_(granted, access);
         for (std::size_t offset = 0, slab = 0; offset != mapped_bytes_; offset += slab) {
             slab = min_of(slab_bytes_, max_of(granularity_, offset));
-            if (api_->memory_set_access(base_ + offset, slab, access, readers) != hip_success_k)
+            if (extensions_->memory_set_access(base_ + offset, slab, access, readers) != hip_success_k)
                 return status_code_t::device_k;
         }
         peers_ = granted;
@@ -530,12 +769,12 @@ struct hip_virtual_memory_allocator {
         while (mapped_bytes_ < bytes) {
             hip_allocation_handle_t handle = nullptr;
             std::size_t const slab_bytes = min_of(slab_bytes_, max_of(granularity_, mapped_bytes_));
-            if (runtime.memory_create(&handle, slab_bytes, &properties, 0) != hip_success_k)
+            if (extensions_->memory_create(&handle, slab_bytes, &properties, 0) != hip_success_k)
                 return status_code_t::out_of_memory_k;
             byte_t* const slab = base_ + mapped_bytes_;
-            bool const mapped = runtime.memory_map(slab, slab_bytes, 0, handle, 0) == hip_success_k &&
-                                runtime.memory_set_access(slab, slab_bytes, access, readers) == hip_success_k;
-            runtime.memory_release(handle);
+            bool const mapped = extensions_->memory_map(slab, slab_bytes, 0, handle, 0) == hip_success_k &&
+                                extensions_->memory_set_access(slab, slab_bytes, access, readers) == hip_success_k;
+            extensions_->memory_release(handle);
             if (!mapped) return status_code_t::device_k;
             if (runtime.fill(slab, 0, slab_bytes) != hip_success_k) return status_code_t::device_k;
             fu::standard_atomic_ref<std::size_t>(mapped_bytes_)
@@ -552,8 +791,8 @@ struct hip_virtual_memory_allocator {
     int device() const noexcept { return device_; }
 
     void release() noexcept {
-        if (mapped_bytes_) api_->memory_unmap(base_, mapped_bytes_);
-        if (base_) api_->memory_address_free(base_, virtual_address_bytes_);
+        if (mapped_bytes_) extensions_->memory_unmap(base_, mapped_bytes_);
+        if (base_) extensions_->memory_address_free(base_, virtual_address_bytes_);
         base_ = nullptr, virtual_address_bytes_ = 0, mapped_bytes_ = 0;
     }
 
@@ -677,7 +916,8 @@ struct hip_managed_allocator {
 };
 
 struct hip_pinned_slots_t;
-struct hip_kernel_tables_t;
+template <>
+struct kernel_tables<hip_module_t>;
 
 template <typename value_type_>
 struct hip_arena_allocator;
@@ -707,38 +947,43 @@ struct hip_device_allocator {
      *  @c stream_t holds a run of this allocator, so it is declared after it. */
     template <typename stream_type_>
     explicit hip_device_allocator(stream_type_ const& stream) noexcept
-        : api_(stream.api), stream_(stream.handle), device_(stream.device), pinned_slots_(stream.pinned_slots.get()),
-          kernel_tables_(stream.kernel_tables.get()) {}
+        : api_(&stream.handle.api()), stream_(&stream.handle), device_(static_cast<int>(stream.ordinal)),
+          pinned_slots_(stream.memory.pinned_slots.get()), kernel_tables_(stream.kernels) {}
 
     /** Rides the stream @p carver carves for, placing in that stream's pool what must outlive the
      *  rewinds of its run. */
     template <typename other_>
     explicit hip_device_allocator(hip_arena_allocator<other_> const& carver) noexcept
-        : api_(&carver.api()), stream_(carver.stream()), device_(carver.device()), pinned_slots_(carver.pinned_slots()),
-          kernel_tables_(carver.kernel_tables()) {}
+        : api_(&carver.api()), stream_(carver.owner()), device_(carver.device()), pinned_slots_(carver.pinned_slots()),
+          kernel_tables_(carver.kernels()) {}
     template <typename other_>
     hip_device_allocator(hip_device_allocator<other_> const& other) noexcept
-        : api_(other.api_), stream_(other.stream()), device_(other.device()), pinned_slots_(other.pinned_slots()),
-          kernel_tables_(other.kernel_tables()) {}
+        : api_(other.api_), stream_(other.owner()), device_(other.device()), pinned_slots_(other.pinned_slots()),
+          kernel_tables_(other.kernels()) {}
 
     value_type* allocate(std::size_t count) noexcept {
         void* pointer = nullptr;
-        return api_ && api_->malloc_async(&pointer, count * sizeof(value_type), stream_) == hip_success_k
+        return api_ && api_->malloc_async(&pointer, count * sizeof(value_type), stream()) == hip_success_k
                    ? static_cast<value_type*>(pointer)
                    : nullptr;
     }
     void deallocate(value_type* pointer, std::size_t) noexcept {
-        if (api_) api_->free_async(pointer, stream_);
+        if (api_) api_->free_async(pointer, stream());
     }
     hip_api_t const& api() const noexcept { return *api_; }
-    hip_stream_handle_t stream() const noexcept { return stream_; }
+    hip_stream_handle_t stream() const noexcept {
+        return stream_ ? static_cast<hip_stream_handle_t>(*stream_) : nullptr;
+    }
+
+    /** The owner of the stream it rides, null for the null legacy one. */
+    hip_stream_t const* owner() const noexcept { return stream_; }
     int device() const noexcept { return device_; }
 
     /** The pinned slots of the stream it rides, which a context copies its counters into. */
     hip_pinned_slots_t* pinned_slots() const noexcept { return pinned_slots_; }
 
-    /** The code objects loaded on the stream it rides, which a context launches through. */
-    hip_kernel_tables_t* kernel_tables() const noexcept { return kernel_tables_; }
+    /** The code objects the process loaded, which a context launches through. */
+    kernel_tables<hip_module_t>* kernels() const noexcept { return kernel_tables_; }
 
     /** Whether both free onto one stream of one device. */
     template <typename other_>
@@ -751,10 +996,10 @@ struct hip_device_allocator {
     friend struct hip_device_allocator;
 
     hip_api_t const* api_ = nullptr;
-    hip_stream_handle_t stream_ = nullptr;
+    hip_stream_t const* stream_ = nullptr;
     int device_ = 0;
     hip_pinned_slots_t* pinned_slots_ = nullptr;
-    hip_kernel_tables_t* kernel_tables_ = nullptr;
+    kernel_tables<hip_module_t>* kernel_tables_ = nullptr;
 };
 
 /** The byte specialization device storage is placed through. */
@@ -787,15 +1032,15 @@ struct hip_arena_allocator {
     /** Carves from @p arena on the executor's @p stream, which names the device. */
     template <typename stream_type_>
     hip_arena_allocator(arena_t& arena, stream_type_ const& stream) noexcept
-        : arena_(arena), api_(stream.api), stream_(stream.handle), device_(stream.device),
-          pinned_slots_(stream.pinned_slots.get()), kernel_tables_(stream.kernel_tables.get()) {}
+        : arena_(arena), api_(&stream.handle.api()), stream_(&stream.handle), device_(static_cast<int>(stream.ordinal)),
+          pinned_slots_(stream.memory.pinned_slots.get()), kernel_tables_(stream.kernels) {}
 
     /** The rebinding conversion @c std::allocator_traits performs - the identity rides along, and
      *  the run is shared rather than copied. */
     template <typename other_>
     constexpr hip_arena_allocator(hip_arena_allocator<other_> const& other) noexcept
-        : arena_(other.arena()), api_(other.api_), stream_(other.stream()), device_(other.device()),
-          pinned_slots_(other.pinned_slots()), kernel_tables_(other.kernel_tables()) {}
+        : arena_(other.arena()), api_(other.api_), stream_(other.owner()), device_(other.device()),
+          pinned_slots_(other.pinned_slots()), kernel_tables_(other.kernels()) {}
 
     value_type* allocate(std::size_t count) noexcept {
         // Host-side pointer arithmetic over device bytes: the carve never touches them.
@@ -806,14 +1051,19 @@ struct hip_arena_allocator {
     void deallocate(value_type*, std::size_t) noexcept {}
 
     hip_api_t const& api() const noexcept { return *api_; }
-    hip_stream_handle_t stream() const noexcept { return stream_; }
+    hip_stream_handle_t stream() const noexcept {
+        return stream_ ? static_cast<hip_stream_handle_t>(*stream_) : nullptr;
+    }
+
+    /** The owner of the stream it rides, null for the null legacy one. */
+    hip_stream_t const* owner() const noexcept { return stream_; }
     int device() const noexcept { return device_; }
 
     /** The pinned slots of the stream it rides, which a context copies its counters into. */
     hip_pinned_slots_t* pinned_slots() const noexcept { return pinned_slots_; }
 
-    /** The code objects loaded on the stream it rides, which a context launches through. */
-    hip_kernel_tables_t* kernel_tables() const noexcept { return kernel_tables_; }
+    /** The code objects the process loaded, which a context launches through. */
+    kernel_tables<hip_module_t>* kernels() const noexcept { return kernel_tables_; }
 
     /** The run every rebound copy shares. */
     arena_t& arena() const noexcept { return arena_; }
@@ -828,10 +1078,10 @@ struct hip_arena_allocator {
 
     arena_t& arena_;
     hip_api_t const* api_ = nullptr;
-    hip_stream_handle_t stream_ = nullptr;
+    hip_stream_t const* stream_ = nullptr;
     int device_ = 0;
     hip_pinned_slots_t* pinned_slots_ = nullptr;
-    hip_kernel_tables_t* kernel_tables_ = nullptr;
+    kernel_tables<hip_module_t>* kernel_tables_ = nullptr;
 };
 
 /** The byte specialization a walk carves its scratch through. */
@@ -867,11 +1117,11 @@ struct hip_pinned_allocator {
     /** Takes the identity of the executor's @p stream and the device it names. */
     template <typename stream_type_>
     explicit hip_pinned_allocator(stream_type_ const& stream) noexcept
-        : api_(stream.api), stream_(stream.handle), device_(stream.device),
-          memory_domain_(stream.api->memory_domains[stream.device]) {}
+        : api_(&stream.handle.api()), stream_(&stream.handle), device_(static_cast<int>(stream.ordinal)),
+          memory_domain_(stream.handle.api().memory_domains[stream.ordinal]) {}
     template <typename other_>
     hip_pinned_allocator(hip_pinned_allocator<other_> const& other) noexcept
-        : api_(other.api_), stream_(other.stream()), device_(other.device()), memory_domain_(other.memory_domain_) {}
+        : api_(other.api_), stream_(other.owner()), device_(other.device()), memory_domain_(other.memory_domain_) {}
 
     value_type* allocate(std::size_t count) noexcept {
         if (!api_) return nullptr;
@@ -894,7 +1144,12 @@ struct hip_pinned_allocator {
         forkunion_allocator_t {memory_domain_}.deallocate(reinterpret_cast<byte_t*>(pointer), pinned_bytes_(count));
     }
     hip_api_t const& api() const noexcept { return *api_; }
-    hip_stream_handle_t stream() const noexcept { return stream_; }
+    hip_stream_handle_t stream() const noexcept {
+        return stream_ ? static_cast<hip_stream_handle_t>(*stream_) : nullptr;
+    }
+
+    /** The owner of the stream it rides, null for the null legacy one. */
+    hip_stream_t const* owner() const noexcept { return stream_; }
     int device() const noexcept { return device_; }
 
     /** Whether both unpin beside one device and release to one memory domain. */
@@ -908,7 +1163,7 @@ struct hip_pinned_allocator {
     friend struct hip_pinned_allocator;
 
     hip_api_t const* api_ = nullptr;
-    hip_stream_handle_t stream_ = nullptr;
+    hip_stream_t const* stream_ = nullptr;
     int device_ = 0;
 
     /** Where the pages sit, @c no_memory_domain_k where the runtime allocates them. */
@@ -962,109 +1217,6 @@ struct hip_pinned_slots_t {
     fu::spin_mutex_t guard_;
 };
 
-/** One device's ordering identity: a non-blocking stream an executor opens with itself and drains
- *  and destroys when it dies, or the device's null legacy stream, which owns nothing. */
-struct hip_stream_t {
-
-    /**
-     *  @brief Opens a non-blocking stream on the current device, owned from now on.
-     *
-     *  @par Statuses:
-     *  - @c device_k The runtime refused the stream.
-     */
-    static expected<hip_stream_t> open(hip_api_t const& api) noexcept {
-        hip_stream_t stream;
-        stream.api_ = &api;
-        if (!api || api.stream_create_with_flags(&stream.handle_, hip_stream_non_blocking_k) != hip_success_k)
-            return {std::move(stream), {status_code_t::device_k, "Runtime refused a stream"}};
-        return {std::move(stream), status_code_t::success_k};
-    }
-
-    /** The null legacy stream of the current device, which nobody creates or destroys, for a call
-     *  without an executor. */
-    static hip_stream_t legacy(hip_api_t const& api) noexcept {
-        hip_stream_t stream;
-        stream.api_ = &api;
-        return stream;
-    }
-
-    hip_stream_t() noexcept = default;
-    hip_stream_t(hip_stream_t&& other) noexcept : api_(other.api_), handle_(std::exchange(other.handle_, nullptr)) {}
-    hip_stream_t(hip_stream_t const&) = delete;
-    hip_stream_t& operator=(hip_stream_t const&) = delete;
-    ~hip_stream_t() noexcept {
-        if (handle_) api_->stream_synchronize(handle_), api_->stream_destroy(handle_);
-    }
-
-    operator hip_stream_handle_t() const noexcept { return handle_; }
-
-  private:
-    hip_api_t const* api_ = nullptr;
-    hip_stream_handle_t handle_ = nullptr;
-};
-
-/** Owned event, born on the current device, marking a point on a stream that the host polls or
- *  awaits; it blocks on sync, so a drain sleeps instead of spinning a core. Destruction never
- *  waits. */
-struct hip_event_t {
-
-    /** An empty event, which a refused plan holds and which records nothing. */
-    hip_event_t() noexcept = default;
-
-    explicit hip_event_t(hip_api_t const& api) noexcept : api_(&api) {
-        if (api) api.event_create_with_flags(&handle_, hip_event_blocking_sync_k | hip_event_disable_timing_k);
-    }
-    hip_event_t(hip_event_t&& other) noexcept : api_(other.api_), handle_(std::exchange(other.handle_, nullptr)) {}
-    hip_event_t(hip_event_t const&) = delete;
-    hip_event_t& operator=(hip_event_t const&) = delete;
-    ~hip_event_t() noexcept {
-        if (handle_) api_->event_destroy(handle_);
-    }
-
-    operator hip_event_handle_t() const noexcept { return handle_; }
-
-    /**
-     *  @brief Marks everything queued on @p stream so far, which @ref finished and @ref wait
-     *      then await in order.
-     *
-     *  @par Statuses:
-     *  - @c device_k The event was never created.
-     */
-    status_t record(hip_stream_handle_t stream) noexcept {
-        return handle_ && api_->event_record(handle_, stream) == hip_success_k ? status_code_t::success_k
-                                                                               : status_code_t::device_k;
-    }
-
-    /**
-     *  @brief Polls the recorded work without blocking; nothing recorded has nothing to run.
-     *
-     *  @par Statuses:
-     *  - @c device_k The event was never created.
-     */
-    status_t finished() const noexcept {
-        if (!handle_) return status_code_t::device_k;
-        hip_result_t const queried = api_->event_query(handle_);
-        return queried == hip_success_k           ? status_code_t::success_k
-               : queried == hip_error_not_ready_k ? status_code_t::deferred_k
-                                                  : status_code_t::device_k;
-    }
-
-    /**
-     *  @brief Sleeps until the recorded work finishes and answers whether the device finished it.
-     *
-     *  @par Statuses:
-     *  - @c device_k The event was never created.
-     */
-    status_t wait() noexcept {
-        return handle_ && api_->event_synchronize(handle_) == hip_success_k ? status_code_t::success_k
-                                                                            : status_code_t::device_k;
-    }
-
-  private:
-    hip_api_t const* api_ = nullptr;
-    hip_event_handle_t handle_ = nullptr;
-};
-
 /** Device memory that one call at a time rewinds and refills, on one AMD device: the AMD
  *  alternative of @c gpu_arena_t, where the C layer writes a VRAM call's outputs. It grows, uploads
  *  and frees in the order of the first stream of the executor that made it, so it never waits on
@@ -1075,13 +1227,13 @@ struct hip_device_arena_t {
      *  template only because that @c stream_t is declared after it. */
     template <typename stream_type_>
     explicit hip_device_arena_t(stream_type_& stream) noexcept
-        : memory_(hip_device_allocator_t {stream}), api_(stream.api), stream_(stream.handle), event_(&stream.event),
-          device_(stream.device) {}
+        : memory_(hip_device_allocator_t {stream}), stream_(&stream.handle), event_(&stream.event),
+          device_(static_cast<int>(stream.ordinal)) {}
 
     /** Carves @p count values on the arena's device, or null when it cannot grow. */
     template <typename value_type_>
     value_type_* allocate(std::size_t count) noexcept {
-        if (hip_set_device(*api_, device_) != hip_success_k) return nullptr;
+        if (hip_set_device(stream_->api(), device_) != hip_success_k) return nullptr;
         return reinterpret_cast<value_type_*>(memory_.allocate(count * sizeof(value_type_), default_alignment_k));
     }
 
@@ -1094,8 +1246,9 @@ struct hip_device_arena_t {
     /** Queues a copy of @p bytes of host memory at @p source to @p destination in the arena behind
      *  the call's work; @p source must stay alive until @ref wait. */
     status_t upload(void* destination, void const* source, std::size_t bytes) noexcept {
-        return hip_set_device(*api_, device_) == hip_success_k &&
-                       api_->copy_async(destination, source, bytes, hip_copy_host_to_device_k, stream_) == hip_success_k
+        return hip_set_device(stream_->api(), device_) == hip_success_k &&
+                       stream_->api().copy_async(destination, source, bytes, hip_copy_host_to_device_k, *stream_) ==
+                           hip_success_k
                    ? status_code_t::success_k
                    : status_code_t::device_k;
     }
@@ -1103,8 +1256,8 @@ struct hip_device_arena_t {
     /** Waits once for every upload queued so far - the end of the call holding the arena -
      *  sleeping on the stream's event. */
     status_t wait() noexcept {
-        if (hip_set_device(*api_, device_) != hip_success_k) return status_code_t::device_k;
-        if (status_t const recorded = event_->record(stream_); failed(recorded)) return recorded;
+        if (hip_set_device(stream_->api(), device_) != hip_success_k) return status_code_t::device_k;
+        if (status_t const recorded = event_->record(*stream_); failed(recorded)) return recorded;
         return event_->wait();
     }
 
@@ -1112,8 +1265,7 @@ struct hip_device_arena_t {
 
   private:
     growing_arena<hip_device_allocator_t> memory_;
-    hip_api_t const* api_ = nullptr;
-    hip_stream_handle_t stream_ = nullptr;
+    hip_stream_t const* stream_ = nullptr;
     hip_event_t* event_ = nullptr;
     int device_ = 0;
 };
@@ -1138,52 +1290,6 @@ hip_unique_ptr<typename allocator_::value_type, allocator_> hip_make_unique(allo
     typename allocator_::value_type* pointer = allocator.allocate(count);
     return {pointer, hip_deleter<allocator_> {allocator, count}};
 }
-
-/** One code object loaded onto one GPU and unloaded with this owner; kernels are found by name. */
-struct hip_module_t {
-    hip_module_t() noexcept = default;
-    hip_module_t(hip_module_t&& other) noexcept : api_(other.api_), handle_(std::exchange(other.handle_, nullptr)) {}
-    hip_module_t& operator=(hip_module_t&& other) noexcept {
-        return std::swap(api_, other.api_), std::swap(handle_, other.handle_), *this;
-    }
-    hip_module_t(hip_module_t const&) = delete;
-    hip_module_t& operator=(hip_module_t const&) = delete;
-    ~hip_module_t() noexcept {
-        if (handle_) api_->module_unload(handle_);
-    }
-
-    /**
-     *  @brief Loads @p code_object onto HIP ordinal @p device, binding it first, since a module
-     *      loads into the current device.
-     *
-     *  An offload bundle loads the entry matching the device's architecture.
-     *
-     *  @par Statuses:
-     *  - @c device_k The @p code_object is empty.
-     */
-    static expected<hip_module_t> load(hip_api_t const& api, int device, bytes_view_t code_object) noexcept {
-        hip_module_t module;
-        module.api_ = &api;
-        if (code_object.empty() || hip_set_device(api, device) != hip_success_k ||
-            api.module_load_data(&module.handle_, code_object.data()) != hip_success_k)
-            return {{}, status_code_t::device_k};
-        return {std::move(module), status_code_t::success_k};
-    }
-
-    /** The kernel exported as @p name, or null when the code object has none. */
-    hip_function_handle_t function(char const* name) const noexcept {
-        if (!api_) return nullptr;
-        hip_function_handle_t function = nullptr;
-        return api_->module_get_function(&function, handle_, name) == hip_success_k ? function : nullptr;
-    }
-
-    /** The runtime the code object was loaded through, which launches its kernels. */
-    hip_api_t const& api() const noexcept { return *api_; }
-
-  private:
-    hip_api_t const* api_ = nullptr;
-    hip_module_handle_t handle_ = nullptr;
-};
 
 /** One code object loaded on one device, and every kernel handle the shards there launch through,
  *  laid out as the speller the load was handed indexes them; the code object's address identifies
@@ -1221,31 +1327,74 @@ struct hip_kernel_table_t {
     }
 };
 
-/** The code objects loaded on one device's stream, one table each, owned here and kept until the
- *  stream dies, so a verb or a plan may hold a table for its life. */
-struct hip_kernel_tables_t {
+/** Every code object the process loaded on every AMD device, one table each, loaded at the first
+ *  ask and kept for the life of the runtime holding it, so executors on one device share every
+ *  table and a verb or a plan may hold one for its life. */
+template <>
+struct kernel_tables<hip_module_t> {
+
+    /** Tables one device keeps at most, every code object a build embeds having room. */
+    inline static constexpr std::size_t device_capacity_k = 64;
 
     /**
      *  @brief The table of @p fatbin on @p device, loaded through @p speller at the first ask.
      *
+     *  A listed table is found without a lock, as launches ask; a load takes the lock, so threads
+     *  asking for the same table meanwhile sleep until it ends.
+     *
      *  @par Statuses:
-     *  - @c out_of_memory_k The table could not be allocated.
-     *  - @c device_k The code object would not load, or lacks a required kernel.
+     *  - @c out_of_memory_k The table could not be allocated, or the device's list is full.
+     *  - @c device_k The code object would not load or lacks a required kernel, or the device
+     *    lies past what a listing holds.
      */
     template <typename speller_type_>
     expected<hip_kernel_table_t const*> table_of(hip_api_t const& api, int device, bytes_view_t fatbin,
                                                  speller_type_ const& speller) noexcept {
-        for (std::unique_ptr<hip_kernel_table_t> const& table : tables_)
-            if (table->fatbin.data() == fatbin.data()) return {table.get(), status_code_t::success_k};
-        std::unique_ptr<hip_kernel_table_t> table {new (std::nothrow) hip_kernel_table_t};
-        if (!table) return {nullptr, status_code_t::out_of_memory_k};
-        if (status_t const loaded = table->load(api, device, fatbin, speller); failed(loaded)) return {nullptr, loaded};
-        if (failed(tables_.push_back(std::move(table)))) return {nullptr, status_code_t::out_of_memory_k};
-        return {tables_.back().get(), status_code_t::success_k};
+        if (device < 0 || static_cast<std::size_t>(device) >= gpu_devices_capacity_k)
+            return {nullptr, status_code_t::device_k};
+        if (hip_kernel_table_t const* const listed = find_(device, fatbin)) return {listed, status_code_t::success_k};
+        guard_.lock();
+        auto [table, status] = load_(api, device, fatbin, speller);
+        guard_.unlock();
+        return {table, status};
     }
 
   private:
-    growing_buffer<std::unique_ptr<hip_kernel_table_t>> tables_ {global_allocator};
+    /** The listed table of @p fatbin on @p device, or null; the count is read with acquire, so
+     *  every table it covers is whole. */
+    hip_kernel_table_t const* find_(int device, bytes_view_t fatbin) noexcept {
+        std::size_t& listed = counts_[device];
+        std::size_t const count = fu::standard_atomic_ref<std::size_t>(listed).load(std::memory_order_acquire);
+        for (std::size_t position = 0; position != count; ++position)
+            if (tables_[device][position]->fatbin.data() == fatbin.data()) return tables_[device][position].get();
+        return nullptr;
+    }
+
+    /** The table of @p fatbin on @p device, loaded through @p speller unless listed meanwhile,
+     *  with @c guard_ held; a new one is published by a release of the count. */
+    template <typename speller_type_>
+    expected<hip_kernel_table_t const*> load_(hip_api_t const& api, int device, bytes_view_t fatbin,
+                                              speller_type_ const& speller) noexcept {
+        if (hip_kernel_table_t const* const listed = find_(device, fatbin)) return {listed, status_code_t::success_k};
+        std::size_t const count = counts_[device];
+        if (count == device_capacity_k) return {nullptr, status_code_t::out_of_memory_k};
+        std::unique_ptr<hip_kernel_table_t> table {new (std::nothrow) hip_kernel_table_t};
+        if (!table) return {nullptr, status_code_t::out_of_memory_k};
+        if (status_t const loaded = table->load(api, device, fatbin, speller); failed(loaded)) return {nullptr, loaded};
+        tables_[device][count] = std::move(table);
+        fu::standard_atomic_ref<std::size_t>(counts_[device]).store(count + 1, std::memory_order_release);
+        return {tables_[device][count].get(), status_code_t::success_k};
+    }
+
+    /** Every device's tables, by its vendor ordinal, in load order. */
+    std::unique_ptr<hip_kernel_table_t> tables_[gpu_devices_capacity_k][device_capacity_k];
+
+    /** How many of each device's tables are whole, grown under @c guard_ and read through the
+     *  atomic reference without it. */
+    std::size_t counts_[gpu_devices_capacity_k] = {};
+
+    /** Held across a load, so each table loads once. */
+    fu::fair_mutex_t guard_;
 };
 
 /**
@@ -1355,7 +1504,7 @@ struct hip_traversal_context {
      */
     template <typename speller_type_>
     expected<kernel_table_t const*> table_of(bytes_view_t fatbin, speller_type_ const& speller) const noexcept {
-        hip_kernel_tables_t* const tables = allocator_.kernel_tables();
+        kernel_tables<hip_module_t>* const tables = allocator_.kernels();
         if (!tables) return {nullptr, status_code_t::uninitialized_k};
         return tables->table_of(api(), device(), fatbin, speller);
     }
@@ -1539,12 +1688,19 @@ struct hip_traversal_context {
     }
 };
 
-/** The streams a bulk verb advances on and the scratch they walk with - one of each per device,
- *  which every shard there shares in order. Work is queued, never waited on, so one host thread
- *  drives every device. */
-struct hip_executor_t {
-    using device_arena_t = hip_device_arena_t;
-    inline static constexpr gpu_vendor_t vendor_k = gpu_vendor_t::amd_k;
+/** The kernels a stream launches: the process's tables, which the GPU runtime owns. */
+using hip_kernels_t = kernel_tables<hip_module_t>*;
+
+/**
+ *  @brief USearch's queue-ordered memory on one AMD stream: the pinned slots its contexts copy
+ *      counters into, the run every call's scratch carves from, the contexts kept over that run,
+ *      and the process's kernel tables they launch through.
+ *
+ *  Opened in place once its stream record sits in the executor, as its allocators point at that
+ *  record's stream owner, which never moves; released with the device bound after the stream
+ *  drained, the contexts first, then the run, then the pinned slots.
+ */
+struct hip_scratch_t {
 
     /** One device's run of scratch, carved and rewound between calls; it only grows, by
      *  @ref reserve, since relocation would be a host loop over device bytes. */
@@ -1553,265 +1709,416 @@ struct hip_executor_t {
     /** A walk's context on one stream, carving a call's scratch from that stream's run. */
     using traversal_context_t = hip_traversal_context<hip_arena_allocator_t>;
 
-    /** One call's hold on the executor, released when it dies. */
-    using claim_t = std::unique_lock<fu::spin_mutex_t>;
+    /** The pinned slots every traversal context on this stream copies its counters into, held
+     *  apart so its allocators keep their address. */
+    std::unique_ptr<hip_pinned_slots_t> pinned_slots;
 
-    /** One shard's stream, run and contexts; the executor drains the stream before any of them
-     *  dies, and the pinned slots and kernel tables are declared first, so they go only after the
-     *  arena and the contexts freed onto the stream, the contexts first. */
+    /** The ceiling on the run's bytes, zero for none. */
+    std::size_t limit = 0;
+
+    /** The scratch a call carves from, rewound and only grown by @ref reserve. */
+    arena_t arena {hip_device_allocator_t {}};
+
+    /** The contexts @ref reserve keeps over @c arena, one per shard this stream serves, alive
+     *  across calls with their buffers, events and pinned slots. */
+    growing_buffer<traversal_context_t> contexts {global_allocator};
+
+    /**
+     *  @brief Binds the scratch to @p stream, whose device is current, pointing its kernels
+     *      at the @c hip_kernels of @p runtime.
+     *
+     *  @par Statuses:
+     *  - @c out_of_memory_k The pinned slots could not be allocated.
+     */
+    template <typename stream_type_, typename runtime_type_>
+    status_t open(stream_type_& stream, runtime_type_& runtime, std::size_t& scratch_limit) noexcept {
+        limit = scratch_limit;
+        stream.kernels = &runtime.hip_kernels;
+        pinned_slots.reset(new (std::nothrow)
+                               hip_pinned_slots_t {stream.handle.api(), static_cast<int>(stream.ordinal)});
+        if (!pinned_slots) return status_code_t::out_of_memory_k;
+        arena = arena_t {hip_device_allocator_t {stream}};
+        return status_code_t::success_k;
+    }
+
+    /**
+     *  @brief Rewinds the run for the carves to come, growing it to @p bytes where it holds less,
+     *      and keeps @p contexts_count contexts over it, opening only the missing ones.
+     *
+     *  A warm call asks no more and allocates nothing. A wider run frees the old one in stream
+     *  order behind whatever still rides it. The device of @p stream is current.
+     *
+     *  @par Statuses:
+     *  - @c out_of_memory_k The run or a context could not grow.
+     */
+    template <typename stream_type_>
+    status_t reserve(stream_type_ const& stream, std::size_t bytes, std::size_t contexts_count = 0) noexcept {
+        arena.clear();
+        // A rewound run holds one chunk, its widest, which a wider call replaces whole.
+        if (arena.capacity() < bytes) {
+            arena.reset();
+            if (failed(arena.reserve_exactly(bytes))) return status_code_t::out_of_memory_k;
+        }
+        if (contexts.size() >= contexts_count) return status_code_t::success_k;
+        if (failed(contexts.reserve_exactly(contexts_count))) return status_code_t::out_of_memory_k;
+        while (contexts.size() != contexts_count) {
+            contexts.push_back_reserved(traversal_context_t {hip_arena_allocator_t {arena, stream}});
+            if (!contexts.back()) return status_code_t::out_of_memory_k;
+        }
+        return status_code_t::success_k;
+    }
+
+    /** Frees the contexts and the run in the order of the drained @p stream, whose device is
+     *  current. The null legacy stream, whose record dies undrained, drains here first when it
+     *  holds contexts or a run, so no copy still reads them once its call's executor dies; an empty
+     *  scratch queued nothing and skips the wait, which would stall every blocking stream. */
+    template <typename stream_type_>
+    void release(stream_type_& stream) noexcept {
+        if (!stream.handle && (contexts.size() || arena.capacity())) {
+            [[maybe_unused]] status_t const drained = stream.wait();
+        }
+        contexts.reset();
+        arena.reset();
+    }
+};
+
+#pragma region Shared VRAM Executor
+
+/**
+ *  @brief The streams a call queues on, one per entry of the devices it was spawned over, in the
+ *      caller's order, each with the event its waits sleep on, its kernels and the engine's memory.
+ *
+ *  Work is queued, never waited on, so one host thread drives every device. Each stream record is
+ *  built in place on the heap and never moves, so the memory may point at its stream owner; it
+ *  dies draining its stream, then releasing its memory with its device bound, then closing its
+ *  event and its stream.
+ */
+struct hip_executor_t {
+
+    /** The engine's queue-ordered memory on one stream. */
+    using scratch_t = hip_scratch_t;
+
+    /** One call's hold on the executor: the word it set, which it clears when it dies. Move-only,
+     *  so exactly one owner releases the hold. */
+    class claim_t {
+      public:
+        claim_t() noexcept = default;
+        explicit claim_t(u32_t& held_word) noexcept : held_word_(&held_word) {}
+        claim_t(claim_t&& other) noexcept : held_word_(std::exchange(other.held_word_, nullptr)) {}
+        claim_t& operator=(claim_t&& other) noexcept {
+            std::swap(held_word_, other.held_word_);
+            return *this;
+        }
+        claim_t(claim_t const&) = delete;
+        claim_t& operator=(claim_t const&) = delete;
+        ~claim_t() noexcept {
+            if (held_word_) fu::standard_atomic_ref<u32_t>(*held_word_).store(0, std::memory_order_release);
+        }
+
+      private:
+        u32_t* held_word_ = nullptr;
+    };
+
+    inline static constexpr gpu_vendor_t vendor_k = gpu_vendor_t::amd_k;
+
+    /** One device's stream: what it queues on, the event its waits sleep on, the kernels it
+     *  launches, and the engine's memory, declared last so it dies first. */
     struct stream_t {
 
-        /** The runtime every transfer, launch and allocation on this stream goes through. */
-        hip_api_t const* api = nullptr;
+        /** The HIP ordinal of the device this stream queues on, as the GPU runtime lists it. */
+        std::size_t ordinal = 0;
 
-        /** The HIP ordinal this stream was opened on - placement and launch target both. */
-        int device = 0;
-
-        /** The pinned slots every traversal context on this stream copies its counters into, held
-         *  apart so its allocators keep their address as the stream moves. */
-        std::unique_ptr<hip_pinned_slots_t> pinned_slots;
-
-        /** The code objects loaded on this device, one table each, held apart so the contexts
-         *  keep their address as the stream moves. */
-        std::unique_ptr<hip_kernel_tables_t> kernel_tables;
-
-        /** The ordering identity every transfer and launch on this device rides: the stream the
-         *  executor opened, or the device's null legacy stream for a call without an executor. */
+        /** Opened by the executor, adopted from the caller, or the device's null legacy stream. */
         hip_stream_t handle;
 
-        /** The point @ref wait and the C layer's arena record and sleep on, so a wait frees its
-         *  core. */
+        /** What @ref wait records and sleeps on, so a wait frees its core. */
         hip_event_t event;
 
-        /** The scratch a call carves from, rewound and only grown by @ref reserve. */
-        arena_t arena;
+        /** The kernels this stream launches, as the engine resolves them when the record opens. */
+        hip_kernels_t kernels = {};
 
-        /** The contexts @ref reserve keeps over @c arena, one per shard this stream serves, alive
-         *  across calls with their buffers, events and pinned slots. */
-        growing_buffer<traversal_context_t> contexts {global_allocator};
+        /** The engine's memory, safe to reuse only in this stream's queue order, opened once this
+         *  record sits in the executor. */
+        scratch_t memory;
 
-        /** Takes @p handle, a stream of @p device, and binds the arena to it; the event is born
-         *  there too, so @p device must be current. */
-        stream_t(hip_api_t const& api, int device, hip_stream_t&& handle) noexcept
-            : api(&api), device(device), pinned_slots(new (std::nothrow) hip_pinned_slots_t {api, device}),
-              kernel_tables(new (std::nothrow) hip_kernel_tables_t), handle(std::move(handle)), event(api),
-              arena(hip_device_allocator_t {*this}) {}
+        /** Takes @p opened as the stream of device @p device, which is current, as the event is
+         *  born there too. */
+        stream_t(std::size_t device, hip_stream_t&& opened) noexcept
+            : ordinal(device), handle(std::move(opened)), event(handle.api()) {}
+        stream_t(stream_t const&) = delete;
+        stream_t& operator=(stream_t const&) = delete;
+
+        /** Drains an owned stream, then releases the memory in its order with the device bound;
+         *  the event and the stream close after. A record owning none, a placeholder or the
+         *  device's legacy stream, has nothing of its own to drain. */
+        ~stream_t() noexcept {
+            [[maybe_unused]] status_t const ready = handle ? wait() : bind();
+            memory.release(*this);
+        }
 
         /**
-         *  @brief The table of @p fatbin on this device, loaded by @p speller at the first ask.
+         *  @brief Makes this stream's device current on the calling thread.
          *
          *  @par Statuses:
-         *  - @c out_of_memory_k The table could not be allocated.
-         *  - @c device_k The code object would not load, or lacks a required kernel.
+         *  - @c device_k The device could not be made current.
          */
-        template <typename speller_type_>
-        expected<hip_kernel_table_t const*> table_of(bytes_view_t fatbin, speller_type_ const& speller) const noexcept {
-            return kernel_tables->table_of(*api, device, fatbin, speller);
+        status_t bind() const noexcept {
+            if (hip_set_device(handle.api(), static_cast<int>(ordinal)) != hip_success_k)
+                return {status_code_t::device_k, "Device selection failed"};
+            return {};
+        }
+
+        /**
+         *  @brief Waits for everything queued on this stream so far, recording the event with the
+         *      device bound and sleeping on it.
+         *
+         *  @par Statuses:
+         *  - @c device_k The device could not be bound, or it failed the work.
+         */
+        status_t wait() noexcept {
+            if (status_t const bound = bind(); bound.failed()) return bound;
+            if (status_t const recorded = event.record(handle); recorded.failed()) return recorded;
+            return event.wait();
+        }
+
+        /**
+         *  @brief Queues an allocation of @p bytes in this stream's order, its device current,
+         *      answering its address.
+         *
+         *  @par Statuses:
+         *  - @c out_of_memory_k The device refused the allocation.
+         */
+        expected<std::uintptr_t> allocate_async(std::size_t bytes) noexcept {
+            void* address = nullptr;
+            if (handle.api().malloc_async(&address, bytes, handle) != hip_success_k)
+                return {0, {status_code_t::out_of_memory_k, "The device refused an allocation"}};
+            return {reinterpret_cast<std::uintptr_t>(address), status_code_t::success_k};
+        }
+
+        /** Queues freeing @p address, which @ref allocate_async answered, in this stream's
+         *  order. */
+        void free_async(std::uintptr_t address) noexcept {
+            handle.api().free_async(reinterpret_cast<void*>(address), handle);
+        }
+
+        /**
+         *  @brief Queues a copy of @p bytes from @p source to @p target, either side the host's
+         *      or a device's, as unified addressing tells apart; the device is current.
+         *
+         *  @par Statuses:
+         *  - @c device_k The runtime refused the copy.
+         */
+        status_t copy_async(std::uintptr_t target, std::uintptr_t source, std::size_t bytes) noexcept {
+            if (handle.api().copy_async(reinterpret_cast<void*>(target), reinterpret_cast<void const*>(source), bytes,
+                                        hip_copy_default_k, handle) != hip_success_k)
+                return {status_code_t::device_k, "The runtime refused a copy"};
+            return {};
+        }
+
+        /** Queues a copy of @p source into device memory at @p target, as @ref copy_async does. */
+        status_t upload_async(std::uintptr_t target, bytes_view_t source) noexcept {
+            return copy_async(target, reinterpret_cast<std::uintptr_t>(source.data()), source.size());
+        }
+
+        /** Queues a copy of device memory at @p source into @p target, as @ref copy_async does. */
+        status_t download_async(bytes_span_t target, std::uintptr_t source) noexcept {
+            return copy_async(reinterpret_cast<std::uintptr_t>(target.data()), source, target.size());
+        }
+
+        /**
+         *  @brief Queues setting @p bytes at @p target to @p value; the device is current.
+         *
+         *  @par Statuses:
+         *  - @c device_k The runtime refused the fill.
+         */
+        status_t fill_async(std::uintptr_t target, byte_t value, std::size_t bytes) noexcept {
+            if (handle.api().fill_async(reinterpret_cast<void*>(target), static_cast<int>(value), bytes, handle) !=
+                hip_success_k)
+                return {status_code_t::device_k, "The runtime refused a fill"};
+            return {};
         }
     };
 
-    hip_executor_t() = default;
+    hip_executor_t() noexcept = default;
     hip_executor_t(hip_executor_t&& other) noexcept { swap(other); }
     hip_executor_t& operator=(hip_executor_t&& other) noexcept { return swap(other), *this; }
     hip_executor_t(hip_executor_t const&) = delete;
     hip_executor_t& operator=(hip_executor_t const&) = delete;
 
-    /** Drains every stream, then frees each one's contexts and run with its device current, so the
-     *  runs, contexts and pinned slots die after the work on them, and its streams close last. */
-    ~hip_executor_t() noexcept {
-        [[maybe_unused]] status_t const drained = wait();
-        for (stream_t& opened : streams_)
-            if (hip_set_device(*opened.api, opened.device) == hip_success_k)
-                opened.contexts.reset(), opened.arena.reset();
-    }
-
-    /** Exchanges the stream tables; @c held_ stays, as a move with a call in flight is misuse. */
+    /** Exchanges the stream records and the ceiling, none of which moves in memory; the hold
+     *  stays, since a move with a call in flight is misuse. */
     void swap(hip_executor_t& other) noexcept {
         std::swap(streams_, other.streams_);
-        std::swap(scratch_limit_, other.scratch_limit_);
-        std::swap(cache_bytes_per_core_, other.cache_bytes_per_core_);
+        std::swap(streams_count_, other.streams_count_);
     }
 
     /**
-     *  @brief Claims the executor for one call.
+     *  @brief Claims the executor for one call, answering the hold, which releases it when it dies.
      *
      *  @par Statuses:
      *  - @c contended_k Another call holds the executor.
      */
     expected<claim_t> claim() noexcept {
-        if (!held_.lock_if_free()) return {{}, {status_code_t::contended_k, "Another call holds the executor"}};
-        return {claim_t {held_, std::adopt_lock}, status_code_t::success_k};
+        u32_t idle = 0;
+        if (!fu::standard_atomic_ref<u32_t>(held_).compare_exchange_strong(idle, 1, std::memory_order_acquire,
+                                                                           std::memory_order_relaxed))
+            return {{}, {status_code_t::contended_k, "Another call holds the executor"}};
+        return {claim_t {held_}, status_code_t::success_k};
     }
 
     /**
-     *  @brief Takes over @p streams, each one's handle owned here from now on.
+     *  @brief Spawns one non-blocking stream per entry of @p devices through @p api, or adopts
+     *      @p streams, one per entry and on it.
+     *
+     *  Each stream's memory and kernels open with @p memory_arguments. An adopted stream becomes
+     *  the executor's, which synchronizes and destroys it when it dies. Adoption comes after every
+     *  step that can fail, so a refused spawn leaves every one of @p streams the caller's.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k The @p streams are empty.
+     *  - @c invalid_argument_k No device is named, more than a listing holds, the @p streams count
+     *    differs from theirs, or a stream is null or a default one.
+     *  - @c config_mismatch_k A stream sits on another device.
+     *  - @c device_k There is no driver, or a device refused its stream or its event.
+     *  - @c out_of_memory_k A stream record or its memory could not be allocated.
      */
-    static expected<hip_executor_t> acquire(growing_buffer<stream_t>&& streams) noexcept {
-        if (streams.empty()) return {{}, status_code_t::config_mismatch_k};
-        hip_executor_t executor;
-        // Queried once here; every round reads it from the executor afterwards.
-        for (stream_t const& opened : streams) {
-            auto const [specs, status] = hip_device_specs_t::query(*opened.api, opened.device);
-            if (failed(status)) return {{}, status};
-            std::size_t const bytes = specs.cache_bytes_per_core();
-            executor.cache_bytes_per_core_ = executor.cache_bytes_per_core_
-                                                 ? min_of(executor.cache_bytes_per_core_, bytes)
-                                                 : bytes;
-        }
-        executor.streams_ = std::move(streams);
+    template <typename... memory_arguments_>
+    static expected<hip_executor_t> spawn(hip_api_t const& api, std::span<int const> devices,
+                                          std::span<void* const> streams,
+                                          memory_arguments_&... memory_arguments) noexcept {
+        if (!streams.empty() && streams.size() != devices.size())
+            return {{}, {status_code_t::invalid_argument_k, "One stream per device"}};
+        for (std::size_t index = 0; index != streams.size(); ++index)
+            if (status_t const checked = hip_stream_t::adoptable(api, static_cast<std::size_t>(devices[index]),
+                                                                 streams[index]);
+                checked.failed())
+                return {{}, checked};
+        // Adopted streams wait on placeholders owning nothing until every fallible step is behind.
+        auto const placeholder = [](hip_api_t const& table) noexcept -> expected<hip_stream_t> {
+            return {hip_stream_t {table, nullptr}, status_code_t::success_k};
+        };
+        auto [executor, build_status] = build(api, devices, streams.empty() ? &hip_stream_t::open : +placeholder,
+                                              memory_arguments...);
+        if (build_status.failed()) return {{}, build_status};
+        // Every fallible step is behind; each record takes its adopted stream into the same owner,
+        // which its memory already points at.
+        for (std::size_t index = 0; index != streams.size(); ++index)
+            executor.streams_[index]->handle = hip_stream_t {api, static_cast<hip_stream_handle_t>(streams[index])};
         return {std::move(executor), status_code_t::success_k};
     }
 
-    /** Bytes of local data share a block keeps to itself on the smallest of this executor's
-     *  devices, the twin of @c ram_executor_t::cache_bytes_per_core. */
-    std::size_t cache_bytes_per_core() const noexcept { return cache_bytes_per_core_; }
-
-    /**
-     *  @brief Opens one non-blocking stream per entry of @p devices, binding each first, since a
-     *      stream is born on the current device; their runs never grow past @p scratch_limit bytes,
-     *      zero for none.
-     *
-     *  @par Statuses:
-     *  - @c config_mismatch_k The @p devices are empty.
-     *  - @c device_k A device or the runtime refused its stream.
-     */
-    static expected<hip_executor_t> spawn(hip_api_t const& api, std::span<int const> devices,
-                                          std::size_t scratch_limit = 0) noexcept {
-        growing_buffer<stream_t> bound {global_allocator};
-        if (failed(bound.reserve_exactly(devices.size()))) return {{}, status_code_t::out_of_memory_k};
-        for (int const device : devices) {
-            if (hip_set_device(api, device) != hip_success_k)
-                return {{}, {status_code_t::device_k, "Device selection failed"}};
-            auto [opened, opened_status] = hip_stream_t::open(api);
-            if (failed(opened_status)) return {{}, opened_status};
-            if (status_t const appended = bind_stream_(api, device, std::move(opened), bound); failed(appended))
-                return {{}, appended};
-        }
-        auto [executor, status] = acquire(std::move(bound));
-        executor.scratch_limit_ = scratch_limit;
-        return {std::move(executor), status};
-    }
-
-    /**
-     *  @brief Orders a call without an executor on the null legacy stream of every entry of
-     *      @p devices, opening no stream, so the call is final once its work drains.
-     *
-     *  @par Statuses:
-     *  - @c config_mismatch_k The @p devices are empty.
-     *  - @c device_k A device could not be bound.
-     */
-    static expected<hip_executor_t> on_default_streams(hip_api_t const& api, std::span<int const> devices) noexcept {
-        growing_buffer<stream_t> bound {global_allocator};
-        if (failed(bound.reserve_exactly(devices.size()))) return {{}, status_code_t::out_of_memory_k};
-        for (int const device : devices) {
-            if (hip_set_device(api, device) != hip_success_k)
-                return {{}, {status_code_t::device_k, "Device selection failed"}};
-            if (status_t const appended = bind_stream_(api, device, hip_stream_t::legacy(api), bound); failed(appended))
-                return {{}, appended};
-        }
-        return acquire(std::move(bound));
-    }
-
-    /**
-     *  @brief Rewinds every stream's run for the carves to come, growing it to
-     *      @p bytes_per_stream where it holds less, and keeps @p contexts_per_stream contexts on
-     *      each, opening only the missing ones; a warm call asks no more and allocates nothing.
-     *      A wider run frees the old one in stream order behind whatever still rides it.
-     *
-     *  @par Statuses:
-     *  - @c uninitialized_k The executor has no streams.
-     *  - @c out_of_memory_k The @p bytes_per_stream pass the scratch ceiling, or a run or a context
-     *    could not grow.
-     */
-    status_t reserve(std::size_t bytes_per_stream, std::size_t contexts_per_stream = 0) noexcept {
-        if (streams_.empty()) return status_code_t::uninitialized_k;
-        if (scratch_limit_ && bytes_per_stream > scratch_limit_) return status_code_t::out_of_memory_k;
-        for (stream_t& opened : streams_) {
-            // The null legacy stream is the current device's, so that device is set first.
-            if (hip_set_device(*opened.api, opened.device) != hip_success_k)
-                return {status_code_t::device_k, "Device selection failed"};
-            opened.arena.clear();
-            // A rewound run holds one chunk, its widest, which a wider call replaces whole.
-            if (opened.arena.capacity() < bytes_per_stream) {
-                opened.arena.reset();
-                if (failed(opened.arena.reserve_exactly(bytes_per_stream))) return status_code_t::out_of_memory_k;
-            }
-            if (opened.contexts.size() >= contexts_per_stream) continue;
-            if (failed(opened.contexts.reserve_exactly(contexts_per_stream))) return status_code_t::out_of_memory_k;
-            while (opened.contexts.size() != contexts_per_stream) {
-                opened.contexts.push_back_reserved(traversal_context_t {hip_arena_allocator_t {opened.arena, opened}});
-                if (!opened.contexts.back()) return status_code_t::out_of_memory_k;
-            }
-        }
-        return status_code_t::success_k;
-    }
-
-    /** The contexts @ref reserve keeps on stream @p index, the ones its shards use in the order
-     *  they are paired with it. */
-    std::span<traversal_context_t> traversals(std::size_t index) noexcept {
-        return to_writable_span(streams_[index].contexts);
-    }
-
-    /** Waits for every transfer and launch queued on every stream - the fleet's completion -
-     *  marking each stream with its device bound, then sleeping on each mark in turn. */
+    /** Waits for everything queued on every stream - the fleet's completion - marking each stream
+     *  with its device bound, then sleeping on each mark in turn. */
     status_t wait() noexcept {
-        for (stream_t& opened : streams_)
-            if (hip_set_device(*opened.api, opened.device) != hip_success_k ||
-                failed(opened.event.record(opened.handle)))
-                return status_code_t::device_k;
-        for (stream_t& opened : streams_)
-            if (status_t const drained = opened.event.wait(); failed(drained)) return drained;
-        return status_code_t::success_k;
+        for (std::size_t index = 0; index != streams_count_; ++index) {
+            stream_t& opened = *streams_[index];
+            if (status_t const bound = opened.bind(); bound.failed()) return bound;
+            if (status_t const recorded = opened.event.record(opened.handle); recorded.failed()) return recorded;
+        }
+        for (std::size_t index = 0; index != streams_count_; ++index)
+            if (status_t const drained = streams_[index]->event.wait(); drained.failed()) return drained;
+        return {};
     }
 
     /** The stream at @p index, in the order the devices were named. */
-    stream_t& stream(std::size_t index) noexcept { return streams_[index]; }
-
-    /** The HIP ordinal stream @p index drives - what a caller pairs its shards against. */
-    int device(std::size_t index) const noexcept { return streams_[index].device; }
-
-    /** The first stream on @p device, or null when the executor drives none there. */
-    stream_t* stream_on(int device) noexcept {
-        for (stream_t& opened : streams_)
-            if (opened.device == device) return &opened;
-        return nullptr;
-    }
+    stream_t& stream(std::size_t index) noexcept { return *streams_[index]; }
+    stream_t const& stream(std::size_t index) const noexcept { return *streams_[index]; }
 
     /** Streams this executor drives, one per device. */
-    std::size_t size() const noexcept { return streams_.size(); }
+    std::size_t size() const noexcept { return streams_count_; }
 
-    /** The runtime every stream of this executor goes through. */
-    hip_api_t const& api() const noexcept { return *streams_[0].api; }
-
-  private:
-
-    /** Appends @p handle to @p bound as the stream of @p device, which is current. */
-    static status_t bind_stream_(hip_api_t const& api, int device, hip_stream_t&& handle,
-                                 growing_buffer<stream_t>& bound) noexcept {
-        stream_t stream {api, device, std::move(handle)};
-        if (!stream.pinned_slots || !stream.kernel_tables) return status_code_t::out_of_memory_k;
-        if (!stream.event) return {status_code_t::device_k, "Runtime refused a stream event"};
-        bound.push_back_reserved(std::move(stream));
-        return status_code_t::success_k;
+    /** Builds one stream record per entry of @p devices over the stream @p open answers there,
+     *  with that device current, and opens its memory and kernels in place. */
+    template <typename... memory_arguments_>
+    static expected<hip_executor_t> build(hip_api_t const& api, std::span<int const> devices,
+                                          expected<hip_stream_t> (*open)(hip_api_t const&),
+                                          memory_arguments_&... memory_arguments) noexcept {
+        if (devices.empty() || devices.size() > gpu_devices_capacity_k)
+            return {{}, {status_code_t::invalid_argument_k, "An executor names one to a listing's devices"}};
+        hip_executor_t executor;
+        for (int const device : devices) {
+            if (hip_set_device(api, device) != hip_success_k)
+                return {{}, {status_code_t::device_k, "Device selection failed"}};
+            auto [opened, open_status] = open(api);
+            if (open_status.failed()) return {{}, open_status};
+            std::unique_ptr<stream_t>& record = executor.streams_[executor.streams_count_];
+            record.reset(new (std::nothrow) stream_t {static_cast<std::size_t>(device), std::move(opened)});
+            if (!record) return {{}, {status_code_t::out_of_memory_k, "No room for a stream record"}};
+            ++executor.streams_count_;
+            if (!record->event) return {{}, {status_code_t::device_k, "Runtime refused a stream event"}};
+            if (status_t const opened_memory = record->memory.open(*record, memory_arguments...);
+                opened_memory.failed())
+                return {{}, opened_memory};
+        }
+        return {std::move(executor), status_code_t::success_k};
     }
 
-    /** The runtime the streams were opened through. */
-    /** One stream per named entry, in the caller's order. */
-    growing_buffer<stream_t> streams_ {global_allocator};
+  private:
+    /** One record per named entry, in the caller's order, each on the heap so it never moves. */
+    std::unique_ptr<stream_t> streams_[gpu_devices_capacity_k];
+    std::size_t streams_count_ = 0;
 
-    /** Held by the one caller driving the streams; never swapped. */
-    fu::spin_mutex_t held_;
-
-    /** The ceiling on each stream's run, which every call's scratch and outputs carve from; zero
-     *  lets it grow as geometry asks. */
-    std::size_t scratch_limit_ = 0;
-
-    /** What @ref cache_bytes_per_core answers, set once by @ref acquire. */
-    std::size_t cache_bytes_per_core_ = 0;
+    /** One while a caller drives the streams, set and cleared through the class's atomic
+     *  reference; never swapped. */
+    u32_t held_ = 0;
 };
+
+#pragma endregion Shared VRAM Executor
+
+/** The null legacy stream of the current device, which nobody creates or destroys,
+ *  for a call without an executor. */
+inline expected<hip_stream_t> hip_default_stream(hip_api_t const& api) noexcept {
+    return {hip_stream_t {api, nullptr}, status_code_t::success_k};
+}
+
+/**
+ *  @brief Spawns an executor ordering a call without one on the null legacy stream of every
+ *      entry of @p devices, opening no stream, so the call is final once its work drains.
+ *
+ *  Each stream's memory opens with @p memory_arguments.
+ *
+ *  @par Statuses:
+ *  - @c invalid_argument_k No device is named, or more than a listing holds.
+ *  - @c device_k A device could not be bound.
+ *  - @c out_of_memory_k A stream record or its memory could not be allocated.
+ */
+template <typename... memory_arguments_>
+expected<hip_executor_t> on_default_streams(hip_api_t const& api, std::span<int const> devices,
+                                            memory_arguments_&... memory_arguments) noexcept {
+    return hip_executor_t::build(api, devices, &hip_default_stream, memory_arguments...);
+}
+
+/**
+ *  @brief Rewinds the memory of @p stream for the carves to come, growing its run to @p bytes,
+ *      with its device bound, and keeps @p contexts_count contexts over it.
+ *
+ *  Only missing contexts open, so a warm call asks no more and allocates nothing.
+ *
+ *  @par Statuses:
+ *  - @c out_of_memory_k The @p bytes pass the stream's ceiling, or a run or a context could not
+ *    grow.
+ *  - @c device_k The device could not be bound.
+ */
+inline status_t reserve_scratch(hip_executor_t::stream_t& stream, std::size_t bytes,
+                                std::size_t contexts_count = 0) noexcept {
+    if (stream.memory.limit && bytes > stream.memory.limit) return status_code_t::out_of_memory_k;
+    if (status_t const bound = stream.bind(); failed(bound)) return bound;
+    return stream.memory.reserve(stream, bytes, contexts_count);
+}
+
+/** Bytes of shared memory a block keeps to itself on the smallest of @p executor 's devices, the
+ *  twin of @c ram_executor_t::cache_bytes_per_core, asked of the runtime at each call; zero where a
+ *  device refuses the query. */
+inline std::size_t cache_bytes_per_core(hip_executor_t const& executor) noexcept {
+    std::size_t smallest = 0;
+    for (std::size_t index = 0; index != executor.size(); ++index) {
+        hip_executor_t::stream_t const& stream = executor.stream(index);
+        auto const [specs, status] = hip_device_specs_t::query(stream.handle.api(), static_cast<int>(stream.ordinal));
+        if (failed(status)) return 0;
+        std::size_t const bytes = specs.cache_bytes_per_core();
+        smallest = smallest ? min_of(smallest, bytes) : bytes;
+    }
+    return smallest;
+}
 
 /** The AMD types and HIP calls a vendor-neutral VRAM index declares itself with and queues
  *  through; every copy tells its direction apart by unified addressing. */

@@ -266,7 +266,8 @@ struct vram_amd_kernels {
         return context.table_of(kernels_type_::bytes(), hip_dense_kernel_speller_t {capability_k, vector_dtype_});
     }
     static expected<kernel_table_t const*> kernel_table_of(hip_executor_t::stream_t const& stream) noexcept {
-        return stream.table_of(kernels_type_::bytes(), hip_dense_kernel_speller_t {capability_k, vector_dtype_});
+        return stream.kernels->table_of(stream.handle.api(), static_cast<int>(stream.ordinal), kernels_type_::bytes(),
+                                        hip_dense_kernel_speller_t {capability_k, vector_dtype_});
     }
 
     /** A part a load reads; empty, since every part arrives through the driver copies. */
@@ -910,6 +911,7 @@ struct vram_amd_index {
 
     /** The runtime every call on this shard goes through, the one its storage was placed by. */
     hip_api_t const& api() const noexcept { return core_.api(); }
+    hip_extensions_t const& extensions() const noexcept { return core_.extensions(); }
     nk_kernel_kind_t kernel() const noexcept { return core_.kernel(); }
     bool stores_norms() const noexcept { return core_.stores_norms(); }
     std::size_t row_bytes() const noexcept { return core_.row_bytes(); }

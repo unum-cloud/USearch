@@ -23,6 +23,13 @@
 
 namespace unum::usearch::utilities {
 
+/** The position of the stream on shard @p shard 's device in @p executor, or its size when it
+ *  drives none there: the one pairing lookup every vendor's tower shares. */
+template <typename shards_type_, typename executor_type_>
+std::size_t stream_of(shards_type_ const& shards, executor_type_ const& executor, std::size_t shard) noexcept {
+    return stream_on(executor, static_cast<std::size_t>(shards[shard].index->device_specs().ordinal));
+}
+
 /**
  *  @brief One batched read over every shard of a device tower: the executor's claim, a context per
  *      shard sized for the widest window, and one snapshot of the shards' visible entries, so every
@@ -70,15 +77,6 @@ struct vram_shard_fanout {
         return status_code_t::success_k;
     }
 
-    /** The position of the stream on shard @p shard 's device in @p executor, or its size when it
-     *  drives none there. */
-    static std::size_t stream_of(shards_t const& shards, executor_t const& executor, std::size_t shard) noexcept {
-        int const device = shards[shard].index->device_specs().ordinal;
-        std::size_t stream = 0;
-        while (stream != executor.size() && executor.device(stream) != device) ++stream;
-        return stream;
-    }
-
     /** Makes shard @p shard 's device current, since a launch fails on a stream of any other. */
     static status_t enter(shards_t const& shards, std::size_t shard) noexcept {
         status_t const selected = vendor_t::select(shards[shard].index->api(),
@@ -103,15 +101,15 @@ struct vram_shard_fanout {
         // Counted once, so a shard generation opening meanwhile gets no context and no scratch
         // here.
         std::size_t const count = shards.size();
-        if (status_t const sized = executor.reserve(walk_bytes_(shards, usage...) *
-                                                    shards_per_stream_(shards, executor));
+        std::size_t stream_at[gpu_devices_capacity_k];
+        if (status_t const sized = reserve_paired_(shards, executor, walk_bytes_(shards, usage...), 0, stream_at);
             failed(sized))
             return sized;
         if (failed(traversals.reserve_exactly(count))) return status_code_t::out_of_memory_k;
         for (std::size_t shard = 0; shard != count; ++shard) {
-            typename executor_t::stream_t& stream = executor.stream(stream_of(shards, executor, shard));
+            typename executor_t::stream_t& stream = executor.stream(stream_at[device_of_(shards, shard)]);
             traversals.push_back_reserved(
-                traversal_context_t {typename traversal_context_t::allocator_t {stream.arena, stream}});
+                traversal_context_t {typename traversal_context_t::allocator_t {stream.memory.arena, stream}});
             if (!traversals.back()) return status_code_t::out_of_memory_k;
         }
         return status_code_t::success_k;
@@ -221,8 +219,9 @@ struct vram_shard_fanout {
     template <typename submit_type_, typename merge_type_>
     expected<search_result_t> await_every_shard(std::size_t outputs_bytes, submit_type_&& submit,
                                                 merge_type_&& merge) noexcept {
-        if (status_t const sized = executor_.reserve((walk_bytes_per_shard_ + outputs_bytes) *
-                                                     shards_per_stream_(shards_, executor_));
+        std::size_t stream_at[gpu_devices_capacity_k];
+        if (status_t const sized = reserve_paired_(shards_, executor_, walk_bytes_per_shard_ + outputs_bytes, 0,
+                                                   stream_at);
             failed(sized))
             return {{}, sized};
         auto [queued, queued_status] = queue_every_shard_(submit);
@@ -371,16 +370,39 @@ struct vram_shard_fanout {
         return bytes_per_shard;
     }
 
-    /** The most shards any one stream of @p executor serves. */
-    static std::size_t shards_per_stream_(shards_t const& shards, executor_t const& executor) noexcept {
-        std::size_t most = 0;
-        for (std::size_t stream = 0; stream != executor.size(); ++stream) {
-            std::size_t served = 0;
-            for (std::size_t shard = 0; shard != shards.size(); ++shard)
-                served += stream_of(shards, executor, shard) == stream;
-            most = max_of(most, served);
+    /**
+     *  @brief Pairs each shard of @p shards with its device's stream in @p executor once per call,
+     *      and grows each paired stream's scratch for the most shards one stream serves, by
+     *      @p bytes_per_shard and @p contexts_per_shard each.
+     *
+     *  Writes each paired stream's position at its device's ordinal in @p stream_at, which the
+     *  caller pairs through; a stream no shard pairs with keeps what it holds.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k A shard's device has no stream in @p executor.
+     */
+    static status_t reserve_paired_(shards_t const& shards, executor_t& executor, std::size_t bytes_per_shard,
+                                    std::size_t contexts_per_shard,
+                                    std::size_t (&stream_at)[gpu_devices_capacity_k]) noexcept {
+        std::size_t served[gpu_devices_capacity_k + 1] = {}, most = 0;
+        for (std::size_t shard = 0; shard != shards.size(); ++shard) {
+            std::size_t const stream = stream_of(shards, executor, shard);
+            stream_at[device_of_(shards, shard)] = stream;
+            most = max_of(most, ++served[stream]);
         }
-        return most;
+        if (served[executor.size()]) return status_code_t::config_mismatch_k;
+        for (std::size_t stream = 0; stream != executor.size(); ++stream)
+            if (served[stream])
+                if (status_t const grown = reserve_scratch(executor.stream(stream), bytes_per_shard * most,
+                                                           contexts_per_shard * most);
+                    failed(grown))
+                    return grown;
+        return status_code_t::success_k;
+    }
+
+    /** The ordinal of shard @p shard 's device, where @ref reserve_paired_ writes its stream. */
+    static std::size_t device_of_(shards_t const& shards, std::size_t shard) noexcept {
+        return static_cast<std::size_t>(shards[shard].index->device_specs().ordinal);
     }
 
     /**
@@ -397,19 +419,19 @@ struct vram_shard_fanout {
     template <typename... usage_types_>
     status_t pair_executor_traversals_(usage_types_ const&... usage) noexcept {
         // Counted once, so a shard generation opening meanwhile gets no context here.
-        std::size_t const count = shards_.size(), served = shards_per_stream_(shards_, executor_);
+        std::size_t const count = shards_.size();
+        std::size_t stream_at[gpu_devices_capacity_k];
         walk_bytes_per_shard_ = walk_bytes_(shards_, usage...);
-        if (status_t const sized = executor_.reserve(walk_bytes_per_shard_ * served, served); failed(sized))
+        if (status_t const sized = reserve_paired_(shards_, executor_, walk_bytes_per_shard_, 1, stream_at);
+            failed(sized))
             return sized;
         traversals_.clear();
         if (failed(traversals_.reserve_exactly(count))) return status_code_t::out_of_memory_k;
+        // Each shard is paired once, taking the next context of its stream.
+        std::size_t paired_before[gpu_devices_capacity_k] = {};
         for (std::size_t shard = 0; shard != count; ++shard) {
-            std::size_t const stream = stream_of(shards_, executor_, shard);
-            std::size_t paired_before = 0;
-            for (std::size_t earlier = 0; earlier != shard; ++earlier)
-                paired_before += stream_of(shards_, executor_, earlier) == stream;
-            std::span<traversal_context_t> const stream_traversals = executor_.traversals(stream);
-            traversals_.push_back_reserved(&stream_traversals[paired_before]);
+            std::size_t const stream = stream_at[device_of_(shards_, shard)];
+            traversals_.push_back_reserved(&executor_.stream(stream).memory.contexts[paired_before[stream]++]);
         }
         return status_code_t::success_k;
     }

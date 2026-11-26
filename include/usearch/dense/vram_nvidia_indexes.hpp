@@ -251,15 +251,15 @@ struct vram_nvidia_indexes {
     std::size_t shard_capacity() const noexcept { return shards_.shard_capacity(); }
 
     /**
-     *  Appends one shard built here on the device @p stream names, for callers with none to hand
-     *  over.
+     *  @brief Appends one shard built here on the device @p stream names, its storage mapping
+     *      through the virtual-memory entries of @p extensions, for callers with none to hand over.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k The set is reserved, retired shards, or has a shard generation in
      *    flight.
      */
-    status_t emplace(typename executor_t::stream_t const& stream) noexcept {
-        std::unique_ptr<index_t> shard = build_(*stream.api, stream.device);
+    status_t emplace(typename executor_t::stream_t const& stream, cuda_extensions_t const& extensions) noexcept {
+        std::unique_ptr<index_t> shard = build_(stream.handle.api(), extensions, static_cast<int>(stream.ordinal));
         if (!shard) return status_code_t::out_of_memory_k;
         return emplace(std::move(shard));
     }
@@ -1001,7 +1001,7 @@ struct vram_nvidia_indexes {
         }
 
         /** One run per shard on its stream, holding the device scratch in flight across phases. */
-        growing_buffer<typename executor_t::arena_t, forkunion_allocator_t> arenas_;
+        growing_buffer<typename executor_t::scratch_t::arena_t, forkunion_allocator_t> arenas_;
 
         /** One walk context per shard over its run, each pass queued on it across phases. */
         growing_buffer<traversal_context_t, forkunion_allocator_t> traversals_;
@@ -1252,7 +1252,7 @@ struct vram_nvidia_indexes {
         plan.owner_ = this;
         plan.config_ = config;
         // Tiles follow the devices the call runs on unless the caller overrides them, as on RAM.
-        if (!plan.config_.cache_bytes) plan.config_.cache_bytes = executor.cache_bytes_per_core();
+        if (!plan.config_.cache_bytes) plan.config_.cache_bytes = cache_bytes_per_core(executor);
         if (failed(plan.shard_plans_.reserve_exactly(shards))) return {{}, status_code_t::out_of_memory_k};
         if (status_t const opened = open_walks_(plan, executor, *this, shards, 0); failed(opened)) return {{}, opened};
         if (status_t const opened = plan.open_shards_(); failed(opened)) return {{}, opened};
@@ -1831,10 +1831,13 @@ struct vram_nvidia_indexes {
 
         /** Opens a source per mapped part, cuFile-registered where the file takes O_DIRECT. */
         status_t open_sources(std::span<mapped_file_t> mappings) noexcept {
+            if (owner->shards_.empty()) return status_code_t::uninitialized_k;
             if (failed(sources.resize(mappings.size()))) return status_code_t::out_of_memory_k;
             bool every_part_registered = !mappings.empty();
             for (std::size_t part = 0; part != mappings.size(); ++part) {
-                sources[part] = {linux_cufile_file_t::open(executor->api(), mappings[part]), mappings[part].view()};
+                sources[part] = {
+                    linux_cufile_file_t::open(owner->shards_[0].index->extensions().cufile, mappings[part]),
+                    mappings[part].view()};
                 every_part_registered = every_part_registered && sources[part].file;
             }
             owner->loaded_through_ = every_part_registered ? vram_load_path_t::cufile_k : vram_load_path_t::host_copy_k;
@@ -1854,7 +1857,7 @@ struct vram_nvidia_indexes {
                                                                 synchronization_t synchronization) noexcept {
             if (status_t const entered = fanout_t::enter(shards, shard); failed(entered)) return {{}, entered};
             return shards[shard].index->plan_save(columns, synchronization,
-                                                  executor->stream(fanout_t::stream_of(shards, *executor, shard)));
+                                                  executor->stream(utilities::stream_of(shards, *executor, shard)));
         }
 
         /**
@@ -1872,8 +1875,8 @@ struct vram_nvidia_indexes {
         expected<typename index_t::load_plan_t> open_shard_load(shards_t& shards, std::size_t shard,
                                                                 std::size_t rows) noexcept {
             if (status_t const entered = fanout_t::enter(shards, shard); failed(entered)) return {{}, entered};
-            return shards[shard].index->plan_load(rows, executor->stream(fanout_t::stream_of(shards, *executor, shard)),
-                                                  to_span(sources));
+            return shards[shard].index->plan_load(
+                rows, executor->stream(utilities::stream_of(shards, *executor, shard)), to_span(sources));
         }
 
         void end_save(shards_t& shards) noexcept { shards.reopen(); }
@@ -2425,8 +2428,9 @@ struct vram_nvidia_indexes {
     }
 
     /** One unreserved shard placed on @p device; null when the allocation fails. */
-    std::unique_ptr<index_t> build_(cuda_api_t const& api, int device) const noexcept {
-        typename index_t::vectors_allocator_t const allocator {api, device};
+    std::unique_ptr<index_t> build_(cuda_api_t const& api, cuda_extensions_t const& extensions,
+                                    int device) const noexcept {
+        typename index_t::vectors_allocator_t const allocator {api, extensions, device};
         return std::unique_ptr<index_t>(new (std::nothrow)
                                             index_t(kernel(), geometry_, allocator, allocator, shards_.allocator()));
     }
@@ -2453,7 +2457,9 @@ struct vram_nvidia_indexes {
     shard_t build_shard_(shard_t const& like) noexcept {
         int const device = like.index->device_specs().ordinal;
         cuda_api_t const& api = like.index->api();
-        std::unique_ptr<index_t> index = cuda_set_device(api, device) == cuda_success_k ? build_(api, device) : nullptr;
+        std::unique_ptr<index_t> index = cuda_set_device(api, device) == cuda_success_k
+                                             ? build_(api, like.index->extensions(), device)
+                                             : nullptr;
         if (index) index->share_with_(devices_());
         reserve_capacity_t bounded {};
         bounded.ceiling = shards_.shard_capacity();
@@ -2520,7 +2526,7 @@ struct vram_nvidia_indexes {
         rounds.owner_ = this;
         rounds.config_ = config.refine;
         // Tiles follow the devices the call runs on unless the caller overrides them, as on RAM.
-        if (!rounds.config_.cache_bytes) rounds.config_.cache_bytes = executor.cache_bytes_per_core();
+        if (!rounds.config_.cache_bytes) rounds.config_.cache_bytes = cache_bytes_per_core(executor);
         for (std::size_t closing = 0; closing != incoming; ++closing)
             if (status_t const closed = plan.incoming_source_(closing)->close_gated_(); failed(closed)) {
                 // Only the sources closed so far reopen; the plan's own release reopens the rest.
@@ -2658,8 +2664,8 @@ struct vram_nvidia_indexes {
         for (std::size_t shard = 0; shard != shards; ++shard) {
             // The run grows on the current device's stream, so that device is bound first.
             if (status_t const entered = fanout_t::enter(shards_, shard); failed(entered)) return entered;
-            typename executor_t::stream_t& stream = executor.stream(fanout_t::stream_of(shards_, executor, shard));
-            plan.arenas_.push_back_reserved(typename executor_t::arena_t {stream.arena.upstream()});
+            typename executor_t::stream_t& stream = executor.stream(utilities::stream_of(shards_, executor, shard));
+            plan.arenas_.push_back_reserved(typename executor_t::scratch_t::arena_t {stream.memory.arena.upstream()});
             if (failed(plan.arenas_[shard].reserve_exactly(walk_bytes))) return status_code_t::out_of_memory_k;
             plan.traversals_.push_back_reserved(
                 traversal_context_t {typename traversal_context_t::allocator_t {plan.arenas_[shard], stream}});
@@ -2692,7 +2698,7 @@ struct vram_nvidia_indexes {
                 if (moves[from].into == into) rows += source.shards_[from].index->size();
             if (status_t const entered = fanout_t::enter(shards_, into); failed(entered)) return entered;
             auto [plan, status] = shards_[into].index->plan_load(
-                rows, executor.stream(fanout_t::stream_of(shards_, executor, into)));
+                rows, executor.stream(utilities::stream_of(shards_, executor, into)));
             if (failed(status)) return status;
             plans.push_back_reserved(std::move(plan));
         }

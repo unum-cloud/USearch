@@ -263,8 +263,10 @@ bool make_call_executor(punned_dense_index<residency_> const& punned,
         devices[devices_count++] = device;
     }
     using executor_t = typename punned_dense_index<residency_>::executor_t;
-    auto [built, status] = executor_t::on_default_streams(driver_of(gpu_drivers(), std::type_identity<executor_t> {}),
-                                                          std::span<int const> {devices.data(), devices_count});
+    std::size_t no_limit = 0;
+    auto [built, status] = on_default_streams(driver_of(gpu_drivers(), std::type_identity<executor_t> {}),
+                                              std::span<int const> {devices.data(), devices_count}, gpu_runtime(),
+                                              no_limit);
     if (failed(status)) return propagate_error(status, outcome);
     call_executor = std::move(built);
     return true;

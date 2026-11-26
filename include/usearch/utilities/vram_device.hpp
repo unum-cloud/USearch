@@ -10,24 +10,27 @@
  *  listed first, then AMD, then Apple. A vendor whose runtime is absent contributes no devices.
  *
  *  Every vendor's device header provides the same surface: a vendor-prefixed listing into a
- *  caller's buffer, an executor with a static @c spawn over its driver and vendor ordinals,
- *  @c device, @c vendor_k and @c device_arena_t, and that arena, made from the executor's first
- *  stream, with @c allocate, @c contains, @c clear, @c upload and @c drain.
+ *  caller's buffer, an executor with a static @c spawn over its driver and vendor ordinals whose
+ *  streams satisfy @c a_gpu_stream, and a device arena, made from the executor's first stream,
+ *  with @c allocate, @c contains, @c clear, @c upload and @c wait. The driver tables, the stream
+ *  owners, the executors, the concepts and the spawn below sit in the Shared VRAM regions, which
+ *  UForm and UStore carry word for word.
  */
 #pragma once
 
 #include <cstddef> // `std::size_t`
+#include <cstdint> // `std::uintptr_t` - a stream's addresses
 #include <cstdio>  // `std::snprintf` - a kernel symbol's digits
 #include <cstring> // `std::strlen` - a name's length prefix in a kernel symbol
 
 #include <bit>         // `std::bit_floor` - a checkpoint batch's rows
+#include <concepts>    // `std::same_as`, `std::convertible_to` - the stream and executor concepts
 #include <span>        // `std::span` - the listing written
 #include <type_traits> // `std::is_enum_v`, `std::is_same_v` - a kernel symbol's arguments
 #include <variant>     // `std::variant`, `std::monostate` - one alternative per vendor
 
 #include <numkong/types.h> // `nk_dtype_t` - a kernel symbol's dtype argument
 
-#include "usearch/utilities/ram_buffers.hpp"        // `growing_buffer` - the ordinals an executor opens over
 #include "usearch/utilities/types.hpp"              // `gpu_device_t`
 #include "usearch/utilities/vram_amd_device.hpp"    // `list_amd_gpu_devices`, `hip_executor_t`
 #include "usearch/utilities/vram_apple_device.hpp"  // `list_apple_gpu_devices`, `metal_executor_t`
@@ -35,33 +38,29 @@
 
 namespace unum::usearch::utilities {
 
-/** A variant over @c std::monostate, the state of no GPU, then each vendor's @p selector_type_
- *  applied to its executor, in listing order. */
-template <template <typename> typename selector_type_>
-using gpu_vendors_variant =
-    std::variant<std::monostate, typename selector_type_<cuda_executor_t>::type,
-                 typename selector_type_<hip_executor_t>::type, typename selector_type_<metal_executor_t>::type>;
+/** USearch's optional driver entries beyond the shared tables: virtual memory, the Tensor Memory
+ *  Accelerator's encoder and cuFile on NVIDIA, and virtual memory on AMD; each resolves apart, so
+ *  a missing one never empties the shared tables. */
+struct gpu_driver_extensions_t {
+    cuda_extensions_t cuda;
+    hip_extensions_t hip;
 
-template <typename executor_type_>
-struct gpu_executor_of {
-    using type = executor_type_;
+    gpu_driver_extensions_t() noexcept : cuda(cuda_extensions_t::load()), hip(hip_extensions_t::load()) {}
 };
 
-template <typename executor_type_>
-struct gpu_device_arena_of {
-    using type = typename executor_type_::device_arena_t;
-};
+#pragma region Shared VRAM
 
-/** Whichever vendor's executor a VRAM call runs on, or none. */
-using gpu_executor_t = gpu_vendors_variant<gpu_executor_of>;
-
-/** Every vendor's driver table and Apple's device contexts, which a caller builds once per process
- *  and hands to every GPU call; a vendor whose runtime is absent keeps an empty table. */
+/** Every vendor's driver table, Apple's device contexts and the engine's optional entries, which a
+ *  caller builds once per process and hands to every GPU call; a vendor whose runtime is absent
+ *  keeps an empty table. */
 struct gpu_drivers_t {
     cuda_api_t cuda;
     hip_api_t hip;
     metal_api_t metal;
     metal_contexts_t metal_contexts;
+
+    /** The engine's optional entries, resolved apart from the tables above. */
+    gpu_driver_extensions_t extensions;
 
     gpu_drivers_t() noexcept
         : cuda(cuda_api_t::load()), hip(hip_api_t::load()), metal(metal_api_t::load()), metal_contexts(metal) {}
@@ -89,37 +88,82 @@ inline std::size_t list_gpu_devices(gpu_drivers_t const& drivers, std::span<gpu_
     return count;
 }
 
+/** What one vendor's stream answers: its device, binding it, waiting for everything queued, and
+ *  the memory operations queued in its order, each with that device bound. */
+template <typename stream_type_>
+concept a_gpu_stream = requires(stream_type_& stream, stream_type_ const& spawned, std::size_t bytes,
+                                std::uintptr_t address, bytes_span_t target) {
+    { spawned.ordinal } -> std::convertible_to<std::size_t>;
+    { spawned.bind() } -> std::same_as<status_t>;
+    { stream.wait() } -> std::same_as<status_t>;
+    { stream.allocate_async(bytes) } -> std::same_as<expected<std::uintptr_t>>;
+    { stream.free_async(address) };
+    { stream.copy_async(address, address, bytes) } -> std::same_as<status_t>;
+    { stream.upload_async(address, bytes_view_t {target}) } -> std::same_as<status_t>;
+    { stream.download_async(target, address) } -> std::same_as<status_t>;
+    { stream.fill_async(address, byte_t {}, bytes) } -> std::same_as<status_t>;
+};
+
+/** What every vendor's executor answers: its vendor, and its streams, one per device in the order
+ *  the caller named them, and the wait for all of them. */
+template <typename executor_type_>
+concept a_gpu_executor = a_gpu_stream<typename executor_type_::stream_t> &&
+                         requires(executor_type_& executor, executor_type_ const& spawned, std::size_t index) {
+                             { executor_type_::vendor_k } -> std::convertible_to<gpu_vendor_t>;
+                             { spawned.size() } -> std::same_as<std::size_t>;
+                             { executor.stream(index) } -> std::same_as<typename executor_type_::stream_t&>;
+                             { executor.wait() } -> std::same_as<status_t>;
+                         };
+
+static_assert(a_gpu_executor<cuda_executor_t>);
+static_assert(a_gpu_executor<hip_executor_t>);
+static_assert(a_gpu_executor<metal_executor_t>);
+
+/** Whichever vendor's executor a VRAM call runs on, or none. */
+using gpu_executor_t = std::variant<std::monostate, cuda_executor_t, hip_executor_t, metal_executor_t>;
+
 /**
  *  @brief Spawns the executor of the one vendor every device in @p devices belongs to, over that
- *      vendor's driver in @p drivers.
+ *      vendor's driver in @p drivers, opening each stream's memory and kernels with
+ *      @p memory_arguments.
  *
- *  One stream the executor opens per distinct device over their vendor ordinals, which every shard
- *  there shares, its run never growing past @p scratch_limit bytes per stream, zero for no ceiling.
+ *  One stream per distinct device over their vendor ordinals, which every shard there shares: the
+ *  executor opens it, or adopts the entry of @p streams beside the device, a refused spawn leaving
+ *  every one of them the caller's.
  *
  *  @par Statuses:
- *  - @c device_k No device is named, the build drives no executor of their vendor, or a device
- *    refused its stream.
- *  - @c config_mismatch_k The @p devices span vendors.
+ *  - @c invalid_argument_k No device is named, one repeats beside @p streams, or a stream is null
+ *    or a default one.
+ *  - @c config_mismatch_k The @p devices span vendors, or a stream sits on another device than
+ *    its entry names.
+ *  - @c device_k The build drives no executor of their vendor, or a device refused its stream.
  */
-inline expected<gpu_executor_t> spawn_gpu_executor(gpu_drivers_t& drivers, std::span<gpu_device_t const> devices,
-                                                   std::size_t scratch_limit = 0) noexcept {
-    if (devices.empty()) return {{}, status_code_t::device_k};
-    growing_buffer<int> ordinals {global_allocator};
-    if (failed(ordinals.reserve_exactly(devices.size()))) return {{}, status_code_t::out_of_memory_k};
+template <typename... memory_arguments_>
+expected<gpu_executor_t> spawn_gpu_executor(gpu_drivers_t& drivers, std::span<gpu_device_t const> devices,
+                                            std::span<void* const> streams,
+                                            memory_arguments_&... memory_arguments) noexcept {
+    if (devices.empty() || devices.size() > gpu_devices_capacity_k)
+        return {{}, {status_code_t::invalid_argument_k, "An executor names one to a listing's devices"}};
+    int ordinals[gpu_devices_capacity_k] = {};
+    std::size_t ordinals_count = 0;
     for (gpu_device_t const& device : devices) {
         if (device.vendor != devices[0].vendor)
             return {{}, {status_code_t::config_mismatch_k, "One executor drives one GPU vendor"}};
         int const ordinal = static_cast<int>(device.vendor_ordinal);
-        bool opened = false;
-        for (int const earlier : ordinals) opened |= earlier == ordinal;
-        if (!opened) ordinals.push_back_reserved(ordinal);
+        std::size_t earlier = 0;
+        while (earlier != ordinals_count && ordinals[earlier] != ordinal) ++earlier;
+        // Two adopted streams on one device would leave one of them unowned.
+        if (earlier != ordinals_count && !streams.empty())
+            return {{}, {status_code_t::invalid_argument_k, "Each adopted stream needs its own device"}};
+        if (earlier == ordinals_count) ordinals[ordinals_count++] = ordinal;
     }
     gpu_executor_t executor;
-    status_t spawning = status_code_t::device_k;
+    status_t spawning {status_code_t::device_k, "The build drives no executor of the vendor"};
     auto const spawn = [&]<typename executor_type_>(std::type_identity<executor_type_> vendor) noexcept {
         if (executor_type_::vendor_k != devices[0].vendor) return false;
-        auto [spawned, status] = executor_type_::spawn(driver_of(drivers, vendor), to_span(ordinals), scratch_limit);
-        if (succeeded(status)) executor.emplace<executor_type_>(std::move(spawned));
+        auto [spawned, status] = executor_type_::spawn(
+            driver_of(drivers, vendor), std::span<int const> {ordinals, ordinals_count}, streams, memory_arguments...);
+        if (status.succeeded()) executor.template emplace<executor_type_>(std::move(spawned));
         spawning = status;
         return true;
     };
@@ -128,11 +172,38 @@ inline expected<gpu_executor_t> spawn_gpu_executor(gpu_drivers_t& drivers, std::
     return {std::move(executor), spawning};
 }
 
+#pragma endregion Shared VRAM
+
+/** The position in @p executor of its stream on vendor ordinal @p ordinal, or its size where it
+ *  drives none there: the one lookup a call pairs each shard with a stream through. */
+template <typename executor_type_>
+std::size_t stream_on(executor_type_ const& executor, std::size_t ordinal) noexcept {
+    std::size_t stream = 0;
+    while (stream != executor.size() && executor.stream(stream).ordinal != ordinal) ++stream;
+    return stream;
+}
+
+/** The device arena each vendor's executor places a C-layer call's outputs in. */
+template <typename executor_type_>
+struct gpu_device_arena_of;
+template <>
+struct gpu_device_arena_of<cuda_executor_t> {
+    using type = cuda_device_arena_t;
+};
+template <>
+struct gpu_device_arena_of<hip_executor_t> {
+    using type = hip_device_arena_t;
+};
+template <>
+struct gpu_device_arena_of<metal_executor_t> {
+    using type = metal_device_arena_t;
+};
+
 /** Device memory a C-layer call writes its outputs to, on the vendor and first stream of the
  *  executor it was made for, or none for host-resident calls; it serves calls on that executor
  *  alone, and dies before it. */
 struct gpu_arena_t {
-    gpu_vendors_variant<gpu_device_arena_of> arena;
+    std::variant<std::monostate, cuda_device_arena_t, hip_device_arena_t, metal_device_arena_t> arena;
 
     /** Places the arena on @p executor 's vendor and first stream; none for no GPU. */
     static gpu_arena_t on(gpu_executor_t& executor) noexcept {
@@ -140,7 +211,7 @@ struct gpu_arena_t {
         std::visit(
             [&]<typename executor_type_>(executor_type_& typed) noexcept {
                 if constexpr (!std::is_same_v<executor_type_, std::monostate>)
-                    placed.arena.template emplace<typename executor_type_::device_arena_t>(typed.stream(0));
+                    placed.arena.template emplace<typename gpu_device_arena_of<executor_type_>::type>(typed.stream(0));
             },
             executor);
         return placed;

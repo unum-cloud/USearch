@@ -987,6 +987,7 @@ constexpr char const* constant_of(util::gpu_vendor_t vendor) noexcept {
 
 /** Every vendor's driver table, shared with the tools' read-backs. */
 using us::tools::gpu_drivers;
+using us::tools::spawn_harness_executor;
 
 /** Every device the C interface numbers, in its order, which @c USEARCH_DEVICES indexes. */
 std::span<util::gpu_device_t const> gpu_devices() noexcept;

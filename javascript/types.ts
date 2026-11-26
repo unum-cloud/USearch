@@ -374,11 +374,13 @@ export interface ExecutorForRamConfig {
 
 /** Which devices a VRAM executor drives, and on which streams. */
 export interface ExecutorForVramConfig {
-  /** CUDA ordinals to drive; absent takes one free device. */
+  /** Device ordinals to drive; absent drives every listed device of the first vendor with a known
+   *  class. */
   devices?: number[];
-  /** The caller's CUDA stream addresses, one per device in `devices` order, which answer
-   *  unsupported, since the executor drives only its own; absent uses the executor's own stream
-   *  per device. */
+  /** The caller's stream addresses, one per device in `devices` order. A CUDA or HIP stream
+   *  becomes the executor's, destroyed when it closes; a Metal queue is retained, the executor
+   *  releasing its own reference while the caller keeps theirs. A failed creation leaves every
+   *  stream the caller's; absent opens the executor's own stream per device. */
   streams?: bigint[];
   /** Ceiling on scratch bytes per device; absent lets scratch grow as geometry asks. */
   scratchLimit?: number;

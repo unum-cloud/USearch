@@ -2310,8 +2310,8 @@ struct vram_apple_graph {
 
         load_plan_t() noexcept = default;
 
-        /** A plan whose kits' load kernels ride a context of its own over @p stream. */
-        explicit load_plan_t(metal_stream_t&& stream) noexcept : context_(std::move(stream)) {}
+        /** A plan whose kits' load kernels ride a context of its own over @p allocator 's queue. */
+        explicit load_plan_t(metal_shared_allocator_t const& allocator) noexcept : context_(allocator) {}
         load_plan_t(load_plan_t&& other) noexcept
             : base(other.base), entries(std::exchange(other.entries, 0)), saved_(other.saved_),
               stored_offsets_(std::move(other.stored_offsets_)), context_(std::move(other.context_)),
@@ -2477,7 +2477,7 @@ struct vram_apple_graph {
      */
     expected<load_plan_t> plan_load(safegraphs_saved_columns<node_id_t> const& saved,
                                     traversal_context_t& context) noexcept {
-        load_plan_t plan {context.stream_.share()};
+        load_plan_t plan {context.allocator()};
         std::size_t const connectivity = this->connectivity(), entries = saved.nodes();
         if (!connectivity) return {std::move(plan), status_code_t::uninitialized_k};
         if (context.device() != device_.ordinal || !context) return {std::move(plan), status_code_t::config_mismatch_k};
@@ -2550,10 +2550,11 @@ struct vram_apple_graph {
      *  - @c unsupported_k The kits' library exports no such kernel.
      */
     expected<metal_pipeline_state_t> kits_pipeline_named_(char const* host_name) const noexcept {
-        metal_context_t* const device = context();
+        metal_context_t* const gpu = context();
+        kernel_tables<metal_module_t>* const kernels = allocator_.kernels();
         char const* const source = metal_basic_source_of<kits_type_>();
-        if (!connectivity() || !device || !source) return {{}, status_code_t::uninitialized_k};
-        auto const [state, status] = device->pipeline(source, host_name);
+        if (!connectivity() || !gpu || !kernels || !source) return {{}, status_code_t::uninitialized_k};
+        auto const [state, status] = kernels->pipeline(*gpu->api, gpu->device, source, host_name);
         return {state, failed(status) ? status_code_t::unsupported_k : status_code_t::success_k};
     }
 
@@ -2904,14 +2905,15 @@ struct vram_apple_graph {
      */
     status_t bind_(reserve_capacity_t const& config) noexcept {
         if constexpr (!std::is_same_v<node_id_t, u32_t>) return status_code_t::unsupported_k;
-        metal_context_t* const device = context();
-        if (!device) return status_code_t::device_k;
-        if (status_t const uploaded = kits_.upload_parameters_(*device); failed(uploaded)) return uploaded;
+        metal_context_t* const gpu = context();
+        kernel_tables<metal_module_t>* const kernels = allocator_.kernels();
+        if (!gpu || !kernels) return status_code_t::device_k;
+        if (status_t const uploaded = kits_.upload_parameters_(*gpu); failed(uploaded)) return uploaded;
         char const* const source = metal_basic_source_of<kits_type_>();
         if (!source) return status_code_t::out_of_memory_k;
         vram_kernel_symbol_t symbol;
         auto const build = [&](metal_pipeline_state_t& into) noexcept -> status_t {
-            auto const [state, status] = device->pipeline(source, symbol.text);
+            auto const [state, status] = kernels->pipeline(*gpu->api, gpu->device, source, symbol.text);
             if (failed(status)) return status;
             if (state.max_threads < metal_threadgroup_threads_k) return status_code_t::unsupported_k;
             into = state;
@@ -2936,7 +2938,7 @@ struct vram_apple_graph {
                 return built;
         }
         // The pipelines report the simdgroup width the specification names, so they build first.
-        auto const [specs, status] = metal_device_specs_t::query(*device, device_.ordinal);
+        auto const [specs, status] = metal_device_specs_t::query(*gpu, device_.ordinal);
         if (failed(status)) return status;
         device_ = specs;
         std::size_t const row_bytes = config.connectivity * sizeof(node_id_t);

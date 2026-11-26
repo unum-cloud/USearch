@@ -2657,8 +2657,8 @@ static char const doc_Executor_for_vram[] =                                     
     "Calls `usearch_executor_for_vram`.\n"                                                           //
     "\n"                                                                                             //
     "Args:\n"                                                                                        //
-    "  devices (Sequence[int], optional): CUDA ordinals to drive; None derives one\n"                //
-    "    free device.\n"                                                                             //
+    "  devices (Sequence[int], optional): Device ordinals to drive; None drives every\n"             //
+    "    listed device of the first vendor with a known class.\n"                                    //
     "  gpu_class_ceiling (GPUClass, optional): The newest class dispatch may pick, capped below\n"   //
     "    every device the best class every device loads, else unsupported; None means no ceiling.\n" //
     "\n"                                                                                             //

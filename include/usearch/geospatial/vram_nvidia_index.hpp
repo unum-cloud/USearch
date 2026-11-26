@@ -151,6 +151,7 @@ struct vram_nvidia_index {
     std::size_t memory_usage() const noexcept { return graph_.memory_usage(); }
     cuda_device_specs_t const& device_specs() const noexcept { return graph_.device_specs(); }
     cuda_api_t const& api() const noexcept { return graph_.api(); }
+    cuda_extensions_t const& extensions() const noexcept { return graph_.extensions(); }
     nk_kernel_kind_t kernel() const noexcept { return graph_.kernel(); }
     basic::vram_ragged_storage<node_id_t> storage() const noexcept { return graph_.storage(); }
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept { return graph_.reserve(config); }

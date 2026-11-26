@@ -18,8 +18,8 @@ namespace unum::usearch::test::dense {
  *  Apple flat matrices. */
 struct counting_metal_allocator_t {
     counting_metal_allocator_t() noexcept = default;
-    counting_metal_allocator_t(allocation_ledger_t& ledger, metal_stream_t const& stream) noexcept
-        : shared_(stream), ledger_(&ledger) {}
+    counting_metal_allocator_t(allocation_ledger_t& ledger, metal_shared_allocator_t const& shared) noexcept
+        : shared_(shared), ledger_(&ledger) {}
 
     metal_buffer_t allocate(std::size_t bytes) noexcept {
         metal_buffer_t buffer = shared_.allocate(bytes);
@@ -38,6 +38,7 @@ struct counting_metal_allocator_t {
     }
     int device() const noexcept { return shared_.device(); }
     metal_context_t* context() const noexcept { return shared_.context(); }
+    kernel_tables<metal_module_t>* kernels() const noexcept { return shared_.kernels(); }
 
   private:
     metal_shared_allocator_t shared_;
@@ -59,12 +60,16 @@ struct vram_cell<gpu_vendor_t::apple_k, dtype_, kernel_> {
     /** Builds the cell's index of @p geometry over @p ledger, on the stream's device. */
     std::unique_ptr<index_t> operator()(allocation_ledger_t& ledger,
                                         typename index_t::geometry_t geometry) const noexcept {
-        counting_metal_allocator_t const allocator {ledger, stream.handle};
+        counting_metal_allocator_t const allocator {
+            ledger,
+            metal_shared_allocator_t {*stream.handle.context(), static_cast<int>(stream.ordinal), *stream.kernels}};
         return std::unique_ptr<index_t>(new (std::nothrow) index_t(kernel_, geometry, allocator, allocator));
     }
 
     /** A fresh traversal context submitting to the stream. */
-    typename index_t::traversal_context_t context() const noexcept { return {stream.handle.share()}; }
+    typename index_t::traversal_context_t context() const noexcept {
+        return {typename index_t::traversal_context_t::allocator_t {stream}};
+    }
 };
 
 } // namespace unum::usearch::test::dense

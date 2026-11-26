@@ -33,6 +33,7 @@
 #include "usearch/utilities/ram_device.hpp"        // `forkunion_allocator_t` - the shard table's placement
 #include "usearch/utilities/vram_apple_device.hpp" // `metal_executor_t`, `metal_traversal_context`
 #include "usearch/utilities/ram_shards.hpp"        // `shard_set` - the shard table
+#include "usearch/utilities/vram_shards.hpp"       // `stream_of` - the pairing lookup
 #include "usearch/utilities/ram_walks.hpp"         // `breadth_first_walk`, `cursor_order_t` - the cursor's walk
 #include "usearch/basic/vram_apple_index.hpp"
 #include "usearch/basic/shard_checkpoints.hpp" // `save_shards`, `load_shards`
@@ -1029,25 +1030,17 @@ struct vram_apple_indexes {
     status_t pairs_with_(executor_t const& executor) const noexcept {
         if (shards_.empty()) return status_code_t::uninitialized_k;
         for (std::size_t shard = 0; shard != shards_.size(); ++shard)
-            if (stream_of_(executor, shard) == executor.size()) return status_code_t::config_mismatch_k;
+            if (utilities::stream_of(shards_, executor, shard) == executor.size())
+                return status_code_t::config_mismatch_k;
         return status_code_t::success_k;
-    }
-
-    /** The position of the stream on shard @p shard 's device in @p executor, or its size when it
-     *  drives none there. */
-    std::size_t stream_of_(executor_t const& executor, std::size_t shard) const noexcept {
-        int const device = shards_[shard].index->device_specs().ordinal;
-        std::size_t stream = 0;
-        while (stream != executor.size() && executor.device(stream) != device) ++stream;
-        return stream;
     }
 
     /** A context of its own over the stream on shard @p shard 's device, which grows its buffers at
      *  its first verb; one that cannot submit when the executor drives no stream there. */
     traversal_context_t traversal_(executor_t& executor, std::size_t shard) const noexcept {
-        std::size_t const stream = stream_of_(executor, shard);
+        std::size_t const stream = utilities::stream_of(shards_, executor, shard);
         if (stream == executor.size()) return traversal_context_t {};
-        return traversal_context_t {executor.stream(stream).handle.share()};
+        return traversal_context_t {metal_shared_allocator_t {executor.stream(stream)}};
     }
 
     /** The live shard at @p live, counted past the retired ones. */

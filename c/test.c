@@ -505,7 +505,11 @@ void test_empty_reads(size_t const dimensions) {
 
     usearch_outcome_t outcome = {0};
     size_t devices_count = 0;
-    usearch_gpu_devices(&(usearch_gpu_devices_t) {.outcome = &outcome, .devices_count = &devices_count});
+    usearch_gpu_device_t first_device = {0};
+    usearch_gpu_devices(&(usearch_gpu_devices_t) {.outcome = &outcome,
+                                                  .devices = &first_device,
+                                                  .devices_capacity = 1,
+                                                  .devices_count = &devices_count});
     int32_t const devices[1] = {0};
     usearch_vram_options_t const vram = {.devices = devices, .devices_count = 1};
     usearch_dense_index_t device_index = NULL;
@@ -518,16 +522,35 @@ void test_empty_reads(size_t const dimensions) {
                                                               .vram = vram});
     expect_at(device_index || !devices_count || outcome.status == usearch_status_device_k, __FILE__, __LINE__,
               outcome.message ? outcome.message : "A listed GPU opens an index or answers no device");
-    // The executor drives only its own streams, so the caller's are refused.
+    // A null stream is no stream to adopt; without a listed GPU, or one of a class the build left
+    // out, the call never reaches the streams.
     void* const streams[1] = {NULL};
     usearch_executor_t streamed_executor = NULL;
     usearch_executor_for_vram(&(usearch_executor_for_vram_t) {.executor = &streamed_executor,
                                                               .outcome = &outcome,
                                                               .vram = vram,
                                                               .streams = streams});
-    expect_at(!streamed_executor && outcome.status == usearch_status_unsupported_k, __FILE__, __LINE__,
-              "The caller's streams are refused as unsupported");
+    usearch_status_t const refused = !devices_count ? usearch_status_device_k
+                                     : first_device.gpu_class == usearch_gpu_class_unknown_k
+                                         ? usearch_status_unsupported_k
+                                         : usearch_status_invalid_argument_k;
+    expect_at(!streamed_executor && outcome.status == refused, __FILE__, __LINE__,
+              "A null stream is refused, as is every stream without a GPU");
     usearch_executor_free(streamed_executor);
+    // Malformed stream lists are refused before any stream is read, so these stand-in addresses,
+    // which no driver could synchronize or destroy, stay the caller's untouched.
+    void* const stand_ins[2] = {(void*)(uintptr_t)0x1000, (void*)(uintptr_t)0x2000};
+    usearch_executor_for_vram(
+        &(usearch_executor_for_vram_t) {.executor = &streamed_executor, .outcome = &outcome, .streams = stand_ins});
+    expect_at(!streamed_executor && outcome.status == usearch_status_invalid_argument_k, __FILE__, __LINE__,
+              "Streams beside no named device are refused");
+    int32_t const repeated[2] = {0, 0};
+    usearch_executor_for_vram(&(usearch_executor_for_vram_t) {.executor = &streamed_executor,
+                                                              .outcome = &outcome,
+                                                              .vram = {.devices = repeated, .devices_count = 2},
+                                                              .streams = stand_ins});
+    expect_at(!streamed_executor && outcome.status == usearch_status_invalid_argument_k, __FILE__, __LINE__,
+              "A device named twice beside streams is refused");
     if (device_index) {
         usearch_executor_t device_executor = NULL;
         usearch_executor_for_vram(

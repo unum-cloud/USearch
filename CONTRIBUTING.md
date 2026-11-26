@@ -270,10 +270,12 @@ A `NULL` executor runs the call on the calling thread.
 It creates no pool, thread, ring, SPDK queue pair or stream and probes no topology; its scratch and blocking queues live for that call only.
 Name an executor for calls that allocate nothing once warm.
 Such a call runs on `ram_executor_t::on_calling_thread()`, whose threads are an empty `fu::pool_t` and whose one arena serves that call alone; NVMe reads go through blocking queues over the files the index already holds, and VRAM work goes on each device's null legacy stream.
-A VRAM executor owns one non-blocking stream per device, created with it, and caller-passed streams answer `unsupported_k`.
+A VRAM executor owns one non-blocking stream per device, opened or adopted at creation; caller streams are checked against their devices before any is adopted, so a refused creation leaves them the caller's.
 Tools and benchmarks open one executor and pass it to every call, and nothing outside `include/usearch/utilities/ram_device.hpp` dispatches on a raw `fu_pool_t`.
 Every executor creates its own threads and pins them to the first cores the creating thread may run on, so a caller sharing a machine between executors narrows its affinity mask before creating each.
 An NVMe executor serves RAM-resident handles through its threads too, so one executor drives a RAM index beside the views it reads.
+GPU-scheduling types, the runtime, the vendor stream and event owners, `stream_t`, the vendor executors and their concepts, live in the `Shared VRAM` regions of `include/usearch/utilities/vram_device.hpp`, its vendor headers and `src/lib.hpp`, the same text in USearch, UForm and UStore apart from the project prefix, which `.githooks/selftest --siblings` compares.
+A stream queues and a device describes: a `stream_t` holds one listed GPU's queuing state, and every device fact lives once in `gpu_runtime_t`, never copied into an executor.
 
 No engine compares executor addresses to pick a path; the C layer may refuse an arena or plan used on another executor than its own in a one-line `if (... ->executor != ...)` guard, and `.githooks/pre-commit` refuses any other added `executor ==` or `executor !=` under `src/` and `include/`.
 An index owns its media, never an executor: it keys its media list by a `media_list_key_t`, 64 bits from `media_identity_from_entropy()` drawn when it opens the list and the swap epoch its readers bracket, which a view leaves at zero.
@@ -296,6 +298,7 @@ Spin only on completions the call itself submitted, and wait in the kernel for e
 The library never names cores: threads and staging go on the memory domain the caller names, else the one the media sit on, inside the creating thread's affinity mask.
 Every executor covers its own core set, so callers share a machine by giving each executor its own cores.
 Residency is a type of the data handle: an executor of another residency answers `device_k`, a `NULL` executor on a residency whose queues `src/` cannot build per call, such as SPDK, answers `invalid_argument_k`, and one call runs per executor while a second answers `contended`.
+Freeing an arena is the one exception: it takes no claim, since it first waits out every call naming the arena, so its chunks belong to no running call, and a stream accepts their frees from any thread.
 One word names one concept in every U* library, and no word hands a thing over: say who owns it and until when it is valid.
 
 ### Hardening
@@ -305,7 +308,7 @@ One word names one concept in every U* library, and no word hands a thing over: 
 - A `NULL` executor runs the call on the calling thread. It creates no pool, thread, ring, SPDK queue pair or stream and probes no topology; its scratch and blocking queues live for that call only. Name an executor for calls that allocate nothing once warm.
 - No static, global, shared or thread-local pool, executor, queue set, stream or handle exists, stateless ones included: whoever needs one creates it and frees it.
 - A `*_free` waits for the calls naming its handle and releases memory; it reads and writes no drive, and durability comes only from the flush verb.
-- An executor owns its streams, created with it; a call without one uses the null legacy stream or is refused, and no second origin sits beside the owner.
+- An executor owns its streams, opened or adopted at creation, one per device; a call without one uses the null legacy stream or is refused, and no second origin sits beside the owner.
 - An engine creates, synchronizes and frees its own CUDA, HIP and Metal streams and allocates its own device and pinned memory; NumKong and StringZilla only provide kernels, which may still take an `nk_stream_t` or `sz_stream_t` handle.
 - Every arena is freed before its executor; a binding enforces the order by lifetime where its language can and documents it otherwise, never by reference counts.
 - A C struct change lands with every binding that lays the struct out by hand, checked field by field in review.

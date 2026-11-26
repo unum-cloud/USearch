@@ -315,7 +315,8 @@ struct vram_nvidia_kernels {
         return context.table_of(kernels_type_::bytes(), cuda_dense_kernel_speller_t {capability_k, vector_dtype_});
     }
     static expected<kernel_table_t const*> kernel_table_of(cuda_executor_t::stream_t const& stream) noexcept {
-        return stream.table_of(kernels_type_::bytes(), cuda_dense_kernel_speller_t {capability_k, vector_dtype_});
+        return stream.kernels->table_of(stream.handle.api(), static_cast<int>(stream.ordinal), kernels_type_::bytes(),
+                                        cuda_dense_kernel_speller_t {capability_k, vector_dtype_});
     }
 
     /** A mapped part a load reads, through cuFile where its file registered. */
@@ -366,7 +367,7 @@ struct vram_nvidia_kernels {
             staging_ = cuda_make_unique(cuda_device_allocator_t {stream}, bytes);
             if (!staging_) return status_code_t::success_k;
             // cuFile writes from the host, so the stream's allocation must finish first.
-            cuda_event_t allocated {*stream.api};
+            cuda_event_t allocated {stream.handle.api()};
             if (failed(allocated.record(stream.handle)) || failed(allocated.wait())) return status_code_t::device_k;
             cufile_api_t const& api = registered->file.api();
             if (cufile_register_staging(api, staging_.get(), bytes) == cufile_staging_t::registered_k) cufile_ = &api;
@@ -1219,6 +1220,7 @@ struct vram_nvidia_index {
     std::size_t dimensions() const noexcept { return core_.dimensions(); }
     device_specs_t const& device_specs() const noexcept { return core_.device_specs(); }
     cuda_api_t const& api() const noexcept { return core_.api(); }
+    cuda_extensions_t const& extensions() const noexcept { return core_.extensions(); }
     nk_kernel_kind_t kernel() const noexcept { return core_.kernel(); }
     bool stores_norms() const noexcept { return core_.stores_norms(); }
     std::size_t row_bytes() const noexcept { return core_.row_bytes(); }

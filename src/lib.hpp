@@ -1561,14 +1561,22 @@ constexpr gpu_class_mask_t gpu_class_bit(gpu_class_t gpu_class) noexcept {
     return gpu_class_mask_t {1} << static_cast<util::u32_t>(gpu_class);
 }
 
-/** The GPU side of the process, built at its first VRAM call: every vendor's driver, and every
- *  device they report, NVIDIA first, then AMD, then Apple, a device's position here being its
- *  USearch ordinal, beside the classes whose units its loader took; a device no class runs on is
- *  listed too, and refuses work. */
+using util::kernel_tables;
+
+#pragma region Shared VRAM
+
+/** The GPU side of the process, built at its first VRAM call: every vendor's driver, every device
+ *  they report, NVIDIA first, then AMD, then Apple, a device's position here being its ordinal in
+ *  the C interface, the classes whose bundles loaded on each, and every vendor's kernels, loaded
+ *  once per device and shared by every executor there. A device no class runs on is listed too and
+ *  refuses all work. */
 struct gpu_runtime_t {
     util::gpu_drivers_t drivers;
     util::gpu_device_t devices[3 * util::gpu_devices_capacity_k];
     gpu_class_mask_t loaded[3 * util::gpu_devices_capacity_k] = {};
+    kernel_tables<util::cuda_module_t> cuda_kernels;
+    kernel_tables<util::hip_module_t> hip_kernels;
+    kernel_tables<util::metal_module_t> metal_kernels;
     std::size_t devices_count = 0;
 
     gpu_runtime_t() noexcept;
@@ -1589,10 +1597,21 @@ inline std::span<util::gpu_device_t const> gpu_devices() noexcept {
     return {runtime.devices, runtime.devices_count};
 }
 
-/** The classes whose units load on each device @ref gpu_devices lists, asked once at listing. */
+/** The classes whose bundles load on each device @ref gpu_devices lists, asked once at listing. */
 inline std::span<gpu_class_mask_t const> gpu_classes_loaded() noexcept {
     gpu_runtime_t const& runtime = gpu_runtime();
     return {runtime.loaded, runtime.devices_count};
+}
+
+#pragma endregion Shared VRAM
+
+/** USearch's optional entries of the vendor @p executor drives, which a shard's storage maps
+ *  through. */
+inline util::cuda_extensions_t const& gpu_extensions_of(util::cuda_executor_t const&) noexcept {
+    return gpu_drivers().extensions.cuda;
+}
+inline util::hip_extensions_t const& gpu_extensions_of(util::hip_executor_t const&) noexcept {
+    return gpu_drivers().extensions.hip;
 }
 
 /** Whether the build compiled device code for @p gpu_class, as CMake decided and told the dispatch
@@ -1713,14 +1732,6 @@ inline bool gpu_class_serves(gpu_class_t gpu_class, util::gpu_device_t const& de
     }
 }
 
-inline gpu_runtime_t::gpu_runtime_t() noexcept {
-    devices_count = util::list_gpu_devices(drivers, devices);
-    for (std::size_t position = 0; position != devices_count; ++position)
-        for (usearch_gpu_class_t const gpu_class : gpu_classes_k)
-            if (gpu_class_serves(static_cast<gpu_class_t>(gpu_class), devices[position], drivers))
-                loaded[position] |= gpu_class_bit(static_cast<gpu_class_t>(gpu_class));
-}
-
 /** The class a GPU class extends, the next one down its own lineage, or @c unknown_k past the
  *  lineage's root: the oldest class of each vendor, and CDNA5, which roots its own lineage on the
  *  ROCm floor, since it drops instructions CDNA3 and CDNA4 keep. */
@@ -1793,6 +1804,23 @@ inline gpu_class_t pick_gpu_class(util::gpu_vendor_t vendor, gpu_class_mask_t lo
     case util::gpu_vendor_t::amd_k: return pick_gpu_class(amd_ladder_t {}, loaded, ceiling);
     case util::gpu_vendor_t::apple_k: return pick_gpu_class(apple_ladder_t {}, loaded, ceiling);
     default: return gpu_class_t::unknown_k;
+    }
+}
+
+/** Lists every device the drivers reach, but a vendor whose optional entries USearch's storage
+ *  needs are missing, and keeps the classes whose bundles each one's loader takes. */
+inline gpu_runtime_t::gpu_runtime_t() noexcept {
+    util::gpu_device_t listed[3 * util::gpu_devices_capacity_k];
+    std::size_t const listed_count = util::list_gpu_devices(drivers, listed);
+    for (std::size_t position = 0; position != listed_count; ++position) {
+        util::gpu_device_t const& device = listed[position];
+        if ((device.vendor == util::gpu_vendor_t::nvidia_k && !drivers.extensions.cuda) ||
+            (device.vendor == util::gpu_vendor_t::amd_k && !drivers.extensions.hip))
+            continue;
+        for (usearch_gpu_class_t const gpu_class : gpu_classes_k)
+            if (gpu_class_serves(static_cast<gpu_class_t>(gpu_class), device, drivers))
+                loaded[devices_count] |= gpu_class_bit(static_cast<gpu_class_t>(gpu_class));
+        devices[devices_count++] = device;
     }
 }
 
@@ -1977,6 +2005,25 @@ inline std::size_t named_count(usearch_vram_options_t const& vram) noexcept {
  *  round-robin, device zero when it names none. */
 inline std::size_t named_ordinal(usearch_vram_options_t const& vram, std::size_t shard) noexcept {
     return vram.devices && vram.devices_count ? static_cast<std::size_t>(vram.devices[shard % vram.devices_count]) : 0;
+}
+
+/** Writes into @p into the listing positions an executor naming no devices drives: the first
+ *  device with a class under @p ceiling, then each later device of its vendor while every device
+ *  taken still shares a class under the ceiling, so the executor spans no devices lacking one. */
+inline util::status_t every_known_gpu(usearch_gpu_class_t ceiling, util::growing_buffer<std::int32_t>& into) noexcept {
+    std::span<util::gpu_device_t const> const listed = gpu_devices();
+    std::span<gpu_class_mask_t const> const loaded = gpu_classes_loaded();
+    if (failed(into.reserve_exactly(listed.size()))) return util::status_code_t::out_of_memory_k;
+    std::size_t first = 0;
+    while (first != listed.size() &&
+           pick_gpu_class(listed[first].vendor, loaded[first], ceiling) == gpu_class_t::unknown_k)
+        ++first;
+    gpu_class_mask_t shared = first != listed.size() ? loaded[first] : 0;
+    for (std::size_t position = first; position != listed.size(); ++position)
+        if (listed[position].vendor == listed[first].vendor &&
+            pick_gpu_class(listed[first].vendor, shared & loaded[position], ceiling) != gpu_class_t::unknown_k)
+            shared &= loaded[position], into.push_back_reserved(static_cast<std::int32_t>(position));
+    return util::status_code_t::success_k;
 }
 
 template <gpu_class_t... classes_>

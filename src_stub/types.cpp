@@ -201,9 +201,17 @@ void usearch_executor_for_vram(usearch_executor_for_vram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
     if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
-    if (reject_if(arguments->streams, usearch_status_unsupported_k, "The executor drives only its own streams",
-                  outcome))
+    usearch_vram_options_t const& vram = arguments->vram;
+    bool const named = vram.devices && vram.devices_count;
+    if (reject_if(arguments->streams && !named, usearch_status_invalid_argument_k,
+                  "Streams pair with the devices named beside them", outcome))
         return;
+    // Two adopted streams on one device would leave one of them unowned.
+    for (std::size_t later = 1; arguments->streams && named && later != vram.devices_count; ++later)
+        for (std::size_t earlier = 0; earlier != later; ++earlier)
+            if (reject_if(vram.devices[earlier] == vram.devices[later], usearch_status_invalid_argument_k,
+                          "Each adopted stream needs its own device", outcome))
+                return;
     propagate_error(usearch_status_device_k, outcome, "This build has no GPU backends");
 }
 

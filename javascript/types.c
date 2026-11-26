@@ -766,7 +766,7 @@ static napi_value usearch_js_executor_for_vram(napi_env env, napi_callback_info 
         }
         if (streams_count != for_vram.vram.devices_count) {
             free(ordinals);
-            usearch_js_throw(env, usearch_status_shape_mismatch_k, "The streams must name one per device");
+            usearch_js_throw(env, usearch_status_invalid_argument_k, "The streams must name one per device");
             return NULL;
         }
         streams = (void**)calloc(streams_count ? streams_count : 1, sizeof(void*));

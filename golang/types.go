@@ -1042,20 +1042,23 @@ func ExecutorForNvme(
 	return executorOf(block(&call, nil))
 }
 
-// ExecutorForVram opens one non-blocking stream on every named device, created with the executor
-// and destroyed when it closes, all of them driven by the one host thread that calls the verbs -
-// which is why it takes no thread count.
+// ExecutorForVram opens or adopts one non-blocking stream on every named device, destroyed when the
+// executor closes, all of them driven by the one host thread that calls the verbs - which is why it
+// takes no thread count. Empty devices drives every listed device of the first vendor with a known
+// class.
 //
-// Streams is empty; one CUDA stream per device in devices order is declared for the caller's own
-// streams, which answer StatusUnsupported, since the executor drives only its own. Zero
-// scratchLimit lets scratch grow as geometry asks.
+// Streams is empty, or the caller's CUDA or HIP streams, or Metal command queues on Apple, one per
+// device in devices order. A CUDA or HIP stream becomes the executor's, destroyed when it closes; a
+// Metal queue is retained, the executor releasing its own reference while the caller keeps theirs.
+// On an error every stream stays the caller's. Zero scratchLimit lets scratch grow as geometry
+// asks, per device.
 // A gpuClassCeiling no named device loads is refused with StatusUnsupported.
 func ExecutorForVram(
 	devices []int32, gpuClassCeiling GPUClass, streams []unsafe.Pointer, scratchLimit uint,
 ) (*Executor, error) {
 	// The library reads one stream per device from any non-nil pointer, so only this side sees a short list.
 	if len(streams) != 0 && len(streams) != len(devices) {
-		return nil, fail(StatusShapeMismatch, "pass no streams or one per device")
+		return nil, fail(StatusInvalidArgument, "pass no streams or one per device")
 	}
 	var call callWithResult[C.usearch_executor_t]
 	arguments := open[C.usearch_executor_for_vram_t](&call)
