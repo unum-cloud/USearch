@@ -96,6 +96,8 @@ private_surface_tests="bench/dense/ram_metric.cpp test/dense/ram_indexes.hpp tes
     test/sequence/vram_index.cpp test/shapes/vram_index.cpp"
 # The Python test files that are scaffolding, the only ones that may skip from inside a function.
 python_test_scaffolding_paths="test/conftest.py test/base.py"
+# The one `atomic_size_t` member of the Python executor that counts its live arenas, so `close` refuses while one lives.
+python_executor_arena_count='arenas'
 # The GPU vendors whose `<PREFIX>_ARCH_<VENDOR>_` switches one unit may carry together, empty without GPU code.
 gpu_vendor_switches='CUDA|ROCM|METAL'
 
@@ -3531,10 +3533,17 @@ check_per_thread_streams_absent() {
 # Rejects a reference count in a binding source, a counting smart pointer or a count member kept on a
 # handle, such as `atomic_size_t holds` or `size_t arenas`, because arenas and handles are freed in
 # order, enforced by lifetime where the language can and documented otherwise; a plain reference from
-# an arena object to its executor object passes.
+# an arena object to its executor object passes. The one count admitted is an `atomic_size_t` member a
+# Python source names as the project's `python_executor_arena_count` setting does, because a Python
+# executor refuses to close while an arena made on it is alive and can only learn that by counting.
 check_binding_reference_counts_absent() {
     local counted='(holds|holders|arenas|executors|references|refs|users|ref_count|refcount|live(_[a-z_]+)?)' counts
-    counts=$(printf '%s\n' "$binding_added_code" | grep -E "(^|[^A-Za-z0-9_])(Arc|Rc)<|shared_ptr<|(size_t|atomic_[a-z_]+|_Atomic|int|unsigned|long|u?int[0-9]+_t|Py_ssize_t)[^;(=]*[[:space:]*]$counted[[:space:]]*;|var[[:space:]]+$counted[[:space:]]*:[[:space:]]*U?Int|(this\.|#)$counted[[:space:]]*=[[:space:]]*0" ||
+    local admitted='^$'
+    case "$staged_path" in
+    python/*) [ -z "${python_executor_arena_count:-}" ] ||
+        admitted="^\+[[:space:]]*atomic_size_t[[:space:]]+$python_executor_arena_count[[:space:]]*;" ;;
+    esac
+    counts=$(printf '%s\n' "$binding_added_code" | grep -vE "$admitted" | grep -E "(^|[^A-Za-z0-9_])(Arc|Rc)<|shared_ptr<|(size_t|atomic_[a-z_]+|_Atomic|int|unsigned|long|u?int[0-9]+_t|Py_ssize_t)[^;(=]*[[:space:]*]$counted[[:space:]]*;|var[[:space:]]+$counted[[:space:]]*:[[:space:]]*U?Int|(this\.|#)$counted[[:space:]]*=[[:space:]]*0" ||
         true)
     [ -z "$counts" ] || reject_with_reason "$counts" \
         "$staged_path counts references in a binding; arenas and handles are freed in order, enforced by" \
@@ -6306,8 +6315,13 @@ judge_paths_in_parallel() { # judge_paths_in_parallel <path>...
             for staged_path in "$@"; do
                 ordinal=$((ordinal + 1))
                 [ $(((ordinal - 1) % worker_count)) -eq "$worker" ] || continue
-                # A selftest carries one violation per rule by design.
-                [ "$staged_path" = .githooks/selftest ] || judge_path > "$results_directory/$ordinal"
+                # Rejects nothing in a selftest, because it carries one violation per rule by design, nor in a
+                # vendored standard header, because `c/<lib>/arrow_abi.h` and `python/dlpack.h` are Arrow's and
+                # DLPack's own text, kept verbatim and compared across the engines by `selftest --siblings`.
+                case "$staged_path" in
+                .githooks/selftest | c/*/arrow_abi.h | python/dlpack.h) ;;
+                *) judge_path > "$results_directory/$ordinal" ;;
+                esac
             done
             echo "$rejection_count" > "$results_directory/count-$worker"
         ) &
