@@ -23,7 +23,7 @@
 #include <span>    // `std::span` - the device list an executor opens over
 #include <utility> // `std::exchange`, `std::move`
 
-#include <forkunion/types.hpp> // `fu::spin_mutex_t` - the executor's hold
+#include <forkunion/locks.hpp> // `fu::spin_mutex_t` - the executor's hold
 
 #include "usearch/utilities/blocking_files.hpp" // `shared_library_t` - Metal opened at first use
 #include "usearch/utilities/ram_buffers.hpp"    // `growing_buffer` - an executor's streams and the pipeline registry

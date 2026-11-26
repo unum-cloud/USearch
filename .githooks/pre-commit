@@ -5599,9 +5599,9 @@ check_python_array_annotations() {
 
 # A library type derives from none: a base couples one type's layout and lifetime to another's, so
 # shared behavior is a member the type holds. Nor does library code lock through the standard
-# mutexes and condition variables: it serializes through the ForkUnion locks and waiters its caller
-# passes. A `std::formatter` specialization keeps its parent, since its qualified name never
-# matches.
+# guards, threads and condition variables: it serializes through the ForkUnion locks and waiters its
+# caller passes, and `check_new_mutexes` judges the mutexes themselves. A `std::formatter`
+# specialization keeps its parent, since its qualified name never matches.
 check_inheritance_and_locks() {
     local derived locks
     derived=$(printf '%s\n' "$staged_added_text" | blank_c_comments_preserving_columns | sed -E 's/"([^"\\]|\\.)*"//g' |
@@ -5610,7 +5610,7 @@ check_inheritance_and_locks() {
     [ -z "$derived" ] || reject_with_reason "$derived" \
         "$staged_path derives one type from another in library code; hold the shared part as a member:"
     locks=$(printf '%s\n' "$staged_added_text" | blank_c_comments_preserving_columns |
-        grep -E '\bstd::([a-z_]*mutex|lock_guard|unique_lock|shared_lock|scoped_lock|condition_variable[a-z_]*)\b|#[[:space:]]*include[[:space:]]*<(thread|mutex|shared_mutex|condition_variable)>' || true)
+        grep -E '\bstd::(lock_guard|unique_lock|shared_lock|scoped_lock|condition_variable[a-z_]*)\b|#[[:space:]]*include[[:space:]]*<(thread|condition_variable)>' || true)
     [ -z "$locks" ] || reject_with_reason "$locks" \
         "$staged_path locks through the standard library in library code; take the ForkUnion lock or waiter the caller passes:"
 }
@@ -5956,7 +5956,32 @@ check_warps_carry_no_generation() {
 }
 
 # Routes one staged file through the checks only USearch has.
+# Rejects a new lock other than `fu::fair_mutex_t` from `<forkunion/locks.hpp>`, because the engines share one fair,
+# parking lock; ask first for anything else. `fu::fair_mutex<waiter, ref>` passes, and so does `<mutex>` beside it for
+# `std::lock_guard`; a binding source the binding lock check reads is left to that check.
+check_new_mutexes() {
+    local locks='\bstd::(recursive_|timed_|recursive_timed_|shared_|shared_timed_)?mutex\b|#[[:space:]]*include[[:space:]]*<shared_mutex>|\bfu::spin_mutex_t\b|\bspin_shared_mutex|\bos_unfair_lock|\bpthread_mutex|\bPyMutex'
+    local hits
+    case "$staged_path" in
+    *[Tt]est*) ;;
+    python/* | cpp/*) ! declare -F check_binding_locks_absent > /dev/null || return 0 ;;
+    esac
+    grep -qE '\bfair_mutex(_t\b|<)' "$staged_text_path" || locks="$locks|#[[:space:]]*include[[:space:]]*<mutex>"
+    hits=$(if speaks_c_comments "$staged_path"; then cat "$staged_added_code_path"; else
+        printf '%s\n' "$staged_added_text" | grep -vE "$added_comment_line_pattern"; fi | grep -E "$locks" || true)
+    [ -z "$hits" ] || reject_with_reason "$hits" \
+        "$staged_path adds a lock other than fu::fair_mutex_t from <forkunion/locks.hpp>; ask first, or protect" \
+        "            the state by ownership, an atomic protocol or fu::fair_mutex_t:"
+}
+
 run_project_checks() {
+    case "$staged_path" in
+    include/* | src/* | cpp/* | c/* | python/*)
+        case "$staged_path" in
+        *.h | *.hpp | *.c | *.cpp | *.cc | *.cxx | *.cu | *.cuh | *.hip | *.m | *.mm) check_new_mutexes ;;
+        esac
+        ;;
+    esac
     run_binding_checks
     case "$staged_path" in
     src/*.h | src/*.hpp | src/*.c | src/*.cpp | src/*.cu | src/*.cuh | src/*.hip) check_free_io_absent ;;

@@ -13,11 +13,11 @@
  *  index and assumes no constructor shape, so the same scenarios compile under host
  *  compilers and nvcc.
  *
- *  Allocators are tested by construction: a counting allocator flows through the vectors &
- *  neighbors parameters to prove propagation, tallying live bytes into a ledger that must
- *  balance to zero when each scenario's scope closes. Parallel scenarios use ForkUnion's
- *  default flat pool - no NUMA machinery in tests, except the sharded-index scenarios, which
- *  need a real topology because an executor colocates each arena with the thread that walks it.
+ *  Allocators are tested by construction: a counting allocator flows through the vectors and
+ *  neighbors parameters to prove propagation, tallying live bytes into a ledger that must balance
+ *  to zero when each scenario's scope closes. Parallel scenarios use ForkUnion's pool over the
+ *  harvested topology, and the sharded-index scenarios lean on it, because an executor colocates
+ *  each arena with the thread that walks it.
  */
 #pragma once
 
@@ -37,7 +37,8 @@
 
 #include <fmt/format.h>
 
-#include <forkunion.hpp>
+#include <forkunion/atomics.hpp>   // `fu::standard_atomic_ref` - the flags and counters threads share
+#include <forkunion/forkunion.hpp> // `fu::topology_t`, `fu::pool_t` - the threads a case races
 #include <numkong/numkong.h>
 #include <numkong/numkong.hpp>
 
@@ -1333,13 +1334,15 @@ void dense_expect_pooled_save(index_type_& index, typename index_type_::saved_sh
     fu::standard_atomic_ref<std::size_t> const cursor {cursor_position};
     fu::standard_atomic_ref<std::size_t> const lane_failures {lane_failures_count};
     constexpr std::size_t lanes_count = 3;
-    fu::flat_pool_t pool;
-    if (fu::failed(pool.spawn(lanes_count))) return void(expect_true(false));
-    pool.for_threads([&](std::size_t) noexcept {
+    fu::topology_t topology;
+    fu::pool_t pool;
+    if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, lanes_count, fu::caller_inclusive_k)))
+        return void(expect_true(false));
+    expect_true(!fu::failed(pool.for_threads([&](std::size_t) noexcept {
         auto const tasks = plan.tasks();
         for (std::size_t position = cursor.fetch_add(1); position < tasks.size(); position = cursor.fetch_add(1))
             if (failed(plan.save(tasks[position]))) lane_failures.store_add(1);
-    });
+    })));
     expect_equal(lane_failures_count, 0u);
     expect_equal(plan.finish(), status_code_t::success_k);
     expect_true(std::memcmp(pooled_vectors.data(), saved_vectors.data(),
@@ -2846,17 +2849,20 @@ void test_dense_indexes_attend(u64_t seed) {
 
 #pragma region Races
 
-/** Concurrent construction on ForkUnion's default flat pool: distinct slices per thread, one
- *  traversal context each, then ID-uniqueness and sampled self-recall checks. A device index admits
- *  one batch at a time and answers the overlapping ones with @c contended_k, which retry. */
+/** Concurrent construction on ForkUnion's pool: distinct slices per thread, one traversal context
+ *  each, then ID-uniqueness and sampled self-recall checks. A device index admits one batch at a
+ *  time and answers the overlapping ones with @c contended_k, which retry. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 void dense_expect_concurrent_build(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     std::size_t const writer_threads_count = 4;
     std::size_t const nodes_count = writer_threads_count * dense_thread_nodes_k;
 
-    fu::flat_pool_t pool;
-    if (fu::failed(pool.spawn(writer_threads_count))) return void(expect_true(false));
+    fu::topology_t topology;
+    fu::pool_t pool;
+    if (fu::failed(topology.harvest()) ||
+        fu::failed(pool.spawn(topology, writer_threads_count, fu::caller_inclusive_k)))
+        return void(expect_true(false));
 
     std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
     index_type_& index = *index_ptr;
@@ -2869,7 +2875,7 @@ void dense_expect_concurrent_build(make_index_type_ const& make_index, allocatio
     std::size_t thread_failures = 0;
 
     std::vector<typename index_type_::key_t> const keys = dense_keys<index_type_>(nodes_count);
-    pool.for_threads([&](std::size_t thread) noexcept {
+    expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
         if (thread >= writer_threads_count) return;
         status_t status = status_code_t::contended_k;
         while (status == status_code_t::contended_k)
@@ -2880,7 +2886,7 @@ void dense_expect_concurrent_build(make_index_type_ const& make_index, allocatio
                          .status;
         if (status != status_code_t::success_k) fu::standard_atomic_ref<std::size_t>(thread_failures).store_add(1);
         assert_no_locks_held();
-    });
+    })));
 
     expect_equal(thread_failures, 0u);
     expect_equal(index.size(), nodes_count);
@@ -2925,8 +2931,11 @@ void dense_expect_concurrent_search(make_index_type_ const& make_index, allocati
     std::size_t const nodes_count = writer_threads_count * dense_thread_nodes_k;
     std::size_t const expansion_bound = static_cast<std::size_t>(connectivity_16_k) * 2;
 
-    fu::flat_pool_t pool;
-    if (fu::failed(pool.spawn(writer_threads_count + 1))) return void(expect_true(false));
+    fu::topology_t topology;
+    fu::pool_t pool;
+    if (fu::failed(topology.harvest()) ||
+        fu::failed(pool.spawn(topology, writer_threads_count + 1, fu::caller_inclusive_k)))
+        return void(expect_true(false));
 
     std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
     index_type_& index = *index_ptr;
@@ -2943,7 +2952,7 @@ void dense_expect_concurrent_search(make_index_type_ const& make_index, allocati
     fu::standard_atomic_ref<std::size_t> const thread_failures {thread_failures_count};
 
     std::vector<typename index_type_::key_t> const keys = dense_keys<index_type_>(nodes_count);
-    pool.for_threads([&](std::size_t thread) noexcept {
+    expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
         if (thread != 0 && thread <= writer_threads_count) {
             status_t status = status_code_t::contended_k;
             while (status == status_code_t::contended_k)
@@ -2988,7 +2997,7 @@ void dense_expect_concurrent_search(make_index_type_ const& make_index, allocati
                     if (threads.contexts[0].results[match].node_id % 2 != 1) thread_failures.store_add(1);
         }
         assert_no_locks_held();
-    });
+    })));
 
     expect_equal(thread_failures.load(), 0u);
     expect_equal(index.size(), nodes_count);
@@ -3973,12 +3982,14 @@ void test_dense_indexes_pooled_save(u64_t seed) {
     std::size_t cursor_position = 0, lane_failures_count = 0;
     fu::standard_atomic_ref<std::size_t> const cursor {cursor_position};
     fu::standard_atomic_ref<std::size_t> const lane_failures {lane_failures_count};
-    fu::flat_pool_t pool;
-    if (fu::failed(pool.spawn(3))) return void(expect_true(false));
-    pool.for_threads([&](std::size_t) noexcept {
+    fu::topology_t topology;
+    fu::pool_t pool;
+    if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, 3, fu::caller_inclusive_k)))
+        return void(expect_true(false));
+    expect_true(!fu::failed(pool.for_threads([&](std::size_t) noexcept {
         for (std::size_t position = cursor.fetch_add(1); position < tasks.size(); position = cursor.fetch_add(1))
             if (failed(plan.save(tasks[position]))) lane_failures.store_add(1);
-    });
+    })));
     expect_equal(lane_failures_count, 0u);
     expect_equal(plan.finish(), status_code_t::success_k);
 
@@ -4292,16 +4303,18 @@ void test_dense_indexes_concurrent_add(u64_t seed, placement_types_&... placemen
             keys(which, row) = dense_key<key_t>(1 + which * rows_per_executor + row);
     }
 
-    fu::flat_pool_t pool;
-    if (fu::failed(pool.spawn(executors_count))) return void(expect_true(false));
+    fu::topology_t topology;
+    fu::pool_t pool;
+    if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, executors_count, fu::caller_inclusive_k)))
+        return void(expect_true(false));
     std::array<status_t, executors_count> outcomes {};
-    pool.for_threads([&](std::size_t thread) noexcept {
+    expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
         if (thread >= executors_count) return;
         outcomes[thread] =
             indexes.insert(to_span(keys.row(thread).as_vector()), slices[thread].view(), drivers[thread].executor)
                 .status;
         assert_no_locks_held();
-    });
+    })));
     for (std::size_t which = 0; which != executors_count; ++which) {
         if (outcomes[which] == status_code_t::contended_k && !a_ram_collection<indexes_type_>)
             outcomes[which] = indexes
@@ -4376,13 +4389,15 @@ void test_dense_indexes_search_race(u64_t seed) {
     nk::vector<key_t> keys = make_vector<key_t>(nodes_count);
     for (std::size_t row = 0; row != nodes_count; ++row) keys[row] = dense_key<key_t>(1 + row);
 
-    fu::flat_pool_t pool;
-    if (fu::failed(pool.spawn(2))) return void(expect_true(false));
+    fu::topology_t topology;
+    fu::pool_t pool;
+    if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, 2, fu::caller_inclusive_k)))
+        return void(expect_true(false));
     bool writer_done_word = false;
     fu::standard_atomic_ref<bool> const writer_done {writer_done_word};
     std::size_t thread_failures_count = 0;
     fu::standard_atomic_ref<std::size_t> const thread_failures {thread_failures_count};
-    pool.for_threads([&](std::size_t thread) noexcept {
+    expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
         if (thread == 0) {
             for (std::size_t first = 0; first != nodes_count; first += dense_thread_nodes_k) {
                 auto [result, status] = indexes.insert(
@@ -4418,7 +4433,7 @@ void test_dense_indexes_search_race(u64_t seed) {
             if (indexes.size() % dense_thread_nodes_k) thread_failures.store_add(1);
         }
         assert_no_locks_held();
-    });
+    })));
     expect_equal(thread_failures.load(), 0u);
     expect_equal(indexes.size(), nodes_count);
 }
@@ -4439,8 +4454,11 @@ void dense_expect_save_race(make_index_type_ const& make_index, allocation_ledge
     std::size_t const nodes_ceiling = prefill_rows_count + inserter_threads_count * (dense_thread_nodes_k + //
                                                                                      spare_rows_count);
 
-    fu::flat_pool_t pool;
-    if (fu::failed(pool.spawn(inserter_threads_count + 2))) return void(expect_true(false));
+    fu::topology_t topology;
+    fu::pool_t pool;
+    if (fu::failed(topology.harvest()) ||
+        fu::failed(pool.spawn(topology, inserter_threads_count + 2, fu::caller_inclusive_k)))
+        return void(expect_true(false));
 
     std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
     index_type_& index = *index_ptr;
@@ -4561,11 +4579,11 @@ void dense_expect_save_race(make_index_type_ const& make_index, allocation_ledge
         }
         assert_no_locks_held();
     };
-    pool.for_threads([&](std::size_t thread) noexcept {
+    expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
         if (thread == 0) return saver_thread();
         if (thread <= inserter_threads_count) return inserter_thread(thread);
         if (thread == inserter_threads_count + 1) return searcher_thread(thread);
-    });
+    })));
 
     expect_equal(thread_failures.load(), 0u);
     expect_true(contended_saves.load() + settled_saves.load() > 0);
@@ -4722,13 +4740,15 @@ void dense_expect_cursor(make_index_type_ const& make_index, allocation_ledger_t
 
     // A cursor thread races an inserting thread; every visited ID stays below that pass's
     // snapshot, and the parked cursor re-anchors past the end after the race.
-    fu::flat_pool_t pool;
-    if (fu::failed(pool.spawn(2))) return void(expect_true(false));
+    fu::topology_t topology;
+    fu::pool_t pool;
+    if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, 2, fu::caller_inclusive_k)))
+        return void(expect_true(false));
     std::size_t thread_failures_count = 0;
     fu::standard_atomic_ref<std::size_t> const thread_failures {thread_failures_count};
     bool writer_done_word = false;
     fu::standard_atomic_ref<bool> const writer_done {writer_done_word};
-    pool.for_threads([&](std::size_t thread) noexcept {
+    expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
         if (thread == 0) {
             typename index_type_::traversal_context_t lane_context {{}};
             for (std::size_t ordinal = 0; ordinal != racing_inserts_count; ++ordinal) {
@@ -4755,7 +4775,7 @@ void dense_expect_cursor(make_index_type_ const& make_index, allocation_ledger_t
             for (; racing_cursor; ++racing_cursor)
                 if (racing_cursor.id() >= snapshot) thread_failures.store_add(1);
         } while (!writer_done.load(std::memory_order_acquire));
-    });
+    })));
     expect_equal(thread_failures.load(), 0u);
     parked_cursor.refresh();
     expect_true(!parked_cursor);
@@ -5052,8 +5072,11 @@ void dense_expect_overflow_race(make_index_type_ const& make_index, allocation_l
     std::size_t const contested_rows_count = 2 * batch_rows_count;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
 
-    fu::flat_pool_t pool;
-    if (fu::failed(pool.spawn(racing_threads_count))) return void(expect_true(false));
+    fu::topology_t topology;
+    fu::pool_t pool;
+    if (fu::failed(topology.harvest()) ||
+        fu::failed(pool.spawn(topology, racing_threads_count, fu::caller_inclusive_k)))
+        return void(expect_true(false));
 
     std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
     index_type_& index = *index_ptr;
@@ -5081,7 +5104,7 @@ void dense_expect_overflow_race(make_index_type_ const& make_index, allocation_l
 
     std::vector<typename index_type_::key_t> const keys = dense_keys<index_type_>(racing_threads_count *
                                                                                   batch_rows_count);
-    pool.for_threads([&](std::size_t thread) noexcept {
+    expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
         if (thread >= racing_threads_count) return;
         thread_statuses[thread] = index
                                       .insert({keys.data() + thread * batch_rows_count, batch_rows_count},
@@ -5089,7 +5112,7 @@ void dense_expect_overflow_race(make_index_type_ const& make_index, allocation_l
                                               threads.contexts[thread])
                                       .status;
         assert_no_locks_held();
-    });
+    })));
 
     std::size_t winners_count = 0;
     std::size_t refused_thread = racing_threads_count;

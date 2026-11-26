@@ -30,6 +30,7 @@
 
 #include <forkunion/forkunion.h> // `fu_memory_domain_id_t`
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the default reference
+#include <forkunion/locks.hpp>   // `fu::spin_mutex_t` - the dispensing lock
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_buffers.hpp"       // `growing_buffer` - the plans' per-thread state

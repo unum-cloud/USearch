@@ -29,7 +29,7 @@
 #include <forkunion/forkunion.hpp>    // `fu::topology_t` - the executor factories' discovery
 #include <forkunion/atomics.hpp>      // `fu::standard_atomic_ref` & kin - the classes' atomic references
 #include <forkunion/capabilities.hpp> // `fu::x86_pause_t`, `fu::arm64_wfe_t` & waiter kin
-#include <forkunion/types.hpp>        // `fu::spin_mutex_t` - the ticks' lock
+#include <forkunion/locks.hpp>        // `fu::spin_mutex_t` - the ticks' lock
 #include <numkong/capabilities.h>     // `nk_capability_t`, `nk_configure_thread_cpu` - compute masks, AMX grant
 #include <stringzilla/capabilities.h> // `sz_capability_t` - the basic modalities' kit masks
 #include <numkong/vector.hpp>         // `nk::vector_view` - the rows a value lookup resolves

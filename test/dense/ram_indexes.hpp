@@ -112,8 +112,10 @@ static void test_ram_indexes_gather_refusals(u64_t seed) {
 
     dense_indexes_row_driver<indexes_type_> rows_driver {target, drivers[0]};
     expect_true(succeeded(rows_driver.status));
-    fu::flat_pool_t pool;
-    if (fu::failed(pool.spawn(2))) return void(expect_true(false));
+    fu::topology_t topology;
+    fu::pool_t pool;
+    if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, 2, fu::caller_inclusive_k)))
+        return void(expect_true(false));
     std::size_t refused = 0, unexpected = 0, gathered_entries = 0;
     for (std::size_t round = 0; round != rounds && !refused; ++round) {
         // A consumed source stays closed and sealed, so every round gathers a fresh one.
@@ -127,7 +129,7 @@ static void test_ram_indexes_gather_refusals(u64_t seed) {
         }
         bool gathering = false, gathered = false;
         status_t gather_status = status_code_t::success_k;
-        pool.for_threads([&](std::size_t thread) noexcept {
+        expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
             if (thread == 0) {
                 fu::standard_atomic_ref<bool>(gathering).store(true, std::memory_order_release);
                 do gather_status = ram_indexes_gather(target, source, drivers[1].executor).status;
@@ -150,7 +152,7 @@ static void test_ram_indexes_gather_refusals(u64_t seed) {
                     std::this_thread::yield();
                 }
             }
-        });
+        })));
         expect_equal(gather_status, status_code_t::success_k);
         expect_equal(source.size(), 0u);
         gathered_entries += part;
@@ -476,9 +478,11 @@ static void test_ram_indexes_recut(u64_t seed) {
     expected<reshard_report_t> recut {};
     bool recutting = true;
     std::size_t miscounted = 0;
-    fu::flat_pool_t pool;
-    if (fu::failed(pool.spawn(2))) return void(expect_true(false));
-    pool.for_threads([&](std::size_t thread) noexcept {
+    fu::topology_t topology;
+    fu::pool_t pool;
+    if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, 2, fu::caller_inclusive_k)))
+        return void(expect_true(false));
+    expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
         if (thread == 0) {
             recut = reshard(std::span<indexes_type_* const> {in_place}, std::span<indexes_type_* const> {in_place},
                             executor, halves);
@@ -488,7 +492,7 @@ static void test_ram_indexes_recut(u64_t seed) {
             for (std::size_t row = 0; fu::standard_atomic_ref<bool>(recutting).load(std::memory_order_acquire);
                  row = (row + 1) % rows)
                 miscounted += indexes.count(keys[row]) != 1;
-    });
+    })));
     expect_equal(miscounted, 0u);
     auto const [packed, packed_status] = recut;
     expect_equal(packed_status, status_code_t::success_k);
@@ -547,14 +551,16 @@ static void test_ram_indexes_clear_race(u64_t seed) {
     expect_true(succeeded(place_shards(indexes)));
     expect_true(succeeded(indexes.reserve({rows}).status));
 
-    fu::flat_pool_t pool;
-    if (fu::failed(pool.spawn(searchers_k + 1))) return void(expect_true(false));
+    fu::topology_t topology;
+    fu::pool_t pool;
+    if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, searchers_k + 1, fu::caller_inclusive_k)))
+        return void(expect_true(false));
     std::size_t foreign_count = 0, refused_count = 0;
     fu::standard_atomic_ref<std::size_t> const foreign {foreign_count}, refused {refused_count};
     for (std::size_t round = 0; round != rounds_k; ++round) {
         expect_true(succeeded(indexes.insert(to_span(keys), vectors.view(), drivers[0].executor).status));
         bool cleared = false;
-        pool.for_threads([&](std::size_t thread) noexcept {
+        expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
             if (thread == 0) {
                 while (indexes.clear() == status_code_t::contended_k) std::this_thread::yield();
                 fu::standard_atomic_ref<bool>(cleared).store(true, std::memory_order_release);
@@ -576,7 +582,7 @@ static void test_ram_indexes_clear_race(u64_t seed) {
                         foreign.store_add(dense_key_number(found_keys[found]) < 1 ||
                                           dense_key_number(found_keys[found]) > rows);
             }
-        });
+        })));
         expect_equal(indexes.size(), 0u);
         expect_equal(indexes.count(keys[0]), 0u);
     }

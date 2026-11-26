@@ -15,8 +15,8 @@
  *  Allocators are tested by construction: one counting allocator flows through the whole index -
  *  records, neighbor lists, and the key multimap - and through the values the fixtures build, as
  *  @c make_values and @c make_handmade take it last, tallying live bytes into a ledger that must
- *  balance to zero when each scenario's scope closes. Parallel scenarios use ForkUnion's default
- *  flat pool.
+ *  balance to zero when each scenario's scope closes. Parallel scenarios use ForkUnion's pool over
+ *  the harvested topology.
  *
  *  Every scenario keys its streams through @ref stream_key under the run's seed and its own name, like
  *  @c "starved"; a scenario's further streams take distinct indices, and per-thread streams index by thread.
@@ -38,7 +38,8 @@
 
 #include <fmt/format.h>
 
-#include <forkunion.hpp>
+#include <forkunion/atomics.hpp>   // `fu::standard_atomic_ref` - the flags and counters threads share
+#include <forkunion/forkunion.hpp> // `fu::topology_t`, `fu::pool_t` - the threads a case races
 
 #include "harness.hpp"
 #include "usearch/basic/ram_index.hpp"
@@ -314,14 +315,17 @@ expected<basic_columns_storage<index_type_>> basic_saved_columns(index_type_& in
     return {std::move(storage), saved};
 }
 
-/** A ForkUnion flat pool as the glue's executor: one region per thread when the
+/** A ForkUnion pool as the glue's executor: one region per thread when the
  *  counts agree, the calling thread otherwise. */
 struct pooled_executor_t {
-    fu::flat_pool_t pool;
+    fu::pool_t pool;
     std::size_t threads = 0;
 
     status_t spawn(std::size_t count) noexcept {
-        if (fu::failed(pool.spawn(count))) return status_code_t::out_of_memory_k;
+        // A pool never keeps the topology it spawned over.
+        fu::topology_t topology;
+        if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, count, fu::caller_inclusive_k)))
+            return status_code_t::out_of_memory_k;
         threads = count;
         return status_code_t::success_k;
     }
@@ -332,7 +336,7 @@ struct pooled_executor_t {
             for (std::size_t task = 0; task != tasks; ++task) callback(task, 0, 0);
             return status_code_t::success_k;
         }
-        pool.for_threads([&](std::size_t thread) noexcept { callback(thread, thread, 0); });
+        expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept { callback(thread, thread, 0); })));
         return status_code_t::success_k;
     }
 };
@@ -1259,15 +1263,18 @@ void test_basic_snapshot_regions(u64_t seed) {
             expect_equal(plan.save({0, nodes_k + 1}, codec), status_code_t::config_mismatch_k);
             expect_equal(index.columns_extents(codec).status, status_code_t::contended_k); // The plan holds unique.
 
-            fu::flat_pool_t pool;
-            if (fu::failed(pool.spawn(regions.size()))) return void(expect_true(false));
+            fu::topology_t topology;
+            fu::pool_t pool;
+            if (fu::failed(topology.harvest()) ||
+                fu::failed(pool.spawn(topology, regions.size(), fu::caller_inclusive_k)))
+                return void(expect_true(false));
             std::size_t thread_failures = 0;
             // No lock-held check in these threads: the calling thread runs one thread itself
             // while legitimately holding the plan's unique side for the whole pool.
-            pool.for_threads([&](std::size_t thread) noexcept {
+            expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
                 if (plan.save(regions[thread], codec) != status_code_t::success_k)
                     fu::standard_atomic_ref<std::size_t>(thread_failures).store_add(1);
-            });
+            })));
             expect_equal(thread_failures, 0u);
             expect_equal(plan.finish(), status_code_t::success_k);
             expect_equal(plan.finish(), status_code_t::uninitialized_k); // Spent: no second unlock.
@@ -1292,13 +1299,16 @@ void test_basic_snapshot_regions(u64_t seed) {
             expect_equal(plan.finish(), status_code_t::config_mismatch_k); // Nothing covered yet.
             expect_equal(restored.size(), 0u);                             // Nothing published either.
 
-            fu::flat_pool_t pool;
-            if (fu::failed(pool.spawn(regions.size()))) return void(expect_true(false));
+            fu::topology_t topology;
+            fu::pool_t pool;
+            if (fu::failed(topology.harvest()) ||
+                fu::failed(pool.spawn(topology, regions.size(), fu::caller_inclusive_k)))
+                return void(expect_true(false));
             std::size_t thread_failures = 0;
-            pool.for_threads([&](std::size_t thread) noexcept {
+            expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
                 if (plan.load(regions[thread], codec) != status_code_t::success_k)
                     fu::standard_atomic_ref<std::size_t>(thread_failures).store_add(1);
-            });
+            })));
             expect_equal(thread_failures, 0u);
             expect_equal(restored.size(), 0u); // Still unpublished before the finish.
             expect_equal(plan.finish(), status_code_t::success_k);
@@ -1447,13 +1457,15 @@ void test_basic_plan_race(u64_t seed) {
             prober_done.store(true, std::memory_order_release);
         };
 
-        fu::flat_pool_t pool;
-        if (fu::failed(pool.spawn(3))) return void(expect_true(false));
-        pool.for_threads([&](std::size_t thread) noexcept {
+        fu::topology_t topology;
+        fu::pool_t pool;
+        if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, 3, fu::caller_inclusive_k)))
+            return void(expect_true(false));
+        expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
             if (thread == 0) return planner_thread();
             if (thread == 1) return inserter_thread();
             if (thread == 2) return prober_thread();
-        });
+        })));
         expect_equal(thread_failures.load(), 0u);
         expect_equal(index.size(), nodes_k + 1); // The parked insert placed after the finish.
         // The graph provably could not move under the hold: the held columns mirror the
@@ -1502,8 +1514,11 @@ void test_basic_plan_contention(u64_t seed) {
         auto const [extents, measure_status] = index.columns_extents(codec);
         expect_true(succeeded(measure_status));
 
-        fu::flat_pool_t pool;
-        if (fu::failed(pool.spawn(planner_threads_k))) return void(expect_true(false));
+        fu::topology_t topology;
+        fu::pool_t pool;
+        if (fu::failed(topology.harvest()) ||
+            fu::failed(pool.spawn(topology, planner_threads_k, fu::caller_inclusive_k)))
+            return void(expect_true(false));
         std::array<basic_columns_storage<index_t>, planner_threads_k> thread_storages;
         for (auto& thread_storage : thread_storages) thread_storage = basic_columns_storage<index_t> {extents};
 
@@ -1513,7 +1528,7 @@ void test_basic_plan_contention(u64_t seed) {
         std::size_t refusals_confirmed_count = 0, thread_failures_count = 0;
         fu::standard_atomic_ref<std::size_t> const refusals_confirmed {refusals_confirmed_count};
         fu::standard_atomic_ref<std::size_t> const thread_failures {thread_failures_count};
-        pool.for_threads([&](std::size_t thread) noexcept {
+        expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
             if (thread == 0) {
                 auto [plan, status] = index.plan_save(thread_storages[0].columns(), codec);
                 if (failed(status)) thread_failures.store_add(1);
@@ -1534,13 +1549,13 @@ void test_basic_plan_contention(u64_t seed) {
                 thread_failures.store_add(1);
             refusals_confirmed.store_add(1); // Unconditional, so thread 0's wait terminates.
             assert_no_locks_held();
-        });
+        })));
         expect_equal(thread_failures.load(), 0u);
 
         // Phase B - statistical rounds: winners serialize, refusals stay clean.
         std::array<status_t, planner_threads_k> round_statuses {};
         for (std::size_t round = 0; round != plan_rounds_k; ++round) {
-            pool.for_threads([&](std::size_t thread) noexcept {
+            expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
                 auto [plan, status] = index.plan_save(thread_storages[thread].columns(), codec);
                 round_statuses[thread] = status;
                 if (failed(status)) return;
@@ -1548,7 +1563,7 @@ void test_basic_plan_contention(u64_t seed) {
                     plan.finish() != status_code_t::success_k)
                     round_statuses[thread] = status_code_t::internal_k;
                 assert_no_locks_held();
-            });
+            })));
             std::size_t winners_this_round = 0;
             for (std::size_t thread = 0; thread != planner_threads_k; ++thread) {
                 if (round_statuses[thread] == status_code_t::success_k) {
@@ -1574,7 +1589,7 @@ void test_basic_plan_contention(u64_t seed) {
         bool entered_word = false, released_word = false;
         fu::standard_atomic_ref<bool> const entered {entered_word}, released {released_word};
         // Phase A already proved the counter zero, so Phase C keeps accumulating into it.
-        pool.for_threads([&](std::size_t thread) noexcept {
+        expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
             if (thread == 0) {
                 basic_gated_metric<metric_t, typename index_t::distance_t> gated {fixture_type_::make_metric(),
                                                                                   &entered_word, &released_word};
@@ -1597,7 +1612,7 @@ void test_basic_plan_contention(u64_t seed) {
             if (target.columns_extents(codec).status != status_code_t::contended_k) thread_failures.store_add(1);
             if (target.clear() != status_code_t::contended_k) thread_failures.store_add(1);
             released.store(true, std::memory_order_release);
-        });
+        })));
         expect_equal(thread_failures.load(), 0u);
         expect_equal(target.size(), 2u);
         // Settled & non-empty: the refusal decays into the documented misuse status.
@@ -2824,11 +2839,13 @@ void test_basic_health(u64_t seed) {
         fu::standard_atomic_ref<bool> const entered {entered_word}, released {released_word};
         auto one_more = fixture_type_::make_values(1, stream_key(seed, "health", 3), counting_allocator_t {ledger});
         typename index_t::key_t const one_more_key = fixture_type_::make_key(nodes_k);
-        fu::flat_pool_t pool;
-        if (fu::failed(pool.spawn(2))) return void(expect_true(false));
+        fu::topology_t topology;
+        fu::pool_t pool;
+        if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, 2, fu::caller_inclusive_k)))
+            return void(expect_true(false));
         std::size_t thread_failures_count = 0;
         fu::standard_atomic_ref<std::size_t> const thread_failures {thread_failures_count};
-        pool.for_threads([&](std::size_t thread) noexcept {
+        expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
             if (thread == 0) {
                 basic_gated_metric<metric_t, typename index_t::distance_t> gated {fixture_type_::make_metric(),
                                                                                   &entered_word, &released_word};
@@ -2850,7 +2867,7 @@ void test_basic_health(u64_t seed) {
             if (index.columns_extents(codec).status != status_code_t::contended_k) thread_failures.store_add(1);
             released.store(true, std::memory_order_release);
             assert_no_locks_held();
-        });
+        })));
         expect_equal(thread_failures.load(), 0u);
         expect_equal(index.size(), nodes_k + 1);
         expect_equal(index.health(context).status, status_code_t::success_k);
@@ -2930,11 +2947,13 @@ void test_basic_certified(u64_t seed) {
         fu::standard_atomic_ref<bool> const entered {entered_word}, released {released_word};
         auto one_more = fixture_type_::make_values(1, stream_key(seed, "certified", 5), counting_allocator_t {ledger});
         key_t const one_more_key = fixture_type_::make_key(nodes_k);
-        fu::flat_pool_t pool;
-        if (fu::failed(pool.spawn(2))) return void(expect_true(false));
+        fu::topology_t topology;
+        fu::pool_t pool;
+        if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, 2, fu::caller_inclusive_k)))
+            return void(expect_true(false));
         std::size_t thread_failures_count = 0;
         fu::standard_atomic_ref<std::size_t> const thread_failures {thread_failures_count};
-        pool.for_threads([&](std::size_t thread) noexcept {
+        expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
             if (thread == 0) {
                 basic_gated_metric<metric_t, typename index_t::distance_t> gated {fixture_type_::make_metric(),
                                                                                   &entered_word, &released_word};
@@ -2963,7 +2982,7 @@ void test_basic_certified(u64_t seed) {
                 thread_failures.store_add(1);
             released.store(true, std::memory_order_release);
             assert_no_locks_held();
-        });
+        })));
         expect_equal(thread_failures.load(), 0u);
         expect_equal(exclusive_index.size(), nodes_k + 1);
     }
@@ -3011,9 +3030,11 @@ void test_basic_torn_bracket(u64_t seed) {
             fu::standard_atomic_ref<bool> const entered {entered_word}, released {released_word};
             fu::standard_atomic_ref<std::size_t> const thread_failures {thread_failures_count};
             u32_t parked_status = ~u32_t {0};
-            fu::flat_pool_t pool;
-            if (fu::failed(pool.spawn(2))) return void(expect_true(false));
-            pool.for_threads([&](std::size_t thread) noexcept {
+            fu::topology_t topology;
+            fu::pool_t pool;
+            if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, 2, fu::caller_inclusive_k)))
+                return void(expect_true(false));
+            expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
                 if (thread == 0) { // The certified search is the parked party - no locks held.
                     basic_gated_metric<metric_t, typename index_t::distance_t> gated {fixture_type_::make_metric(),
                                                                                       &entered_word, &released_word};
@@ -3036,7 +3057,7 @@ void test_basic_torn_bracket(u64_t seed) {
                 if (status != status_code_t::success_k) thread_failures.store_add(1);
                 released.store(true, std::memory_order_release); // Every path - the search must resume.
                 assert_no_locks_held();
-            });
+            })));
             expect_equal(thread_failures.load(), 0u);
             // The entry probe passed - `entered` fired after it - so contended_k here is the
             // exit probe's verdict: the generation moved & the watermark advanced.
@@ -3263,10 +3284,12 @@ void test_basic_concurrent_build(u64_t seed) {
                                                          "build_thread", 0);
         std::vector<node_id_t> assigned_ids(nodes_count);
 
-        fu::flat_pool_t pool;
-        if (fu::failed(pool.spawn(basic_threads_k))) return void(expect_true(false));
+        fu::topology_t topology;
+        fu::pool_t pool;
+        if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, basic_threads_k, fu::caller_inclusive_k)))
+            return void(expect_true(false));
         std::size_t thread_failures = 0;
-        pool.for_threads([&](std::size_t thread) noexcept {
+        expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
             if (thread >= basic_threads_k) return;
             auto const [result, status] = index.insert(
                 {threads.values[thread]}, {threads.keys[thread]}, threads.metrics[thread],
@@ -3274,7 +3297,7 @@ void test_basic_concurrent_build(u64_t seed) {
                 keep_diverse_t {basic_connectivity_k});
             if (status != status_code_t::success_k) fu::standard_atomic_ref<std::size_t>(thread_failures).store_add(1);
             assert_no_locks_held();
-        });
+        })));
 
         expect_equal(thread_failures, 0u);
         expect_equal(index.size(), nodes_count);
@@ -3329,12 +3352,15 @@ void test_basic_concurrent_search(u64_t seed) {
         auto queries = fixture_type_::make_values(basic_reader_minimal_searches_k, stream_key(seed, "search_thread", 3),
                                                   counting_allocator_t {ledger});
 
-        fu::flat_pool_t pool;
-        if (fu::failed(pool.spawn(writer_threads_k + 1))) return void(expect_true(false));
+        fu::topology_t topology;
+        fu::pool_t pool;
+        if (fu::failed(topology.harvest()) ||
+            fu::failed(pool.spawn(topology, writer_threads_k + 1, fu::caller_inclusive_k)))
+            return void(expect_true(false));
         std::size_t thread_failures_count = 0, writer_threads_remaining_count = writer_threads_k;
         fu::standard_atomic_ref<std::size_t> const thread_failures {thread_failures_count};
         fu::standard_atomic_ref<std::size_t> const writer_threads_remaining {writer_threads_remaining_count};
-        pool.for_threads([&](std::size_t thread) noexcept {
+        expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
             if (thread < writer_threads_k) {
                 auto const [result, status] = index.insert({threads.values[thread]}, {threads.keys[thread]},
                                                            threads.metrics[thread], {}, threads.contexts[thread],
@@ -3369,7 +3395,7 @@ void test_basic_concurrent_search(u64_t seed) {
                 ++searches;
             }
             assert_no_locks_held();
-        });
+        })));
         expect_equal(thread_failures.load(), 0u);
         expect_equal(index.size(), nodes_count);
     }
@@ -3417,8 +3443,11 @@ void test_basic_planned_batch(u64_t seed) {
                          status_code_t::success_k);
         }
         // Spawned before the plan: past its dispense, nothing may refuse.
-        fu::flat_pool_t pool;
-        if (fu::failed(pool.spawn(basic_threads_k + 1))) return void(expect_true(false));
+        fu::topology_t topology;
+        fu::pool_t pool;
+        if (fu::failed(topology.harvest()) ||
+            fu::failed(pool.spawn(topology, basic_threads_k + 1, fu::caller_inclusive_k)))
+            return void(expect_true(false));
 
         // An empty plan dispenses nothing and finishes at once.
         {
@@ -3440,7 +3469,7 @@ void test_basic_planned_batch(u64_t seed) {
         std::size_t thread_failures_count = 0;
         fu::standard_atomic_ref<std::size_t> const thread_failures {thread_failures_count};
         bool finished = false;
-        pool.for_threads([&](std::size_t thread) noexcept {
+        expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
             if (thread < basic_threads_k) {
                 std::size_t const first = thread * basic_thread_nodes_k;
                 plan.insert(first, std::span(batch_values).subspan(first, basic_thread_nodes_k),
@@ -3479,7 +3508,7 @@ void test_basic_planned_batch(u64_t seed) {
                 ++searches;
             }
             assert_no_locks_held();
-        });
+        })));
         expect_equal(thread_failures.load(), 0u);
         expect_equal(index.size(), prefill_k + batch_k);
         expect_equal(plan.finish(), status_code_t::uninitialized_k); // Spent: no second turn.
@@ -3512,8 +3541,10 @@ void test_basic_wide_pool(u64_t seed) {
     constexpr std::size_t entries_k = 2 * basic_connectivity_k;
     constexpr std::size_t builds_k = 16;
     allocation_ledger_t ledger;
-    fu::flat_pool_t pool;
-    if (fu::failed(pool.spawn(entries_k))) return void(expect_true(false));
+    fu::topology_t topology;
+    fu::pool_t pool;
+    if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, entries_k, fu::caller_inclusive_k)))
+        return void(expect_true(false));
     // Each build races differently, so a few of them catch a stranded entry that one may miss.
     for (std::size_t build = 0; build != builds_k; ++build) {
         std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
@@ -3527,7 +3558,7 @@ void test_basic_wide_pool(u64_t seed) {
         expect_equal(plan_status, status_code_t::success_k);
         std::size_t arrived_count = 0;
         fu::standard_atomic_ref<std::size_t> const arrived {arrived_count};
-        pool.for_threads([&](std::size_t thread) noexcept {
+        expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
             // Staggered wake-ups wire most entries before the last ones walk, hiding the race.
             arrived.store_add(1, std::memory_order_acq_rel);
             [[maybe_unused]] bool const rendezvoused = spin_until(
@@ -3536,7 +3567,7 @@ void test_basic_wide_pool(u64_t seed) {
                         threads.metrics[thread], threads.contexts[thread], keep_diverse_t {basic_connectivity_k});
             // The caller runs as thread 0 and holds the plan's shared side until `finish`.
             if (thread != 0) assert_no_locks_held();
-        });
+        })));
         expect_equal(plan.finish(), status_code_t::success_k);
 
         auto metric = fixture_type_::make_metric();
@@ -3690,14 +3721,16 @@ void test_basic_wiring_race(u64_t seed) {
             assert_no_locks_held();
         };
 
-        fu::flat_pool_t pool;
-        if (fu::failed(pool.spawn(4))) return void(expect_true(false));
-        pool.for_threads([&](std::size_t thread) noexcept {
+        fu::topology_t topology;
+        fu::pool_t pool;
+        if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, 4, fu::caller_inclusive_k)))
+            return void(expect_true(false));
+        expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
             if (thread == 0) return saver_thread();
             if (thread == 1) return inserter_thread();
             if (thread == 2) return wirer_thread();
             if (thread == 3) return searcher_thread();
-        });
+        })));
         if (thread_failures.load())
             fmt::print(stderr, "  wiring-race diag: thread {} saw status {}\n", unexpected_thread.load(),
                        status_to_string(static_cast<status_code_t>(unexpected_status.load())));
@@ -3749,9 +3782,11 @@ void test_basic_growth_race(u64_t seed) {
         std::vector<node_id_t> assigned_ids(threads_k * per_thread_k);
         std::array<status_t, threads_k> thread_statuses {};
 
-        fu::flat_pool_t pool;
-        if (fu::failed(pool.spawn(threads_k))) return void(expect_true(false));
-        pool.for_threads([&](std::size_t thread) noexcept {
+        fu::topology_t topology;
+        fu::pool_t pool;
+        if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, threads_k, fu::caller_inclusive_k)))
+            return void(expect_true(false));
+        expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
             if (thread >= threads_k) return;
             std::span<node_id_t> const thread_ids =
                 std::span(assigned_ids).subspan(thread * per_thread_k, per_thread_k);
@@ -3765,7 +3800,7 @@ void test_basic_growth_race(u64_t seed) {
                              .status;
             thread_statuses[thread] = status;
             assert_no_locks_held();
-        });
+        })));
 
         for (std::size_t thread = 0; thread != threads_k; ++thread)
             expect_equal(thread_statuses[thread], status_code_t::success_k);
@@ -3855,12 +3890,14 @@ void test_basic_cursor(u64_t seed) {
 
         // A cursor thread races an inserting & wiring thread; every visited ID stays below
         // that pass's snapshot, and the final refresh converges on the full prefix.
-        fu::flat_pool_t pool;
-        if (fu::failed(pool.spawn(2))) return void(expect_true(false));
+        fu::topology_t topology;
+        fu::pool_t pool;
+        if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, 2, fu::caller_inclusive_k)))
+            return void(expect_true(false));
         std::size_t thread_failures_count = 0;
         fu::standard_atomic_ref<std::size_t> const thread_failures {thread_failures_count};
         bool writer_done = false;
-        pool.for_threads([&](std::size_t thread) noexcept {
+        expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
             if (thread == 0) {
                 auto thread_metric = fixture_type_::make_metric();
                 context_t thread_context {stream_key(seed, "cursor", 1), counting_allocator_t {ledger}};
@@ -3893,7 +3930,7 @@ void test_basic_cursor(u64_t seed) {
                     if (racing_cursor.id() >= snapshot) thread_failures.store_add(1);
             } while (!fu::standard_atomic_ref<bool>(writer_done).load(std::memory_order_acquire));
             assert_no_locks_held();
-        });
+        })));
         expect_equal(thread_failures.load(), 0u);
         cursor.refresh();
         expect_equal(static_cast<std::size_t>(cursor.visible_count()), index.size());

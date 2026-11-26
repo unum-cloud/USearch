@@ -35,6 +35,7 @@
 #include <variant>     // `std::holds_alternative` - a medium that is no file
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the default reference
+#include <forkunion/locks.hpp>   // `fu::spin_mutex_t` - the stripes
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/blocking_files.hpp"    // `seekable_file_t`, `file_span_t`

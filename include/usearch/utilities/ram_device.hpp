@@ -22,7 +22,7 @@
 #include <forkunion/forkunion.h>    // `fu_local_memory_of`, `fu_memory_domain_id_at_index`
 #include <forkunion/forkunion.hpp>  // `fu::pool_t`, `fu::default_threads_count` - the threads
 #include <forkunion/allocators.hpp> // `fu::domain_allocator_t`, `fu::page_size_1g_k` - the payload pages
-#include <forkunion/types.hpp>      // `fu::spin_mutex_t` - the hold
+#include <forkunion/locks.hpp>      // `fu::spin_mutex_t` - the hold
 
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the arenas' storage
 #include "usearch/utilities/types.hpp"       // `status_t`, `expected`

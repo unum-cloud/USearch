@@ -495,6 +495,7 @@ Each residency and each GPU vendor is a dedicated tower with its own customizabl
 Code two towers genuinely share becomes a component each tower owns as a member, or a free function each tower calls.
 Host and device towers never fuse, since a RAM walk is a much finer-grained processing mode than a device batch.
 A tower never takes a lock to make a shared design fit; it redesigns the protocol instead.
+A try-only claim is an atomic bit or `fu::spin_mutex_t`, anything that waits is `fu::fair_mutex_t` from `<forkunion/locks.hpp>`, and a reader-writer gate is `utilities::shared_mutex`; `.githooks/pre-commit` refuses any other new lock, so ask first.
 
 ### Layers
 

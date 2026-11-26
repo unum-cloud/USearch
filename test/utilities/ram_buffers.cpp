@@ -28,7 +28,8 @@
 
 #include <fmt/format.h>
 
-#include <forkunion.hpp> // `fu::flat_pool_t`, `fu::standard_atomic_ref` - the threads racing the latch
+#include <forkunion/atomics.hpp>   // `fu::standard_atomic_ref` - the flags and counters threads share
+#include <forkunion/forkunion.hpp> // `fu::topology_t`, `fu::pool_t` - the threads a case races
 
 #include "usearch/utilities/ram_buffers.hpp"
 #include "usearch/utilities/ram_sorts.hpp"
@@ -527,13 +528,15 @@ void test_keep_first_failure_pairs() noexcept {
         {util::status_code_t::contended_k, "Seventh thread failed"},
         {util::status_code_t::invalid_argument_k, "Eighth thread failed"},
     }};
-    fu::flat_pool_t pool;
-    if (fu::failed(pool.spawn(threads_k))) return void(expect_true(false));
+    fu::topology_t topology;
+    fu::pool_t pool;
+    if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, threads_k, fu::caller_inclusive_k)))
+        return void(expect_true(false));
     for (std::size_t repetition = 0; repetition != 256; ++repetition) {
         util::status_t first;
-        pool.for_threads([&](std::size_t thread) noexcept {
+        expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
             if (thread < threads_k) util::keep_first_failure<fu::standard_atomic_ref>(first, failures[thread]);
-        });
+        })));
         auto const winner = std::ranges::find(failures, first.code, &util::status_t::code);
         expect_true(winner != failures.end() && winner->note == first.note);
     }

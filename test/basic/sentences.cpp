@@ -250,9 +250,11 @@ static void test_sentences_whole_batch(u64_t seed) {
         fu::standard_atomic_ref<bool> const entered {entered_word}, released {released_word};
         std::size_t thread_failures_count = 0;
         fu::standard_atomic_ref<std::size_t> const thread_failures {thread_failures_count};
-        fu::flat_pool_t pool;
-        if (fu::failed(pool.spawn(2))) return void(expect_true(false));
-        pool.for_threads([&](std::size_t thread) noexcept {
+        fu::topology_t topology;
+        fu::pool_t pool;
+        if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, 2, fu::caller_inclusive_k)))
+            return void(expect_true(false));
+        expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
             if (thread == 0) {
                 basic_gated_metric<levenshtein_metric_t, u64_t> gated {sentences_fixture_t::make_metric(),
                                                                        &entered_word, &released_word};
@@ -270,7 +272,7 @@ static void test_sentences_whole_batch(u64_t seed) {
             if (index.size() != 0 || succeeded(index.key_of(0).status) || index.contains(keys[0]))
                 thread_failures.store_add(1);
             released.store(true, std::memory_order_release);
-        });
+        })));
         expect_equal(thread_failures_count, 0u);
         expect_equal(index.size(), 2u);
         expect_true(index.contains(keys[1]));

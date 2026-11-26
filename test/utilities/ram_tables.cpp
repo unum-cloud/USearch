@@ -20,7 +20,8 @@
 
 #include <fmt/format.h>
 
-#include <forkunion.hpp>
+#include <forkunion/atomics.hpp>   // `fu::standard_atomic_ref` - the flags and counters threads share
+#include <forkunion/forkunion.hpp> // `fu::topology_t`, `fu::pool_t` - the threads a case races
 
 #include "usearch/utilities/ram_tables.hpp"
 
@@ -196,13 +197,15 @@ void test_multimap_concurrent_insert() noexcept {
         multimap_t multimap {counting_allocator_t {ledger}};
         expect_true(succeeded(multimap.reserve(nodes)));
 
-        fu::flat_pool_t pool;
-        if (fu::failed(pool.spawn(threads_k))) return void(expect_true(false));
-        pool.for_threads([&](std::size_t thread) noexcept {
+        fu::topology_t topology;
+        fu::pool_t pool;
+        if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, threads_k, fu::caller_inclusive_k)))
+            return void(expect_true(false));
+        expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
             if (thread >= threads_k) return;
             for (std::size_t node = thread; node < nodes; node += threads_k)
                 multimap.insert(node % keys_alphabet_k, static_cast<util::u32_t>(node));
-        });
+        })));
 
         std::vector<util::u32_t> observed;
         for (util::u64_t key = 0; key != keys_alphabet_k; ++key) {
@@ -232,11 +235,13 @@ void test_multimap_reader_during_writers() noexcept {
     multimap_t multimap {util::global_allocator};
     expect_true(succeeded(multimap.reserve(nodes)));
 
-    fu::flat_pool_t pool;
-    if (fu::failed(pool.spawn(writers_k + 1))) return void(expect_true(false));
+    fu::topology_t topology;
+    fu::pool_t pool;
+    if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, writers_k + 1, fu::caller_inclusive_k)))
+        return void(expect_true(false));
     std::size_t writers_done = 0, torn_observations = 0, shrinking_counts = 0;
 
-    pool.for_threads([&](std::size_t thread) noexcept {
+    expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
         if (thread >= writers_k + 1) return;
         if (thread != writers_k) {
             for (std::size_t node = nodes_schedule_t::nodes_before(thread);
@@ -261,7 +266,7 @@ void test_multimap_reader_during_writers() noexcept {
             }
             ++sweeps;
         }
-    });
+    })));
 
     expect_equal(torn_observations, 0u);
     expect_equal(shrinking_counts, 0u);
@@ -328,7 +333,7 @@ void test_multimap_uncovered_slots() noexcept {
 }
 
 using keyed_nodes_t = util::keyed_nodes<util::u64_t, util::u32_t, util::chunk_schedule<10, 20>, std::size_t {1} << 32,
-                                        std::allocator<util::byte_t>, util::standard_atomic_ref>;
+                                        std::allocator<util::byte_t>, fu::standard_atomic_ref>;
 
 /** Keys file from an empty table with no reserve first, duplicates spread across nodes, and a
  *  reader sees only the nodes below the watermark it passes. */

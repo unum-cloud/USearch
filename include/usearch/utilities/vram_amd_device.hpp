@@ -31,7 +31,8 @@
 
 #include <forkunion/atomics.hpp>  // `fu::standard_atomic_ref` - the mapped and committed byte counts
 #include <forkunion/topology.hpp> // `fu::volume_ram` - the managed storage's host-memory budget
-#include <forkunion/types.hpp>    // `fu::round_up_to_multiple`, `fu::spin_mutex_t` - the hold
+#include <forkunion/locks.hpp>    // `fu::spin_mutex_t` - the hold
+#include <forkunion/types.hpp>    // `fu::round_up_to_multiple`
 
 #include "usearch/utilities/blocking_files.hpp" // `shared_library_t` - the HIP runtime opened by `hip_api_t::load`
 #include "usearch/utilities/ram_buffers.hpp"    // `growing_buffer` - an executor's table of streams

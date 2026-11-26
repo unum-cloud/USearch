@@ -708,8 +708,10 @@ void test_sequence_sharded_clear_race(u64_t seed) {
         expect_equal(plan.finish(), status_code_t::success_k);
     };
 
-    fu::flat_pool_t pool;
-    if (fu::failed(pool.spawn(searchers_k + 1))) return void(expect_true(false));
+    fu::topology_t topology;
+    fu::pool_t pool;
+    if (fu::failed(topology.harvest()) || fu::failed(pool.spawn(topology, searchers_k + 1, fu::caller_inclusive_k)))
+        return void(expect_true(false));
     std::size_t foreign_count = 0;
     fu::standard_atomic_ref<std::size_t> const foreign {foreign_count};
     for (std::size_t round = 0; round != rounds_k; ++round) {
@@ -719,7 +721,7 @@ void test_sequence_sharded_clear_race(u64_t seed) {
         expect_true(succeeded(cursor.open(indexes, {})));
         bool cleared = false;
         std::size_t searched = 0;
-        pool.for_threads([&](std::size_t thread) noexcept {
+        expect_true(!fu::failed(pool.for_threads([&](std::size_t thread) noexcept {
             if (thread == 0) {
                 // Every searcher walks the entries once first, so the clear runs under live walks.
                 while (fu::standard_atomic_ref<std::size_t>(searched).load(std::memory_order_acquire) < searchers_k)
@@ -747,7 +749,7 @@ void test_sequence_sharded_clear_race(u64_t seed) {
                     for (std::size_t match = 0; match != found; ++match)
                         foreign.store_add(std::find(keys.begin(), keys.end(), found_keys[match]) == keys.end());
             }
-        });
+        })));
         expect_equal(indexes.size(), std::size_t {0});
         expect_equal(indexes.count(keys[0]), std::size_t {0});
         expect_equal(indexes.shards_count(), round + 2);

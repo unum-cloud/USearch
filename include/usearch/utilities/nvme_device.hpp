@@ -107,7 +107,8 @@
 
 #include <forkunion/forkunion.h> // `fu_pool_new`, `fu_pool_spawn`, `fu_pool_delete`
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the SPDK claim word
-#include <forkunion/types.hpp>   // `fu::wait_capped_t`, `fu::spin_mutex_t`
+#include <forkunion/locks.hpp>   // `fu::spin_mutex_t`
+#include <forkunion/types.hpp>   // `fu::wait_capped_t`
 
 #include "usearch/utilities/blocking_files.hpp" // `native_file_t`, `open_native_file`, `read_native_file`
 #include "usearch/utilities/ram_buffers.hpp"    // `growing_buffer`

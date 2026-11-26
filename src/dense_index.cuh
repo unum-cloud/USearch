@@ -30,7 +30,7 @@
 
 #include <forkunion/forkunion.h> // `fu_topology_new` - the executor factories' discovery
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the cursors' busy bits
-#include <forkunion/types.hpp>   // `fu::spin_mutex` - the ticks' lock
+#include <forkunion/locks.hpp>   // `fu::spin_mutex` - the ticks' lock
 #include <numkong/cast.h>        // `nk_cast_best` - converting foreign scalar rows at the boundary
 
 #include "dense_punned.cuh"
