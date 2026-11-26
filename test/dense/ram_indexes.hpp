@@ -420,8 +420,9 @@ static void test_ram_indexes_generations(u64_t seed) {
 /** Four even shards recut in place under a bound of half the entries into two, the kept ones
  *  keeping their IDs and the others staying as idle slots, while a looker counts every key once,
  *  then out of place into a fresh single shard, which empties the source. Every key resolves once
- *  with its vector intact after each, and searches find sampled vectors themselves within noise of
- *  before. */
+ *  with its vector intact after each, searches find sampled vectors themselves within noise of
+ *  before, and the graph recut in place reaches every entry, or under a dot, whose hubs leave a
+ *  few to a later round, the bulk of them. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 static void test_ram_indexes_recut(u64_t seed) {
     using scalar_t = typename indexes_type_::index_t::scalar_t;
@@ -501,6 +502,10 @@ static void test_ram_indexes_recut(u64_t seed) {
     expect_true(packed.graph.neighborhoods > 1 && packed.graph.traversal_stats.visited_members == 0);
     expect_equal(indexes.shards_count(), 4u);
     expect_equal(filled_shards(indexes), 2u);
+    auto const [health, health_status] = indexes.health(executor);
+    expect_true(succeeded(health_status));
+    if constexpr (kernel_ != nk_kernel_dot_k) expect_equal(health.reachable_nodes, rows);
+    else expect_true(health.reachable_nodes * 100 >= rows * dense_minimal_recall_percent_k);
     dense_indexes_expect_restored(indexes, vectors, keys, dimensions, executor, seed);
     expect_true(self_hits(indexes) + recall_margin_k * recall_samples_k >= hits_before);
 
