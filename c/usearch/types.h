@@ -1561,6 +1561,105 @@ typedef struct usearch_executor_drain_t {
  *  @c usearch_status_contended_k from a callback of the call it would wait on. */
 USEARCH_EXPORT void usearch_executor_drain(usearch_executor_drain_t* arguments);
 
+/** The arguments of @c usearch_executor_stream. */
+typedef struct usearch_executor_stream_t {
+
+    /** The GPU executor whose stream to name. */
+    usearch_executor_t executor;
+
+    /** The stream's position in the executor, in the order its devices were named. */
+    size_t position;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Output for the native handle: a @c CUstream, @c hipStream_t or @c id<MTLCommandQueue>, or
+     *  @c NULL for the null legacy stream. */
+    void** stream;
+} usearch_executor_stream_t;
+
+/**
+ *  @brief Names the native stream at @c position, so a foreign producer or consumer orders its
+ *      work against the calls the executor runs there.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_unsupported_k A RAM or NVMe executor, which drives no stream.
+ *  - @c usearch_status_invalid_argument_k A @c NULL executor or output, or a position past
+ *    every stream the executor drives.
+ */
+USEARCH_EXPORT void usearch_executor_stream(usearch_executor_stream_t* arguments);
+
+/** The arguments of @c usearch_executor_follow. */
+typedef struct usearch_executor_follow_t {
+
+    /** The GPU executor whose stream waits. */
+    usearch_executor_t executor;
+
+    /** The waiting stream's position in the executor. */
+    size_t position;
+
+    /** A pointer to a foreign @c CUevent or @c hipEvent_t, exactly as an Arrow device array's
+     *  @c sync_event holds it, or @c NULL when @c stream is set. */
+    void* event;
+
+    /** A foreign @c CUstream or @c hipStream_t whose queued work to wait for, as the CUDA Array
+     *  Interface names it, or @c NULL when @c event is set. */
+    void* stream;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+} usearch_executor_follow_t;
+
+/**
+ *  @brief Queues on the stream at @c position a wait for a foreign producer, so the next call
+ *      reads its memory only once it is written; the host never waits.
+ *
+ *  Takes the executor's claim for its duration, as a call does. A foreign event may come from any
+ *  device; a foreign stream must sit on the waiting stream's device, since the wait marks it with
+ *  that stream's own event.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_contended_k A call holds the executor.
+ *  - @c usearch_status_config_mismatch_k A foreign stream on another device.
+ *  - @c usearch_status_unsupported_k A RAM, NVMe or Metal executor.
+ *  - @c usearch_status_invalid_argument_k Neither or both of @c event and @c stream, a @c NULL
+ *    executor, or a position past the executor's streams.
+ *  - @c usearch_status_device_k The driver refused the wait.
+ */
+USEARCH_EXPORT void usearch_executor_follow(usearch_executor_follow_t* arguments);
+
+/** The arguments of @c usearch_executor_accepts. */
+typedef struct usearch_executor_accepts_t {
+
+    /** The GPU executor whose stream to compare against. */
+    usearch_executor_t executor;
+
+    /** The compared stream's position in the executor. */
+    size_t position;
+
+    /** The foreign @c CUstream or @c hipStream_t a consumer names. */
+    void* stream;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+} usearch_executor_accepts_t;
+
+/**
+ *  @brief Checks that a foreign stream sits on the same device as the stream at @c position, as a
+ *      DLPack export checks the @c stream its consumer passes.
+ *
+ *  The null, legacy and per-thread handles, 0, 1 and 2, name the default streams of the current
+ *  device, which a consumer means as this one's, so they are accepted.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_config_mismatch_k The foreign stream sits on another device.
+ *  - @c usearch_status_unsupported_k A RAM, NVMe or Metal executor.
+ *  - @c usearch_status_invalid_argument_k A @c NULL executor, or a position past the executor's
+ *    streams.
+ *  - @c usearch_status_device_k The driver could not name the foreign stream's device.
+ */
+USEARCH_EXPORT void usearch_executor_accepts(usearch_executor_accepts_t* arguments);
+
 /** Waits until no call holds the executor and its devices finished their work, releases its
  *  scratch, and frees the executor; @c NULL is safe. Answers @c usearch_status_contended_k and
  *  frees nothing while an arena made with it lives, as @c usearch_arena_free does while an export

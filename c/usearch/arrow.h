@@ -23,158 +23,20 @@
  *  A search's ragged matches export as a @c large_list of @c struct{key, distance}, and a cursor's
  *  links as a @c large_list of keys; padded matches export their keys and scores as keys and rows.
  *
- *  The structures of the Arrow C data and device interfaces follow, under the guards Arrow defines,
- *  so a program including another copy compiles either.
+ *  The structures of the Arrow C data and device interfaces come from Arrow's own
+ *  @c usearch/arrow_abi.h, under the guards Arrow defines, so a program including another copy of
+ *  them compiles with either one.
  */
 
 #ifndef UNUM_USEARCH_ARROW_H
 #define UNUM_USEARCH_ARROW_H
 
+#include "usearch/arrow_abi.h" // `ArrowSchema`, `ArrowArray`, `ArrowDeviceArray`
 #include "usearch/types.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-#ifndef ARROW_C_DATA_INTERFACE
-#define ARROW_C_DATA_INTERFACE
-
-#define ARROW_FLAG_DICTIONARY_ORDERED 1
-#define ARROW_FLAG_NULLABLE           2
-#define ARROW_FLAG_MAP_KEYS_SORTED    4
-
-/** The type of one Arrow column and of each child, as the C data interface lays it out. */
-struct ArrowSchema {
-
-    /** The format string spelling the type. */
-    char const* format;
-
-    /** The field's name, or @c NULL. */
-    char const* name;
-
-    /** The binary-encoded key-value metadata, or @c NULL. */
-    char const* metadata;
-
-    /** The @c ARROW_FLAG_* bits. */
-    int64_t flags;
-
-    /** The number of children. */
-    int64_t n_children;
-
-    /** The schemas of the children. */
-    struct ArrowSchema** children;
-
-    /** The schema of a dictionary-encoded column's dictionary, or @c NULL. */
-    struct ArrowSchema* dictionary;
-
-    /** Releases the schema, @c NULL once it is released. */
-    void (*release)(struct ArrowSchema*);
-
-    /** The producer's own data. */
-    void* private_data;
-};
-
-/** The data of one Arrow column and of each child, as the C data interface lays it out. */
-struct ArrowArray {
-
-    /** The number of entries. */
-    int64_t length;
-
-    /** The number of nulls, or -1 when unknown. */
-    int64_t null_count;
-
-    /** The entries to skip at the front of every buffer. */
-    int64_t offset;
-
-    /** The number of buffers, validity first. */
-    int64_t n_buffers;
-
-    /** The number of children. */
-    int64_t n_children;
-
-    /** The buffers the format lays out. */
-    void const** buffers;
-
-    /** The arrays of the children. */
-    struct ArrowArray** children;
-
-    /** The array of a dictionary-encoded column's dictionary, or @c NULL. */
-    struct ArrowArray* dictionary;
-
-    /** Releases the array, @c NULL once it is released. */
-    void (*release)(struct ArrowArray*);
-
-    /** The producer's own data. */
-    void* private_data;
-};
-
-#endif // ARROW_C_DATA_INTERFACE
-
-#ifndef ARROW_C_DEVICE_DATA_INTERFACE
-#define ARROW_C_DEVICE_DATA_INTERFACE
-
-/** Where the memory of an @c ArrowDeviceArray lives, one of the @c ARROW_DEVICE_* values. */
-typedef int32_t ArrowDeviceType;
-
-/** Host memory, as a plain @c ArrowArray holds. */
-#define ARROW_DEVICE_CPU 1
-
-/** CUDA device memory. */
-#define ARROW_DEVICE_CUDA 2
-
-/** Host memory pinned by @c cudaMallocHost. */
-#define ARROW_DEVICE_CUDA_HOST 3
-
-/** OpenCL device memory. */
-#define ARROW_DEVICE_OPENCL 4
-
-/** Vulkan buffers. */
-#define ARROW_DEVICE_VULKAN 7
-
-/** Metal buffers on Apple GPUs. */
-#define ARROW_DEVICE_METAL 8
-
-/** Verilog simulator buffers. */
-#define ARROW_DEVICE_VPI 9
-
-/** ROCm device memory on AMD GPUs. */
-#define ARROW_DEVICE_ROCM 10
-
-/** Host memory pinned by @c hipMallocHost. */
-#define ARROW_DEVICE_ROCM_HOST 11
-
-/** CUDA managed memory, from @c cudaMallocManaged. */
-#define ARROW_DEVICE_CUDA_MANAGED 13
-
-/** Unified shared memory on a oneAPI non-partitioned device. */
-#define ARROW_DEVICE_ONEAPI 14
-
-/** WebGPU buffers. */
-#define ARROW_DEVICE_WEBGPU 15
-
-/** Qualcomm Hexagon DSP memory. */
-#define ARROW_DEVICE_HEXAGON 16
-
-/** One Arrow column on a device, as the C device data interface lays it out. */
-struct ArrowDeviceArray {
-
-    /** The column, whose buffers and children's buffers live on the device. */
-    struct ArrowArray array;
-
-    /** The device's ordinal among its type's devices. */
-    int64_t device_id;
-
-    /** The kind of device that can reach the memory. */
-    ArrowDeviceType device_type;
-
-    /** An event to synchronize on before reading, or @c NULL. */
-    void* sync_event;
-
-    /** Reserved for future use. */
-    int64_t reserved[3];
-};
-
-#endif // ARROW_C_DEVICE_DATA_INTERFACE
 
 /**
  *  @brief Views the 16-byte keys of one Arrow @c fixed_size_binary(16) column in place, tagged
@@ -227,7 +89,8 @@ USEARCH_EXPORT usearch_status_t usearch_tape_view_from_arrow(struct ArrowSchema 
  *  @brief Exports @p count keys a call wrote into @p arena as one Arrow @c fixed_size_binary(16)
  *      column tagged as @c arrow.uuid, in place.
  *
- *  The array reads the arena's outputs until the arena's next call. Arenas on host pages export as
+ *  The array holds an export of @p arena open, as @c usearch_arena_export_open does, until its
+ *  @c release, so no call rewinds the arena meanwhile. Arenas on host pages export as
  *  @c ARROW_DEVICE_CPU, and those of a VRAM executor as @c ARROW_DEVICE_CUDA, @c ARROW_DEVICE_ROCM
  *  or @c ARROW_DEVICE_METAL with the vendor's ordinal of their device and no @c sync_event, as the
  *  call that filled one drained its uploads. The schema's @c name is empty, for the caller to point
@@ -235,6 +98,8 @@ USEARCH_EXPORT usearch_status_t usearch_tape_view_from_arrow(struct ArrowSchema 
  *  move their children out before either release.
  *
  *  @par Statuses:
+ *  - @c usearch_status_contended_k A call holds @p arena.
+ *  - @c usearch_status_overflow_k The arena already counts @c UINT32_MAX exports.
  *  - @c usearch_status_invalid_argument_k An output is missing, or the keys lie outside @p arena.
  *  - @c usearch_status_unsupported_layout_k The keys are not packed.
  *  - @c usearch_status_out_of_memory_k An allocation failed.

@@ -174,6 +174,7 @@ A second call on a held executor finishes `usearch_status_contended_k`, so calle
 The drain holds the executor as a call would until it returns, so a call submitted meanwhile finishes `usearch_status_contended_k`.
 A blocking verb called from inside a progress handler or predicate of a call on the same executor reports `usearch_status_contended_k`, and so does a drain on the thread running that call's body; a drain from any other of its threads would wait on itself.
 `usearch_executor_free` waits out the call holding the executor before it releases the threads, and answers `usearch_status_contended_k`, freeing nothing, while an arena made with it lives.
+A VRAM executor shares its streams with other libraries: `usearch_executor_stream` names the native stream at a position, `usearch_executor_accepts` checks that a consumer's stream sits on the same device, and `usearch_executor_follow` queues a wait for a foreign event or stream, so the next call reads a producer's memory once it is written, without the host waiting.
 
 ## Arenas
 

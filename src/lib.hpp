@@ -2334,6 +2334,23 @@ inline util::status_t visit_executor(usearch_executor_handle_t& executor, visito
         executor.residency);
 }
 
+/** Visits the GPU executor @p executor holds and its stream at @p position, refusing a host
+ *  executor and a position past its streams. */
+template <typename visitor_type_>
+inline util::status_t visit_executor_stream(usearch_executor_handle_t& executor, std::size_t position,
+                                            visitor_type_&& visitor) noexcept {
+    util::gpu_executor_t* const gpus = std::get_if<util::gpu_executor_t>(&executor.residency);
+    if (!gpus) return {util::status_code_t::unsupported_k, "A host executor drives no stream"};
+    return std::visit(
+        [&]<typename kind_type_>(kind_type_& kind) noexcept -> util::status_t {
+            if constexpr (std::is_same_v<kind_type_, std::monostate>) return {util::status_code_t::device_k};
+            else if (position >= kind.size())
+                return {util::status_code_t::invalid_argument_k, "No stream of the executor holds the position"};
+            else return visitor(kind, kind.stream(position));
+        },
+        *gpus);
+}
+
 /** The residency's executor inside @p executor 's variant: an NVMe executor serves RAM work through
  *  its threads, and GPU executors nest one level deeper. */
 template <typename executor_type_>

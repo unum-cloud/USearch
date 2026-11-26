@@ -133,6 +133,7 @@ Every call naming an executor enters through `submitted<verb>`, and one call hol
 - The body meets its own arguments again in `submitted`, recognised by `holding_call.arguments`, and runs in place; `call_outcome_t` records into `holding_call.recorded`.
 - `end_call` lowers the counts, gives back the claim, then publishes the message and the status.
 - Drains and frees wait for the claim to fall free and take it in `take_idle_claim`, where a call would finish contended; a drain holds it through the park and the device drain. VRAM verbs all run at submission, since each reads its device results back before it ends.
+- `usearch_executor_follow` tries the claim instead, answering `contended` while a call holds it, then takes the GPU executor's own claim, as a device Arrow export does.
 
 ## NVMe
 

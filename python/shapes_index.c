@@ -102,9 +102,9 @@ static int plan_parse(usearch_py_call_t* call, PyObject* plan, PyTypeObject* typ
 }
 
 /** Views the points of one shape, a matrix of x, y and z columns, into @p points. */
-static int shape_view(PyObject* item, usearch_scalar_t scalar_hint, usearch_matrix_view_t* points,
-                      usearch_py_buffer_backing_t* backing) {
-    if (usearch_py_matrix_from_object(item, scalar_hint, points, backing) != 0) return -1;
+static int shape_view(PyObject* item, usearch_executor_t executor, usearch_scalar_t scalar_hint,
+                      usearch_matrix_view_t* points, usearch_py_buffer_backing_t* backing) {
+    if (usearch_py_matrix_from_object(item, executor, scalar_hint, points, backing) != 0) return -1;
     if (points->columns == 3) return 0;
     size_t const columns = points->columns;
     usearch_py_buffer_release(backing);
@@ -123,8 +123,8 @@ static int shape_view(PyObject* item, usearch_scalar_t scalar_hint, usearch_matr
  *
  *  @return 0 on success, -1 with an exception set otherwise.
  */
-static int shapes_from_object(PyObject* object, usearch_scalar_t scalar_hint, void** block, size_t* count,
-                              usearch_tape_view_t* tape) {
+static int shapes_from_object(PyObject* object, usearch_executor_t executor, usearch_scalar_t scalar_hint, void** block,
+                              size_t* count, usearch_tape_view_t* tape) {
     int const batch = PyList_Check(object) || PyTuple_Check(object);
     PyObject* const items = batch ? PySequence_Fast(object, "expected a sequence of shapes") : PyTuple_Pack(1, object);
     if (!items) return -1;
@@ -135,7 +135,7 @@ static int shapes_from_object(PyObject* object, usearch_scalar_t scalar_hint, vo
     usearch_scalar_t scalar = scalar_hint;
     size_t total_points = 0;
     for (Py_ssize_t position = 0; position != items_count; ++position) {
-        if (shape_view(item_objects[position], scalar_hint, &points, &backing) != 0) goto failed;
+        if (shape_view(item_objects[position], executor, scalar_hint, &points, &backing) != 0) goto failed;
         usearch_py_buffer_release(&backing);
         // One tape holds one scalar type, so a batch mixing them has no single reading.
         if (position && points.scalar != scalar) {
@@ -157,7 +157,7 @@ static int shapes_from_object(PyObject* object, usearch_scalar_t scalar_hint, vo
     uint8_t* const bytes = (uint8_t*)(offsets + items_count + 1);
     offsets[0] = 0;
     for (Py_ssize_t position = 0; position != items_count; ++position) {
-        if (shape_view(item_objects[position], scalar, &points, &backing) != 0) goto failed;
+        if (shape_view(item_objects[position], executor, scalar, &points, &backing) != 0) goto failed;
         size_t const begin = (size_t)offsets[position];
         if (points.rows > total_points - begin) {
             usearch_py_buffer_release(&backing);
@@ -734,7 +734,7 @@ static PyObject* ShapesIndex_insert(PyObject* self, PyObject* const* args, Py_ss
 
     size_t count = 0;
     usearch_tape_view_t shapes;
-    if (shapes_from_object(shapes_object, dtype, &call->blocks[0], &count, &shapes) != 0 ||
+    if (shapes_from_object(shapes_object, receiver.executor, dtype, &call->blocks[0], &count, &shapes) != 0 ||
         usearch_py_keys_from_object(keys_object, count, &call->keys[0]) != 0 ||
         walk_parse(call, progress_object, stats_object) != 0)
         return usearch_py_call_discard(&receiver, call);
@@ -910,7 +910,7 @@ static PyObject* ShapesIndex_search(PyObject* self, PyObject* const* args, Py_ss
     size_t count = 0;
     usearch_tape_view_t queries;
     Matches* matches = NULL;
-    if (shapes_from_object(queries_object, dtype, &call->blocks[0], &count, &queries) != 0 ||
+    if (shapes_from_object(queries_object, receiver.executor, dtype, &call->blocks[0], &count, &queries) != 0 ||
         usearch_py_predicate_from_object(predicate_object, &call->holds[callback_slot_k]) != 0 ||
         walk_parse(call, progress_object, stats_object) != 0 ||
         !(matches = usearch_py_call_arena(&receiver, call, arena_object, &MatchesType)))

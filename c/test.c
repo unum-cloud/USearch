@@ -1740,6 +1740,64 @@ void test_arena_generation(size_t const dimensions) {
     usearch_dense_free(index);
 }
 
+/** A host executor drives no stream, so naming, following or checking one is unsupported, while
+ *  malformed arguments are refused first; a GPU executor names its own stream on its device, takes
+ *  the default-stream handles as its own, and follows an event as @c sync_event holds it. */
+void test_executor_streams(void) {
+    usearch_executor_t const executor = create_executor(2);
+    usearch_outcome_t outcome = {0};
+    void* named = &outcome;
+    usearch_executor_stream(&(usearch_executor_stream_t) {.executor = executor, .outcome = &outcome, .stream = &named});
+    expect_(outcome.status == usearch_status_unsupported_k && named == NULL);
+    usearch_executor_stream(&(usearch_executor_stream_t) {.executor = executor, .outcome = &outcome, .stream = NULL});
+    expect_(outcome.status == usearch_status_invalid_argument_k);
+    usearch_executor_follow(&(usearch_executor_follow_t) {.executor = executor, .outcome = &outcome});
+    expect_(outcome.status == usearch_status_invalid_argument_k);
+    usearch_executor_follow(
+        &(usearch_executor_follow_t) {.executor = executor, .event = &named, .stream = &named, .outcome = &outcome});
+    expect_(outcome.status == usearch_status_invalid_argument_k);
+    usearch_executor_follow(&(usearch_executor_follow_t) {.executor = executor, .stream = &named, .outcome = &outcome});
+    expect_(outcome.status == usearch_status_unsupported_k);
+    usearch_executor_accepts(
+        &(usearch_executor_accepts_t) {.executor = executor, .stream = &named, .outcome = &outcome});
+    expect_(outcome.status == usearch_status_unsupported_k);
+    usearch_executor_accepts(&(usearch_executor_accepts_t) {.executor = NULL, .outcome = &outcome});
+    expect_(outcome.status == usearch_status_invalid_argument_k);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
+
+    int32_t const devices[1] = {0};
+    usearch_executor_t gpu = NULL;
+    usearch_executor_for_vram(&(usearch_executor_for_vram_t) {.executor = &gpu,
+                                                              .outcome = &outcome,
+                                                              .vram = {.devices = devices, .devices_count = 1}});
+    if (outcome.status != usearch_status_success_k) return;
+    usearch_gpu_device_t device = {0};
+    size_t devices_count = 0;
+    usearch_gpu_devices(&(usearch_gpu_devices_t) {.outcome = &outcome,
+                                                  .devices = &device,
+                                                  .devices_capacity = 1,
+                                                  .devices_count = &devices_count});
+    usearch_executor_stream(
+        &(usearch_executor_stream_t) {.executor = gpu, .position = 99, .outcome = &outcome, .stream = &named});
+    expect_(outcome.status == usearch_status_invalid_argument_k);
+    usearch_executor_stream(&(usearch_executor_stream_t) {.executor = gpu, .outcome = &outcome, .stream = &named});
+    expect_(outcome.status == usearch_status_success_k);
+    if (device.vendor != usearch_gpu_vendor_apple_k) {
+        usearch_executor_accepts(&(usearch_executor_accepts_t) {.executor = gpu, .stream = named, .outcome = &outcome});
+        expect_(outcome.status == usearch_status_success_k);
+        usearch_executor_accepts(
+            &(usearch_executor_accepts_t) {.executor = gpu, .stream = (void*)2, .outcome = &outcome});
+        expect_(outcome.status == usearch_status_success_k);
+        usearch_executor_follow(&(usearch_executor_follow_t) {.executor = gpu, .stream = named, .outcome = &outcome});
+        expect_(outcome.status == usearch_status_success_k);
+        void* no_event = NULL;
+        usearch_executor_follow(
+            &(usearch_executor_follow_t) {.executor = gpu, .event = &no_event, .outcome = &outcome});
+        expect_(outcome.status == usearch_status_success_k);
+    }
+    expect_(usearch_executor_free(gpu) == usearch_status_success_k);
+}
+
 /** An executor refuses to be freed while an arena made with it lives, a RAM one included, and
  *  frees once that arena is gone. */
 void test_executor_free_with_live_arena(void) {
@@ -6550,6 +6608,9 @@ int main(int argc, char* argv[]) {
     }
     start_test_case("test_arenas");
     test_arenas(dimension_counts[0]);
+    finish_test_case(NULL);
+    start_test_case("test_executor_streams");
+    test_executor_streams();
     finish_test_case(NULL);
     start_test_case("test_arena_generation");
     test_arena_generation(dimension_counts[0]);

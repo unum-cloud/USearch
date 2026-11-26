@@ -111,10 +111,11 @@ static size_t const observation_fields = sizeof(usearch_geospatial_observation_t
  *
  *  @return The observations, or NULL with an exception set.
  */
-static usearch_geospatial_observation_t const* observations_from_object(PyObject* object, size_t* count,
+static usearch_geospatial_observation_t const* observations_from_object(PyObject* object, usearch_executor_t executor,
+                                                                        size_t* count,
                                                                         usearch_py_buffer_backing_t* backing) {
     usearch_matrix_view_t matrix;
-    if (usearch_py_matrix_from_object(object, usearch_scalar_f64_k, &matrix, backing) != 0) return NULL;
+    if (usearch_py_matrix_from_object(object, executor, usearch_scalar_f64_k, &matrix, backing) != 0) return NULL;
     if (matrix.columns != observation_fields ||
         (matrix.rows > 1 && matrix.stride != sizeof(usearch_geospatial_observation_t))) {
         usearch_py_buffer_release(backing);
@@ -648,8 +649,8 @@ static PyObject* GeospatialIndex_insert(PyObject* self, PyObject* const* args, P
         !(call = usearch_py_call_open(&receiver, &stack)))
         return NULL;
 
-    usearch_geospatial_observation_t const* const observations = observations_from_object(observations_object, &count,
-                                                                                          &call->buffers[0]);
+    usearch_geospatial_observation_t const* const observations = observations_from_object(
+        observations_object, receiver.executor, &count, &call->buffers[0]);
     if (!observations || usearch_py_keys_from_object(keys_object, count, &call->keys[0]) != 0 ||
         walk_parse(call, progress_object, stats_object) != 0)
         return usearch_py_call_discard(&receiver, call);
@@ -830,8 +831,8 @@ static PyObject* GeospatialIndex_search(PyObject* self, PyObject* const* args, P
         return NULL;
 
     Matches* matches = NULL;
-    usearch_geospatial_observation_t const* const queries = observations_from_object(queries_object, &count,
-                                                                                     &call->buffers[0]);
+    usearch_geospatial_observation_t const* const queries = observations_from_object(queries_object, receiver.executor,
+                                                                                     &count, &call->buffers[0]);
     if (!queries || usearch_py_predicate_from_object(predicate_object, &call->holds[callback_slot_k]) != 0 ||
         walk_parse(call, progress_object, stats_object) != 0 ||
         !(matches = usearch_py_call_arena(&receiver, call, arena_object, &MatchesType)))
@@ -929,8 +930,8 @@ static PyObject* GeospatialIndex_within(PyObject* self, PyObject* const* args, P
         return NULL;
 
     DenseProducts* products = NULL;
-    usearch_geospatial_observation_t const* const queries = observations_from_object(queries_object, &count,
-                                                                                     &call->buffers[0]);
+    usearch_geospatial_observation_t const* const queries = observations_from_object(queries_object, receiver.executor,
+                                                                                     &count, &call->buffers[0]);
     if (!queries || usearch_py_predicate_from_object(predicate_object, &call->holds[callback_slot_k]) != 0 ||
         walk_parse(call, progress_object, stats_object) != 0 ||
         !(products = usearch_py_call_arena(&receiver, call, arena_object, &DenseProductsType)))

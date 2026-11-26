@@ -717,6 +717,62 @@ static usearch_matches_tape_view_t tape_view_of(products_tape_t const& tape, std
             written ? tape.scores.data() : nullptr, tape.offsets.data()};
 }
 
+/** Answers whether the foreign stream @p foreign sits on the device @p stream queues on. The null,
+ *  legacy and per-thread handles name the default streams of whichever device is current, which a
+ *  consumer means as this device's, so they pass without asking the driver. */
+static util::status_t foreign_stream_on_device(util::cuda_executor_t::stream_t& stream, void* foreign) noexcept {
+    if (reinterpret_cast<std::uintptr_t>(foreign) <= 2) return {};
+    util::cuda_api_t const& api = stream.handle.api();
+    util::cuda_context_handle_t context = nullptr;
+    if (api.stream_get_context(static_cast<util::cuda_stream_handle_t>(foreign), &context) != util::cuda_success_k)
+        return {util::status_code_t::device_k, "The driver could not name the stream's context"};
+    if (context != api.primary_contexts[stream.ordinal])
+        return {util::status_code_t::config_mismatch_k, "The stream sits on another device"};
+    return {};
+}
+
+static util::status_t foreign_stream_on_device(util::hip_executor_t::stream_t& stream, void* foreign) noexcept {
+    if (reinterpret_cast<std::uintptr_t>(foreign) <= 2) return {};
+    int device = -1;
+    if (stream.handle.api().stream_get_device(static_cast<util::hip_stream_handle_t>(foreign), &device) !=
+        util::hip_success_k)
+        return {util::status_code_t::device_k, "The runtime could not name the stream's device"};
+    if (device < 0 || static_cast<std::size_t>(device) != stream.ordinal)
+        return {util::status_code_t::config_mismatch_k, "The stream sits on another device"};
+    return {};
+}
+
+/** Queues on @p stream a wait for the foreign event @p event points at, or for what the foreign
+ *  @p foreign queued so far, through the stream's own event, its device bound, as @c follow_foreign
+ *  asks it to; a null event behind @p event leaves nothing to wait for. */
+template <typename stream_handle_type_, typename event_handle_type_, auto success_, typename stream_type_>
+static util::status_t queue_foreign_wait(stream_type_& stream, void* event, void* foreign) noexcept {
+    if (util::status_t const bound = stream.bind(); bound.failed()) return bound;
+    event_handle_type_ awaited = nullptr;
+    if (foreign) {
+        // The mark is this stream's own event, which a driver records only on its device's streams
+        if (util::status_t const placed = foreign_stream_on_device(stream, foreign); placed.failed()) return placed;
+        if (stream.event.record(static_cast<stream_handle_type_>(foreign)).failed())
+            return {util::status_code_t::device_k, "The foreign stream refused the mark"};
+        awaited = static_cast<event_handle_type_>(stream.event);
+    }
+    else awaited = *static_cast<event_handle_type_ const*>(event);
+    if (!awaited) return {}; // Arrow's producer had nothing left to wait for
+    if (stream.handle.api().stream_wait_event(stream.handle, awaited, 0) != success_)
+        return {util::status_code_t::device_k, "The stream refused the foreign wait"};
+    return {};
+}
+
+static util::status_t follow_foreign(util::cuda_executor_t::stream_t& stream, void* event, void* foreign) noexcept {
+    return queue_foreign_wait<util::cuda_stream_handle_t, util::cuda_event_handle_t, util::cuda_success_k>(
+        stream, event, foreign);
+}
+
+static util::status_t follow_foreign(util::hip_executor_t::stream_t& stream, void* event, void* foreign) noexcept {
+    return queue_foreign_wait<util::hip_stream_handle_t, util::hip_event_handle_t, util::hip_success_k>(stream, event,
+                                                                                                        foreign);
+}
+
 extern "C" {
 
 #pragma region Lifetime
@@ -1877,6 +1933,67 @@ USEARCH_EXPORT void usearch_executor_drain(usearch_executor_drain_t* arguments) 
     util::status_t const drained = visit_executor(executor, [](auto& typed) noexcept { return typed.wait(); });
     host_outcome_verbs().release_claim(&executor.holding_call.claim);
     propagate_error(drained, outcome);
+}
+
+USEARCH_EXPORT void usearch_executor_stream(usearch_executor_stream_t* arguments) {
+    call_outcome_t outcome(*arguments);
+    if (!arguments->executor || !arguments->stream)
+        return propagate_error(usearch_status_invalid_argument_k, outcome,
+                               "The call needs an executor and an output for the stream"),
+               void();
+    *arguments->stream = nullptr;
+    propagate_error(
+        visit_executor_stream(*arguments->executor, arguments->position,
+                              [&]<typename kind_type_>(kind_type_&, typename kind_type_::stream_t& stream) noexcept {
+                                  if constexpr (std::is_same_v<kind_type_, util::metal_executor_t>)
+                                      *arguments->stream = stream.handle.queue();
+                                  else if constexpr (std::is_same_v<kind_type_, util::cuda_executor_t>)
+                                      *arguments->stream = static_cast<util::cuda_stream_handle_t>(stream.handle);
+                                  else *arguments->stream = static_cast<util::hip_stream_handle_t>(stream.handle);
+                                  return util::status_t {};
+                              }),
+        outcome);
+}
+
+USEARCH_EXPORT void usearch_executor_follow(usearch_executor_follow_t* arguments) {
+    call_outcome_t outcome(*arguments);
+    usearch_executor_t const executor = arguments->executor;
+    if (!executor || !arguments->event == !arguments->stream)
+        return propagate_error(usearch_status_invalid_argument_k, outcome,
+                               "The call needs an executor and either an event or a stream to follow"),
+               void();
+    // The wait queues on a stream a call may drive, so it holds the executor as a call does
+    holding_call_t& call = executor->holding_call;
+    if (host_outcome_verbs().take_claim(&call.claim) == call_claim_t::held_k)
+        return propagate_error(usearch_status_contended_k, outcome, "A call holds the executor"), void();
+    util::status_t const followed = visit_executor_stream(
+        *executor, arguments->position,
+        [&]<typename kind_type_>(kind_type_& kind, typename kind_type_::stream_t& stream) noexcept -> util::status_t {
+            if constexpr (std::is_same_v<kind_type_, util::metal_executor_t>)
+                return {util::status_code_t::unsupported_k, "A Metal queue waits on no foreign mark"};
+            else {
+                auto [claim, claim_status] = kind.claim();
+                if (claim_status.failed()) return claim_status;
+                return follow_foreign(stream, arguments->event, arguments->stream);
+            }
+        });
+    host_outcome_verbs().release_claim(&call.claim);
+    propagate_error(followed, outcome);
+}
+
+USEARCH_EXPORT void usearch_executor_accepts(usearch_executor_accepts_t* arguments) {
+    call_outcome_t outcome(*arguments);
+    if (!arguments->executor)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The call needs an executor"), void();
+    propagate_error(
+        visit_executor_stream(
+            *arguments->executor, arguments->position,
+            [&]<typename kind_type_>(kind_type_&, typename kind_type_::stream_t& stream) noexcept -> util::status_t {
+                if constexpr (std::is_same_v<kind_type_, util::metal_executor_t>)
+                    return {util::status_code_t::unsupported_k, "A Metal queue names no foreign stream's device"};
+                else return foreign_stream_on_device(stream, arguments->stream);
+            }),
+        outcome);
 }
 
 USEARCH_EXPORT usearch_status_t usearch_executor_free(usearch_executor_t executor) {

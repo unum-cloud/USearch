@@ -262,6 +262,8 @@ typedef struct Executor {
     usearch_executor_t owned;
 } Executor;
 
+struct arena_buffer_dlpack_t;
+
 /** The memory every output whose length scales with a call lands in, rewound by the next call
  *  handed it. */
 typedef struct Arena {
@@ -271,6 +273,10 @@ typedef struct Arena {
     /** The @c Executor that made it, held until the arena is freed; NULL for the calling thread's
      *  host pages. */
     PyObject* executor;
+
+    /** Dropped DLPack exports still open, whose consumers' streams the arena's stream must follow
+     *  before its next call rewinds the memory, each closed once followed. */
+    _Atomic(struct arena_buffer_dlpack_t*) unfollowed;
 } Arena;
 
 /** A C enum mirrored as an `enum.IntEnum`, its members spelled by the C name table. */
@@ -535,8 +541,8 @@ int usearch_py_matrix_bytes(size_t rows, size_t columns, size_t unit, Py_ssize_t
 int usearch_py_scalar_from_object(PyObject* object, char const* field, usearch_scalar_t* kind);
 
 /**
- *  @brief Views a contiguous-rowed matrix, PEP 3118 first, @c __array_interface__ second, and
- *      an Arrow column third.
+ *  @brief Views a contiguous-rowed matrix through DLPack, versioned then legacy, an Arrow column,
+ *      device then host, the CUDA Array Interface, PEP 3118, then @c __array_interface__ .
  *
  *  A one-dimensional input is read as a single row, matching the C surface's rule that one
  *  vector is a one-row matrix. Only the row stride may vary; a strided column would force a
@@ -544,6 +550,7 @@ int usearch_py_scalar_from_object(PyObject* object, char const* field, usearch_s
  *  that forbids writing is accepted.
  *
  *  @param[in] object The tensor-like input.
+ *  @param[in] executor The call's executor, which follows a producer still writing, or NULL.
  *  @param[in] scalar_hint Names the scalar kind; unknown infers it from the buffer, and a named one
  *      must be as wide as the buffer's own items.
  *  @param[out] view The viewed matrix, whose @c columns counts logical dimensions rather than
@@ -551,8 +558,12 @@ int usearch_py_scalar_from_object(PyObject* object, char const* field, usearch_s
  *  @param[out] backing Storage the view points into; release it with @c usearch_py_buffer_release.
  *  @return 0 on success, -1 with an exception set otherwise.
  */
-int usearch_py_matrix_from_object(PyObject* object, usearch_scalar_t scalar_hint, usearch_matrix_view_t* view,
-                                  usearch_py_buffer_backing_t* backing);
+int usearch_py_matrix_from_object(PyObject* object, usearch_executor_t executor, usearch_scalar_t scalar_hint,
+                                  usearch_matrix_view_t* view, usearch_py_buffer_backing_t* backing);
+
+/** Orders the calls of @p executor after a foreign producer, its @p event or its @p stream, then
+ *  waits for it from the host, as the host may read what it writes; 0, or -1 raising. */
+int usearch_py_executor_follow_and_drain(usearch_executor_t executor, void* event, void* stream);
 
 /**
  *  @brief Views a writable contiguous byte run of exactly @p bytes for state the caller passes a

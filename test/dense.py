@@ -14,6 +14,7 @@ Date: August 16, 2026
 
 import asyncio
 import contextlib
+import ctypes
 import gc
 import os
 import weakref
@@ -993,6 +994,47 @@ def test_inputs_arrive_through_dlpack(executor, seed: int):
     assert found[:, 0].tolist() == [0, 1]
     assert queries.requests
     assert all(requested["stream"] is None for requested in queries.requests)
+
+
+class DLPackRefused:
+    """Refuses DLPack as NumPy does a read-only array, leaving the array interface beside it."""
+
+    def __init__(self, array: npt.NDArray[np.float32]) -> None:
+        self.__array_interface__ = array.__array_interface__
+        self.array = array
+
+    def __dlpack__(self, **requested):
+        raise BufferError("refused")
+
+    def __dlpack_device__(self) -> tuple[int, int]:
+        return (1, 0)
+
+
+def test_a_refused_dlpack_falls_back_to_buffers(executor, seed: int):
+    """A producer refusing DLPack with `BufferError` still reaches the index through its array interface."""
+    index, vectors = build_index(16, 8, executor, seed=seed)
+    found = keys_to_integers(index.on(executor).search(DLPackRefused(vectors[:2]), 1).keys)
+    assert found[:, 0].tolist() == [0, 1]
+
+
+def test_dlpack_exports_check_the_stream(executor, seed: int):
+    """Host outputs take no stream but None or -1, as the standard asks, and versioned capsules name their version."""
+    index, _ = build_index(4, 8, executor, seed=seed)
+    rows = index.on(executor).get(1)
+    assert np.array_equal(np.from_dlpack(rows), np.asarray(rows))
+    rows.__dlpack__(stream=None)
+    rows.__dlpack__(stream=-1)
+    with pytest.raises(ValueError):
+        rows.__dlpack__(stream=1)
+    with pytest.raises(TypeError):
+        rows.__dlpack__(stream="default")
+    with pytest.raises(TypeError):
+        rows.__dlpack__(stream=True)
+    assert not hasattr(rows, "__cuda_array_interface__")
+    capsule = rows.__dlpack__(max_version=(1, 0))
+    is_capsule_named = ctypes.pythonapi.PyCapsule_IsValid
+    is_capsule_named.argtypes, is_capsule_named.restype = [ctypes.py_object, ctypes.c_char_p], ctypes.c_int
+    assert is_capsule_named(capsule, b"dltensor_versioned") == 1
 
 
 def test_duplicate_keys_stack(executor, seed: int):

@@ -915,7 +915,7 @@ static PyObject* DenseIndex_insert(PyObject* self, PyObject* const* args, Py_ssi
         return NULL;
 
     usearch_matrix_view_t vectors;
-    if (usearch_py_matrix_from_object(vectors_object, dtype, &vectors, &call->buffers[0]) != 0 ||
+    if (usearch_py_matrix_from_object(vectors_object, receiver.executor, dtype, &vectors, &call->buffers[0]) != 0 ||
         usearch_py_keys_from_object(keys_object, vectors.rows, &call->keys[0]) != 0 ||
         walk_parse(call, progress_object, stats_object) != 0)
         return usearch_py_call_discard(&receiver, call);
@@ -1117,7 +1117,7 @@ static PyObject* DenseIndex_search(PyObject* self, PyObject* const* args, Py_ssi
 
     usearch_matrix_view_t queries;
     Matches* matches = NULL;
-    if (usearch_py_matrix_from_object(queries_object, dtype, &queries, &call->buffers[0]) != 0 ||
+    if (usearch_py_matrix_from_object(queries_object, receiver.executor, dtype, &queries, &call->buffers[0]) != 0 ||
         usearch_py_predicate_from_object(predicate_object, &call->holds[callback_slot_k]) != 0 ||
         walk_parse(call, progress_object, stats_object) != 0 ||
         !(matches = usearch_py_call_arena(&receiver, call, arena_object, &MatchesType)))
@@ -1342,7 +1342,7 @@ static PyObject* DenseIndex_multiply(PyObject* self, PyObject* const* args, Py_s
 
     usearch_matrix_view_t rows;
     DenseProducts* products = NULL;
-    if (usearch_py_matrix_from_object(rows_object, dtype, &rows, &call->buffers[0]) != 0 ||
+    if (usearch_py_matrix_from_object(rows_object, receiver.executor, dtype, &rows, &call->buffers[0]) != 0 ||
         walk_parse(call, progress_object, stats_object) != 0 ||
         !(products = usearch_py_call_arena(&receiver, call, arena_object, &DenseProductsType)))
         return usearch_py_call_discard(&receiver, call);
@@ -1507,8 +1507,9 @@ static PyObject* DenseIndex_attend(PyObject* self, PyObject* const* args, Py_ssi
     void* carry = NULL;
     ArenaBuffer* outputs = NULL;
     usearch_arena_description_t placed = {0};
-    if (usearch_py_matrix_from_object(queries_object, dtype, &queries, &call->buffers[0]) != 0 ||
-        usearch_py_matrix_from_object(values_object, values_kind, &attend->values, &call->buffers[1]) != 0 ||
+    if (usearch_py_matrix_from_object(queries_object, receiver.executor, dtype, &queries, &call->buffers[0]) != 0 ||
+        usearch_py_matrix_from_object(values_object, receiver.executor, values_kind, &attend->values,
+                                      &call->buffers[1]) != 0 ||
         usearch_py_callable_from_object(row_of_object, "row_of", &call->holds[callback_slot_k]) != 0 ||
         walk_parse(call, progress_object, stats_object) != 0 ||
         (carry_object && carry_object != Py_None &&
@@ -1632,7 +1633,7 @@ static PyObject* DenseIndex_maxsim(PyObject* self, PyObject* const* args, Py_ssi
         return NULL;
 
     usearch_matrix_view_t queries;
-    if (usearch_py_matrix_from_object(queries_object, dtype, &queries, &call->buffers[0]) != 0)
+    if (usearch_py_matrix_from_object(queries_object, receiver.executor, dtype, &queries, &call->buffers[0]) != 0)
         return usearch_py_call_discard(&receiver, call);
     // The library takes a query count, which only the rows of this matrix can tell.
     if (rows_per_query == 0 || queries.rows % rows_per_query != 0) {
@@ -1932,8 +1933,8 @@ static PyObject* DenseIndex_sample(PyObject* self, PyObject* const* args, Py_ssi
     size_t shown_count = 0, focus_count = 0;
     Sample* sample = NULL;
     if ((coordinates_object && coordinates_object != Py_None &&
-         usearch_py_matrix_from_object(coordinates_object, usearch_scalar_f32_k, &coordinates, &call->buffers[0]) !=
-             0) ||
+         usearch_py_matrix_from_object(coordinates_object, receiver.executor, usearch_scalar_f32_k, &coordinates,
+                                       &call->buffers[0]) != 0) ||
         optional_keys_from_object(shown_object, &shown_count, &call->keys[0]) != 0 ||
         optional_keys_from_object(focus_object, &focus_count, &call->keys[1]) != 0 ||
         walk_parse(call, progress_object, stats_object) != 0 ||
@@ -2585,7 +2586,7 @@ static PyObject* DenseIndex_search_stream(PyObject* self, PyObject* const* args,
 
     usearch_matrix_view_t query;
     usearch_py_buffer_backing_t backing;
-    if (usearch_py_matrix_from_object(query_object, dtype, &query, &backing) != 0) return NULL;
+    if (usearch_py_matrix_from_object(query_object, receiver.executor, dtype, &query, &backing) != 0) return NULL;
 
     usearch_dense_search_stream_t stream_handle = NULL;
     usearch_outcome_t outcome = {0};

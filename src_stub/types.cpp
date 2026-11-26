@@ -263,6 +263,33 @@ void usearch_executor_drain(usearch_executor_drain_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
 }
 
+/* Every executor of the stub computes on host threads, as it opens no device, so none drives a
+ * stream */
+
+void usearch_executor_stream(usearch_executor_stream_t* arguments) {
+    deferred_outcome_t outcome(arguments->outcome);
+    if (arguments->stream) *arguments->stream = nullptr;
+    if (reject_if(!arguments->executor || !arguments->stream, usearch_status_invalid_argument_k,
+                  "The call needs an executor and an output for the stream", outcome))
+        return;
+    propagate_error(usearch_status_unsupported_k, outcome, "A host executor drives no stream");
+}
+
+void usearch_executor_follow(usearch_executor_follow_t* arguments) {
+    deferred_outcome_t outcome(arguments->outcome);
+    if (reject_if(!arguments->executor || !arguments->event == !arguments->stream, usearch_status_invalid_argument_k,
+                  "The call needs an executor and either an event or a stream to follow", outcome))
+        return;
+    propagate_error(usearch_status_unsupported_k, outcome, "A host executor drives no stream");
+}
+
+void usearch_executor_accepts(usearch_executor_accepts_t* arguments) {
+    deferred_outcome_t outcome(arguments->outcome);
+    if (reject_if(!arguments->executor, usearch_status_invalid_argument_k, "The call needs an executor", outcome))
+        return;
+    propagate_error(usearch_status_unsupported_k, outcome, "A host executor drives no stream");
+}
+
 usearch_status_t usearch_executor_free(usearch_executor_t executor) {
     if (!executor) return usearch_status_success_k;
     if (serial_atomic_ref<util::u32_t const> {executor->arenas}.load(std::memory_order_acquire) != 0)
