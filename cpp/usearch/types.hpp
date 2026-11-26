@@ -13,6 +13,7 @@
  */
 #pragma once
 
+#include <cassert> // `assert`
 #include <cstddef> // `std::size_t`, `std::ptrdiff_t`
 #include <cstdint> // `std::uint8_t`, `std::uint16_t`, `std::uint32_t`, `std::uint64_t`, `std::int8_t`, `std::int32_t`
 
@@ -467,6 +468,7 @@ struct tape_entries {
 
     /** The values of the entry at @p position, below @c written. */
     std::span<element_type_ const> entry(std::size_t position) const noexcept {
+        assert(position < written && "The entry lies past what the call wrote");
         std::size_t const begin = offset_(position), end = offset_(position + 1);
         element_type_ const* first = static_cast<element_type_ const*>(view.data);
         return {first + begin * lanes_, (end - begin) * lanes_};
@@ -602,9 +604,16 @@ class predicate_t {
 
 #pragma region Executors and Arenas
 
+/** Frees @p executor as its owner dies, which every arena made with it refuses while it lives;
+ *  declaring the executor before its arenas destroys them first. */
+inline void free_executor(usearch_executor_t executor) noexcept {
+    [[maybe_unused]] usearch_status_t const freed = usearch_executor_free(executor);
+    assert(freed == usearch_status_success_k && "Every arena made with the executor dies before it");
+}
+
 /** Owns one executor; an empty one runs every call on the caller's own thread. */
 class executor_t {
-    owner<usearch_executor_t, usearch_executor_free> owner_;
+    owner<usearch_executor_t, free_executor> owner_;
 
   public:
     usearch_executor_t handle() const noexcept { return owner_.handle(); }

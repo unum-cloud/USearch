@@ -173,7 +173,7 @@ A second call on a held executor finishes `usearch_status_contended_k`, so calle
 `usearch_executor_drain` waits until no call holds the executor, then sets its threads' mood until the next call: `usearch_mood_parked_k`, the default, lets idle threads sleep in the kernel, `usearch_mood_spinning_k` keeps them hot.
 The drain holds the executor as a call would until it returns, so a call submitted meanwhile finishes `usearch_status_contended_k`.
 A blocking verb called from inside a progress handler or predicate of a call on the same executor reports `usearch_status_contended_k`, and so does a drain on the thread running that call's body; a drain from any other of its threads would wait on itself.
-`usearch_executor_free` waits out the call holding the executor before it releases the threads, and every arena it made must be freed before it.
+`usearch_executor_free` waits out the call holding the executor before it releases the threads, and answers `usearch_status_contended_k`, freeing nothing, while an arena made with it lives.
 
 ## Arenas
 

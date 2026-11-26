@@ -846,6 +846,8 @@ public final class Types {
          * Drains every thread or stream and releases them. It is idempotent, and a freed executor must
          * not be used again. One the program drops without closing is released once it is unreachable.
          *
+         * @throws USearchException CONTENDED while an arena made with this executor lives; close it first.
+         *
          * <p>
          * Calls {@code usearch_executor_free}.
          */
@@ -1529,12 +1531,9 @@ public final class Types {
      */
     static final class Handle {
 
-        /** The scope calls reference; closing it is what retires the handle. */
-        final java.lang.foreign.Arena lifetime = java.lang.foreign.Arena.ofShared();
+        private final Cleaner.Cleanable cleanable;
 
-        private final MemorySegment address;
-
-        private final Cleaner.Cleanable release;
+        private final Release release;
 
         Handle(MemorySegment address, MethodHandle free) {
             this(address, free, null);
@@ -1542,19 +1541,52 @@ public final class Types {
 
         /** A handle whose release keeps {@code owner} reachable until it has freed the address. */
         Handle(MemorySegment address, MethodHandle free, @Nullable Object owner) {
-            this.address = address;
-            release = CLEANER.register(this, new Release(lifetime, address, free, owner));
+            release = new Release(address, free, owner);
+            cleanable = CLEANER.register(this, release);
         }
 
-        /** Frees a handle no call references, and leaves one a call still references to a later collection. */
-        private record Release(
-                java.lang.foreign.Arena lifetime,
-                MemorySegment address,
-                MethodHandle free,
-                @Nullable Object owner) implements Runnable {
+        /**
+         * Frees a handle no call references, and leaves one a call still references to a later collection.
+         * It owns the state the cleaner reads, so an explicit close can retire it first.
+         */
+        private static final class Release implements Runnable {
+
+            /** The scope calls reference; closing it is what retires the handle. */
+            volatile java.lang.foreign.Arena lifetime = java.lang.foreign.Arena.ofShared();
+
+            private final MemorySegment address;
+            private final MethodHandle free;
+            private final @Nullable Object owner;
+            private volatile boolean freed;
+
+            Release(MemorySegment address, MethodHandle free, @Nullable Object owner) {
+                this.address = address;
+                this.free = free;
+                this.owner = owner;
+            }
+
+            /** Frees now, or throws and leaves the handle open when the library refuses. */
+            void close() {
+                if (freed) {
+                    return;
+                }
+                if (lifetime.scope().isAlive()) {
+                    lifetime.close();
+                }
+                int status = Library.release(free, address);
+                if (status != 0) {
+                    lifetime = java.lang.foreign.Arena.ofShared();
+                    throw new USearchException(Status.of(status), "an arena made with the handle is alive");
+                }
+                freed = true;
+                Reference.reachabilityFence(owner);
+            }
 
             @Override
             public void run() {
+                if (freed) {
+                    return;
+                }
                 try {
                     if (lifetime.scope().isAlive()) {
                         lifetime.close();
@@ -1563,9 +1595,15 @@ public final class Types {
                     CLEANER.register(new Object(), this);
                     return;
                 }
-                Library.invoke(free, address);
+                freed = true;
+                Library.release(free, address);
                 Reference.reachabilityFence(owner);
             }
+        }
+
+        /** The scope calls reference. */
+        java.lang.foreign.Arena lifetime() {
+            return release.lifetime;
         }
 
         /**
@@ -1574,27 +1612,26 @@ public final class Types {
          * @throws IllegalStateException on a closed handle.
          */
         MemorySegment address() {
-            if (!lifetime.scope().isAlive()) {
+            if (!release.lifetime.scope().isAlive()) {
                 throw new IllegalStateException("usearch: the handle is closed");
             }
-            return address;
+            return release.address;
         }
 
         /**
-         * Frees the handle; idempotent.
+         * Frees the handle; idempotent. Concurrent calls to it are undefined, as for the C free.
          *
          * @throws IllegalStateException while another thread's call references the handle.
+         * @throws USearchException CONTENDED when the library refuses the free, which leaves the handle open.
          */
         void close() {
-            if (lifetime.scope().isAlive()) {
-                lifetime.close();
-            }
-            release.clean();
+            release.close();
+            cleanable.clean();
         }
 
         @Override
         public String toString() {
-            return lifetime.scope().isAlive() ? "at=" + Long.toHexString(address.address()) : "closed";
+            return release.lifetime.scope().isAlive() ? "at=" + Long.toHexString(release.address.address()) : "closed";
         }
     }
 
@@ -1696,7 +1733,7 @@ public final class Types {
         private void invoke() {
             Handle handle = referenced;
             MemorySegment passed =
-                    handle == null ? arguments : arguments.reinterpret(arguments.byteSize(), handle.lifetime, null);
+                    handle == null ? arguments : arguments.reinterpret(arguments.byteSize(), handle.lifetime(), null);
             Library.invoke(verb.handle(), passed);
         }
 
@@ -2122,7 +2159,7 @@ public final class Types {
     private static final VarHandle DRAIN_MOOD = DRAIN.field("mood");
 
     private static final MethodHandle EXECUTOR_FREE =
-            Library.downcall("usearch_executor_free", FunctionDescriptor.ofVoid(Library.POINTER));
+            Library.downcall("usearch_executor_free", FunctionDescriptor.of(Library.ENUM, Library.POINTER));
 
     /** {@code usearch_arena_init_t}. */
     private static final Verb ARENA_INIT = new Verb(
@@ -2134,12 +2171,9 @@ public final class Types {
 
     private static final VarHandle ARENA_INIT_ARENA = ARENA_INIT.field("arena");
 
-    /**
-     * {@code usearch_arena_free}, its status dropped: it refuses only while an Arrow export of the
-     * outputs is open, and no Java view opens one, so every free here frees.
-     */
-    private static final MethodHandle ARENA_FREE = MethodHandles.dropReturn(
-            Library.downcall("usearch_arena_free", FunctionDescriptor.of(Library.ENUM, Library.POINTER)));
+    /** {@code usearch_arena_free}, which refuses while an Arrow export of the outputs is open. */
+    private static final MethodHandle ARENA_FREE =
+            Library.downcall("usearch_arena_free", FunctionDescriptor.of(Library.ENUM, Library.POINTER));
 
     /** {@code usearch_arena_description_t}. */
     private static final StructLayout ARENA_DESCRIPTION = MemoryLayout.structLayout(

@@ -466,6 +466,14 @@ test("Deferred calls", async (t) => {
     executor.free();
   });
 
+  await t.test("an executor refuses to free under an arena made with it", () => {
+    const executor = Executor.forRam();
+    const arena = new Arena(executor);
+    assert.throws(() => executor.free(), { code: Status.Contended });
+    arena.free();
+    executor.free();
+  });
+
   await t.test("a dropped call keeps its inputs alive until it runs", () => {
     const executor = Executor.forRam();
     const target = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 3 });

@@ -436,7 +436,7 @@ void test_init_ram_starts_empty(size_t const collection_size, size_t const dimen
     expect_at(refused == NULL, __FILE__, __LINE__, "A refused initialization returns no handle");
 #endif
 
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     usearch_dense_free(index);
 }
 
@@ -500,7 +500,7 @@ void test_empty_reads(size_t const dimensions) {
     usearch_dense_index_t const index = create_index(dimensions);
     usearch_executor_t const executor = create_executor(0);
     expect_empty_reads(index, executor, dimensions, true);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     usearch_dense_free(index);
 
     usearch_outcome_t outcome = {0};
@@ -536,7 +536,7 @@ void test_empty_reads(size_t const dimensions) {
                                          : usearch_status_invalid_argument_k;
     expect_at(!streamed_executor && outcome.status == refused, __FILE__, __LINE__,
               "A null stream is refused, as is every stream without a GPU");
-    usearch_executor_free(streamed_executor);
+    expect_(usearch_executor_free(streamed_executor) == usearch_status_success_k);
     // Malformed stream lists are refused before any stream is read, so these stand-in addresses,
     // which no driver could synchronize or destroy, stay the caller's untouched.
     void* const stand_ins[2] = {(void*)(uintptr_t)0x1000, (void*)(uintptr_t)0x2000};
@@ -557,7 +557,7 @@ void test_empty_reads(size_t const dimensions) {
             &(usearch_executor_for_vram_t) {.executor = &device_executor, .outcome = &outcome, .vram = vram});
         if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return;
         expect_empty_reads(device_index, device_executor, dimensions, false);
-        usearch_executor_free(device_executor);
+        expect_(usearch_executor_free(device_executor) == usearch_status_success_k);
         usearch_dense_free(device_index);
     }
 }
@@ -672,7 +672,7 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
     usearch_arena_free(arena);
     free(keys);
     free(data);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     usearch_dense_free(index);
 }
 
@@ -751,7 +751,7 @@ void test_add_progress(void) {
 
     free(keys);
     free(data);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     usearch_dense_free(index);
 }
 
@@ -909,7 +909,7 @@ void test_reshard(size_t const dimensions) {
 
     free(keys);
     free(data);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     usearch_dense_free(index);
 }
 
@@ -1060,7 +1060,7 @@ void test_reshard_gather(size_t const dimensions) {
 
     free(keys);
     free(data);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     for (size_t which = 0; which != indexes_count; ++which) usearch_dense_free(indexes[which]);
 }
 
@@ -1248,7 +1248,7 @@ void test_refine_plan(size_t const dimensions, size_t const rows_count) {
     usearch_arena_free(arena);
     usearch_dense_free(loaded);
     free(data);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
 }
 
 /** An index reshards as the one source into two empty targets through a plan whose every call is
@@ -1336,7 +1336,7 @@ void test_reshard_cut_plan(size_t const dimensions) {
 
     for (size_t part = 0; part != 3; ++part) usearch_dense_free(parts[part]);
     free(data);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
 }
 
 /** Draws @p count random reads of 100 to 199 nucleotides, end to end around @p count + 1
@@ -1489,7 +1489,7 @@ void test_sequence_reshard(void) {
 
     free(bytes);
     for (size_t which = 0; which != indexes_count; ++which) usearch_sequence_free(indexes[which]);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
 }
 
 /** Reads entries back by key. @c usearch_dense_get sizes its own output, writing every row under
@@ -1685,8 +1685,19 @@ void test_count_and_get(size_t const dimensions) {
 
     usearch_arena_free(arena);
     free(data);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     usearch_dense_free(index);
+}
+
+/** An executor refuses to be freed while an arena made with it lives, a RAM one included, and
+ *  frees once that arena is gone. */
+void test_executor_free_with_live_arena(void) {
+    usearch_executor_t const executor = create_executor(2);
+    usearch_arena_t const arena = create_arena(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_contended_k);
+    expect_(usearch_arena_free(arena) == usearch_status_success_k);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
+    expect_(usearch_executor_free(NULL) == usearch_status_success_k);
 }
 
 /** Arenas come from an executor or from none, and every verb lands its outputs in whichever one it
@@ -1820,14 +1831,14 @@ void test_arenas(size_t const dimensions) {
                       description.host_access == expected_access,
                   __FILE__, __LINE__, "An arena made by a device executor lives on its first device");
         usearch_arena_free(device_arena);
-        usearch_executor_free(device_executor);
+        expect_(usearch_executor_free(device_executor) == usearch_status_success_k);
     }
 
     usearch_arena_free(local);
     usearch_arena_free(placed);
     usearch_arena_free(NULL);
     free(data);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     usearch_dense_free(index);
 }
 
@@ -1929,7 +1940,7 @@ void test_walks_name_their_index(size_t const dimensions) {
 
     usearch_arena_free(arena);
     free(data);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     usearch_dense_free(other);
     usearch_dense_free(index);
 }
@@ -2151,7 +2162,7 @@ char const* test_sample(void) {
         usearch_dense_free(index);
         free(rows);
         usearch_arena_free(arena);
-        usearch_executor_free(executor);
+        expect_(usearch_executor_free(executor) == usearch_status_success_k);
         return "needs usearch_dense_sample";
     }
     if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return NULL;
@@ -2198,7 +2209,7 @@ char const* test_sample(void) {
     usearch_dense_free(index);
     free(rows);
     usearch_arena_free(arena);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     return NULL;
 }
 
@@ -2295,7 +2306,7 @@ void test_cursor_steps(void) {
     usearch_dense_free(index);
     free(rows);
     usearch_arena_free(arena);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
 }
 
 /** Sequences round-trip through a checkpoint: a stored query finds itself, then its one-edit
@@ -2541,7 +2552,7 @@ void test_sequence_saves_and_loads_a_file(void) {
         if (!expect_at(outcome.message != NULL, __FILE__, __LINE__, "A view's refusal to save says why")) return;
         usearch_sequence_free(viewed);
     }
-    usearch_executor_free(storage);
+    expect_(usearch_executor_free(storage) == usearch_status_success_k);
     remove(path);
 
     usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = index,
@@ -2573,7 +2584,7 @@ void test_sequence_saves_and_loads_a_file(void) {
 
     usearch_sequence_free(index);
     usearch_arena_free(arena);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
 }
 
 /** A sequence RAM index bounded at ten entries a shard takes twenty-five reads in one batch,
@@ -2716,7 +2727,7 @@ void test_sequence_shards(void) {
     }
     free(bytes);
     usearch_arena_free(arena);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
 }
 
 /** A GPU sequence index takes byte and rune Levenshtein, inserts and describes its entries, and
@@ -2892,7 +2903,7 @@ char const* test_sequence_vram(void) {
 
     usearch_arena_free(arena);
     usearch_sequence_free(index);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     return NULL;
 }
 
@@ -3082,7 +3093,7 @@ void test_shapes_saves_and_loads_a_file(void) {
                   "A view from storage already is its checkpoint");
         usearch_shapes_free(viewed);
     }
-    usearch_executor_free(storage);
+    expect_(usearch_executor_free(storage) == usearch_status_success_k);
     remove(path);
     usearch_keys_view_t uncursored_keys = {0};
     size_t uncursored = 0;
@@ -3098,7 +3109,7 @@ void test_shapes_saves_and_loads_a_file(void) {
 
     usearch_shapes_free(index);
     usearch_arena_free(arena);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
 }
 
 /** A GPU shapes index takes Chamfer and Hausdorff alone, inserts and describes its clouds, and
@@ -3199,7 +3210,7 @@ char const* test_shapes_vram(void) {
 
     usearch_arena_free(arena);
     usearch_shapes_free(index);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     return NULL;
 }
 
@@ -3452,7 +3463,7 @@ void test_geospatial_saves_and_loads_a_file(void) {
                   "A view from storage already is its checkpoint");
         usearch_geospatial_free(viewed);
     }
-    usearch_executor_free(storage);
+    expect_(usearch_executor_free(storage) == usearch_status_success_k);
     remove(path);
     usearch_keys_view_t uncursored_keys = {0};
     size_t uncursored = 0;
@@ -3468,7 +3479,7 @@ void test_geospatial_saves_and_loads_a_file(void) {
 
     usearch_geospatial_free(index);
     usearch_arena_free(arena);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
 }
 
 /** Shapes and geospatial reshard and refine alike: one index gathers another of its geometry, which
@@ -3581,7 +3592,7 @@ void test_shapes_and_geospatial_reshard(void) {
         __FILE__, __LINE__, "Every gathered observation must stay reachable");
     usearch_geospatial_free(places[0]);
     usearch_geospatial_free(places[1]);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
 }
 
 /**
@@ -3887,8 +3898,8 @@ void test_reshard_refusals(void) {
     expect_geospatial_reshard_cut(places[0], places[2], places[3], executor, entries);
     for (size_t which = 0; which != 4; ++which) usearch_geospatial_free(places[which]);
 
-    usearch_executor_free(other_executor);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(other_executor) == usearch_status_success_k);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
 }
 
 /** Leaves every height of a terrain window unknown. */
@@ -4001,7 +4012,7 @@ char const* test_geospatial_vram(void) {
 
     usearch_arena_free(arena);
     usearch_geospatial_free(index);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     return NULL;
 }
 
@@ -4087,7 +4098,7 @@ void test_multiply_packed(void) {
               "A refused call leaves its outputs NULL");
 
     usearch_arena_free(arena);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     usearch_dense_free(index);
 }
 
@@ -4227,7 +4238,7 @@ void test_attention_is_exact_over_every_key(void) {
               "A distance kind must refuse attention");
 
     usearch_arena_free(arena);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     usearch_dense_free(angular);
     usearch_dense_free(index);
 }
@@ -4368,7 +4379,7 @@ void test_late_interaction_scores_over_documents(void) {
               "Room for every query's wanted pairs must not wrap");
 
     usearch_arena_free(arena);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     usearch_dense_free(index);
 }
 
@@ -4414,10 +4425,10 @@ char const* test_nvme_view(size_t const dimensions) {
                                           .ram = &(usearch_ram_options_t) {.memory_limit = (size_t)1 << 20}});
     // An implementation without an NVMe residency says so, and has no view to hold to the contract.
     if (outcome.status == usearch_status_unsupported_k) {
-        usearch_executor_free(storage);
+        expect_(usearch_executor_free(storage) == usearch_status_success_k);
         remove(path);
         free(data);
-        usearch_executor_free(executor);
+        expect_(usearch_executor_free(executor) == usearch_status_success_k);
         usearch_dense_free(index);
         return needs_nvme_k;
     }
@@ -4568,10 +4579,10 @@ char const* test_nvme_view(size_t const dimensions) {
     expect_at(outcome.status != usearch_status_success_k && truncated_view == NULL, __FILE__, __LINE__,
               "A view must refuse a checkpoint cut inside its header");
 
-    usearch_executor_free(storage);
+    expect_(usearch_executor_free(storage) == usearch_status_success_k);
     remove(path);
     free(data);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     usearch_dense_free(index);
     return NULL;
 }
@@ -4666,10 +4677,10 @@ char const* test_nvme_load(size_t const dimensions) {
                                                               .outcome = &outcome,
                                                               .path = manifest_view});
     if (outcome.status == usearch_status_unsupported_k) {
-        usearch_executor_free(storage);
+        expect_(usearch_executor_free(storage) == usearch_status_success_k);
         remove(manifest), remove(old_parts[0]), remove(old_parts[1]);
         free(data);
-        usearch_executor_free(executor);
+        expect_(usearch_executor_free(executor) == usearch_status_success_k);
         return needs_nvme_k;
     }
     if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return NULL;
@@ -4822,10 +4833,10 @@ char const* test_nvme_load(size_t const dimensions) {
     usearch_dense_free(reopened);
 
     usearch_arena_free(arena);
-    usearch_executor_free(storage);
+    expect_(usearch_executor_free(storage) == usearch_status_success_k);
     remove(manifest), remove(new_parts[1]), remove(new_parts[2]);
     free(data);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     return NULL;
 }
 
@@ -4900,7 +4911,7 @@ char const* test_nvme_view_narrow_keys(void) {
                                                               .path = path_view,
                                                               .ram = &(usearch_ram_options_t) {0}});
     if (outcome.status == usearch_status_unsupported_k) {
-        usearch_executor_free(storage);
+        expect_(usearch_executor_free(storage) == usearch_status_success_k);
         remove(path);
         return needs_nvme_k;
     }
@@ -4936,7 +4947,7 @@ char const* test_nvme_view_narrow_keys(void) {
 
     usearch_arena_free(arena);
     usearch_dense_free(view);
-    usearch_executor_free(storage);
+    expect_(usearch_executor_free(storage) == usearch_status_success_k);
     remove(path);
     return NULL;
 }
@@ -4976,7 +4987,7 @@ void test_outcome_contract(size_t const dimensions) {
     expect_at(entries == 0, __FILE__, __LINE__, "An absent key counts zero");
     expect_at(outcome.status == usearch_status_success_k, __FILE__, __LINE__, "An absent key is not an error");
 
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     usearch_dense_free(index);
 }
 
@@ -5545,7 +5556,7 @@ void test_ceilings_and_fill(void) {
                                                               .threads = 1,
                                                               .nvme_class = usearch_nvme_class_posix_k});
     if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return;
-    usearch_executor_free(storage);
+    expect_(usearch_executor_free(storage) == usearch_status_success_k);
 }
 
 /** A deferred search lands what a blocking one does, though its descriptor died at submission; one
@@ -5578,7 +5589,7 @@ void test_deferred_search(void) {
     usearch_arena_free(deferred.arena);
     usearch_arena_free(blocking.arena);
     usearch_dense_free(index);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     free(rows);
 }
 
@@ -5601,7 +5612,7 @@ void test_deferred_polling(void) {
 
     usearch_arena_free(outputs.arena);
     usearch_dense_free(index);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     free(rows);
 }
 
@@ -5636,7 +5647,7 @@ void test_contended_from_another_thread(void) {
     usearch_arena_free(second.arena);
     usearch_arena_free(holding.arena);
     usearch_dense_free(index);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     free(rows);
 }
 
@@ -5663,7 +5674,7 @@ void test_drain_then_mood(void) {
 
     usearch_arena_free(outputs.arena);
     usearch_dense_free(index);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     free(rows);
 }
 
@@ -5684,7 +5695,7 @@ void test_free_waits_for_named_call(void) {
                   "A call a free waited for lands its matches");
 
     usearch_arena_free(outputs.arena);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     free(rows);
 }
 
@@ -5756,7 +5767,7 @@ void test_free_waits_for_call_without_executor(void) {
     usearch_arena_free(held.outputs.arena);
     usearch_arena_free(outer.arena);
     usearch_dense_free(index);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     free(rows);
 }
 
@@ -5799,7 +5810,7 @@ void test_deferred_holds_arena(void) {
 
     usearch_arena_free(outputs.arena);
     usearch_dense_free(index);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     free(rows);
 }
 
@@ -5858,7 +5869,7 @@ char const* test_vram_parts_share_a_device(size_t const collection_size, size_t 
     usearch_dense_save(
         &(usearch_dense_save_t) {.index = index, .executor = executor, .outcome = &outcome, .path = path_view});
     if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return NULL;
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     usearch_dense_free(index);
 
     // An executor over the one named device drives every shard there, all on its one stream.
@@ -5907,7 +5918,7 @@ char const* test_vram_parts_share_a_device(size_t const collection_size, size_t 
 
     usearch_arena_free(arena);
     usearch_dense_free(index);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     remove(path);
     for (int part = 1; part <= 3; ++part) {
         char part_path[64];
@@ -5995,7 +6006,7 @@ char const* test_vram_scan(size_t const collection_size, size_t const dimensions
 
     usearch_arena_free(arena);
     usearch_dense_free(index);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
     free(keys);
     free(data);
     return NULL;
@@ -6142,7 +6153,7 @@ void test_arrow_rows_and_keys(void) {
     usearch_sequence_free(index);
     expect_at(usearch_arena_free(arena) == usearch_status_success_k, __FILE__, __LINE__,
               "Released and refused exports leave the arena free to go");
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
 }
 
 void test_arrow_refusals(void) {
@@ -6381,7 +6392,7 @@ void test_arrow_tapes(void) {
     usearch_shapes_free(shapes);
     usearch_sequence_free(index);
     usearch_arena_free(arena);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
 }
 
 void test_arrow_matches(void) {
@@ -6423,7 +6434,7 @@ void test_arrow_matches(void) {
 
     usearch_sequence_free(index);
     usearch_arena_free(arena);
-    usearch_executor_free(executor);
+    expect_(usearch_executor_free(executor) == usearch_status_success_k);
 }
 
 int main(int argc, char* argv[]) {
@@ -6488,6 +6499,9 @@ int main(int argc, char* argv[]) {
     }
     start_test_case("test_arenas");
     test_arenas(dimension_counts[0]);
+    finish_test_case(NULL);
+    start_test_case("test_executor_free_with_live_arena");
+    test_executor_free_with_live_arena();
     finish_test_case(NULL);
     start_test_case("test_walks_name_their_index");
     test_walks_name_their_index(dimension_counts[0]);

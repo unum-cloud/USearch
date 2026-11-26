@@ -2167,6 +2167,10 @@ struct usearch_executor_handle_t {
     /** The one call that holds the executor, from its claim to its end. */
     holding_call_t holding_call;
 
+    /** Arenas made with the executor and not yet freed, which refuse its free; set through the
+     *  standard reference, as any thread may make or free one. */
+    util::u32_t arenas = 0;
+
     std::variant<util::ram_executor_t, nvme_executor_t, util::gpu_executor_t> residency;
 };
 
@@ -2382,8 +2386,8 @@ struct usearch_arena_handle_t {
     /** Device memory on the first stream of the executor the arena was made for, or none. */
     util::gpu_arena_t device_memory;
 
-    /** The executor whose first stream the device memory rides, the only one whose calls it serves;
-     *  null for host pages, which serve any. */
+    /** The executor the arena was made with, which counts it until its free. Device memory rides
+     *  the first stream of a VRAM one and serves only its calls; host pages serve any. */
     usearch_executor_t executor = nullptr;
 
     /** The outcome of the call holding the arena, from its claim until just before its final store;

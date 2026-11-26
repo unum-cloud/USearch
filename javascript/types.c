@@ -837,11 +837,11 @@ static napi_value usearch_js_executor_drain(napi_env env, napi_callback_info inf
 static napi_value usearch_js_executor_release(napi_env env, napi_callback_info info) {
     usearch_js_executor_t* const executor = (usearch_js_executor_t*)usearch_js_self(env, info, NULL, NULL, NULL);
     if (!executor) return NULL;
-    if (executor->arenas) {
-        usearch_js_throw(env, usearch_status_contended_k, "Free the GPU arenas made on the Executor before it");
+    usearch_status_t const freed = usearch_executor_free(executor->handle);
+    if (freed != usearch_status_success_k) {
+        usearch_js_throw(env, freed, "Free the Arenas made on the Executor before it");
         return NULL;
     }
-    usearch_executor_free(executor->handle);
     executor->handle = NULL;
     return usearch_js_undefined(env);
 }
@@ -894,10 +894,9 @@ napi_value usearch_js_executor_define(napi_env env) {
 
 /** Lets go of the executor a GPU arena held, once the arena's memory is freed. */
 static void usearch_js_arena_unbind(napi_env env, usearch_js_arena_t* arena) {
-    if (!arena->executor) return;
-    --arena->executor->arenas;
+    if (!arena->executor_reference) return;
     napi_delete_reference(env, arena->executor_reference);
-    arena->executor = NULL;
+    arena->executor_reference = NULL;
 }
 
 /** Lets go of every view handed out so far, leaving them as they are. */
@@ -965,16 +964,14 @@ static napi_value usearch_js_arena_construct(napi_env env, napi_callback_info in
         free(arena);
         return NULL;
     }
-    // A GPU arena frees on its executor's first stream, so it holds that executor until freed.
-    if (description.residency == usearch_residency_vram_k) {
+    // The engine refuses to free an executor under its arena, so the arena holds it until freed.
+    if (executor) {
         if (napi_create_reference(env, argument, 1, &arena->executor_reference) != napi_ok) {
             usearch_arena_free(arena->handle);
             free(arena);
             usearch_js_throw(env, usearch_status_internal_k, "Could not hold the Executor");
             return NULL;
         }
-        arena->executor = executor;
-        ++executor->arenas;
     }
     if (napi_wrap(env, self, arena, usearch_js_arena_finalize, NULL, NULL) != napi_ok) {
         usearch_arena_free(arena->handle);

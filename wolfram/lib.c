@@ -906,10 +906,15 @@ static void manage_geospatial(WolframLibraryData library_data, mbool mode, mint 
     else usearch_geospatial_free((usearch_geospatial_index_t)handles_release(&geospatials, id));
 }
 
-/** Frees a released executor. */
+/** Frees a released executor. The engine refuses while an arena made with it lives, which leaks the
+ *  executor until the process ends; the kernel may release it before its arenas. */
 static void manage_executor(WolframLibraryData library_data, mbool mode, mint id) {
-    if (!mode) handles_admit(&executors, id, empty_slot);
-    else usearch_executor_free((usearch_executor_t)handles_release(&executors, id));
+    if (!mode) {
+        handles_admit(&executors, id, empty_slot);
+        return;
+    }
+    [[maybe_unused]] usearch_status_t const refused = usearch_executor_free(
+        (usearch_executor_t)handles_release(&executors, id));
 }
 
 /** Frees a released arena and every output in it. The free refuses only while an Arrow export of
@@ -1046,7 +1051,7 @@ EXTERN_C DLLEXPORT int PlanProgress(WolframLibraryData library_data, mint argume
 static int executor_adopt(WolframLibraryData library_data, void** slot, usearch_executor_t handle,
                           usearch_outcome_t const* outcome, MArgument result) {
     if (outcome->status == usearch_status_success_k) *slot = handle;
-    else usearch_executor_free(handle);
+    else { [[maybe_unused]] usearch_status_t const refused = usearch_executor_free(handle); }
     return answer_outcome(library_data, outcome, result);
 }
 

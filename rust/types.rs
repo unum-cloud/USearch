@@ -421,7 +421,7 @@ unsafe extern "C" {
     pub fn usearch_executor_for_vram(arguments: *mut usearch_executor_for_vram_t);
     pub fn usearch_executor_for_nvme(arguments: *mut usearch_executor_for_nvme_t);
     pub fn usearch_executor_drain(arguments: *mut usearch_executor_drain_t);
-    pub fn usearch_executor_free(executor: usearch_executor_t);
+    pub fn usearch_executor_free(executor: usearch_executor_t) -> usearch_status_t;
 
     pub fn usearch_arena_init(arguments: *mut usearch_arena_init_t);
     pub fn usearch_arena_free(arena: usearch_arena_t) -> usearch_status_t;
@@ -2195,7 +2195,8 @@ impl Executor {
 
 impl Drop for Executor {
     fn drop(&mut self) {
-        unsafe { usearch_executor_free(self.handle) }
+        // Arenas borrow the executor, so none lives here and the free cannot be refused.
+        let _status = unsafe { usearch_executor_free(self.handle) };
     }
 }
 

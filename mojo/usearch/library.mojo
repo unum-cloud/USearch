@@ -139,7 +139,6 @@ from usearch.shapes import (
 )
 from usearch.types import (
     ArenaDescribe,
-    ArenaFree,
     ArenaInit,
     CPUClass,
     GPUClass,
@@ -160,6 +159,7 @@ from usearch.types import (
     Residency,
     ScalarKind,
     Status,
+    StatusRelease,
     Traversal,
     text_at,
 )
@@ -263,7 +263,7 @@ struct Symbols:
 
     var arena_init: ArenaInit
     """`usearch_arena_init`."""
-    var arena_free: ArenaFree
+    var arena_free: StatusRelease
     """`usearch_arena_free`."""
     var arena_describe: ArenaDescribe
     """`usearch_arena_describe`."""
@@ -275,7 +275,7 @@ struct Symbols:
     """`usearch_executor_for_vram`."""
     var executor_drain: ExecutorDrain
     """`usearch_executor_drain`."""
-    var executor_free: Release
+    var executor_free: StatusRelease
     """`usearch_executor_free`."""
 
     var dense_init_ram: DenseInitRam
@@ -578,13 +578,13 @@ struct Symbols:
         self.dense_metric_from_name = _resolve[FromName](handle, "usearch_dense_metric_from_name")
 
         self.arena_init = _resolve[ArenaInit](handle, "usearch_arena_init")
-        self.arena_free = _resolve[ArenaFree](handle, "usearch_arena_free")
+        self.arena_free = _resolve[StatusRelease](handle, "usearch_arena_free")
         self.arena_describe = _resolve[ArenaDescribe](handle, "usearch_arena_describe")
         self.executor_for_ram = _resolve[ExecutorForRam](handle, "usearch_executor_for_ram")
         self.executor_for_nvme = _resolve[ExecutorForNvme](handle, "usearch_executor_for_nvme")
         self.executor_for_vram = _resolve[ExecutorForVram](handle, "usearch_executor_for_vram")
         self.executor_drain = _resolve[ExecutorDrain](handle, "usearch_executor_drain")
-        self.executor_free = _resolve[Release](handle, "usearch_executor_free")
+        self.executor_free = _resolve[StatusRelease](handle, "usearch_executor_free")
 
         self.dense_init_ram = _resolve[DenseInitRam](handle, "usearch_dense_init_ram")
         self.dense_init_vram = _resolve[DenseInitVram](handle, "usearch_dense_init_vram")

@@ -19,7 +19,7 @@ extern fn usearch_executor_for_ram(arguments: *usearch_executor_for_ram_t) void;
 extern fn usearch_executor_for_nvme(arguments: *usearch_executor_for_nvme_t) void;
 extern fn usearch_executor_for_vram(arguments: *usearch_executor_for_vram_t) void;
 extern fn usearch_executor_drain(arguments: *usearch_executor_drain_t) void;
-extern fn usearch_executor_free(executor: ?*anyopaque) void;
+extern fn usearch_executor_free(executor: ?*anyopaque) Status;
 extern fn usearch_arena_init(arguments: *usearch_arena_init_t) void;
 extern fn usearch_arena_free(arena: ?*anyopaque) Status;
 extern fn usearch_arena_describe(arguments: *usearch_arena_describe_t) void;
@@ -981,7 +981,7 @@ pub const Executor = struct {
     }
 
     fn adopt(handle: ?*anyopaque, outcome: Outcome, diagnostics: ?*Outcome) Error!Executor {
-        errdefer usearch_executor_free(handle);
+        errdefer _ = usearch_executor_free(handle);
         try outcome.checkInto(diagnostics);
         return .{ .handle = handle };
     }
@@ -997,10 +997,12 @@ pub const Executor = struct {
     }
 
     /// Waits out the call holding it, releases the scratch and the streams it owns, and frees the
-    /// executor, which is invalid afterwards; the host arenas it made keep their memory, while its
-    /// GPU arenas must be freed first. Calls `usearch_executor_free`.
+    /// executor, which is invalid afterwards. Every arena made with it must be deinitialized first:
+    /// the library refuses to free an executor under its arena, which asserts here. Calls
+    /// `usearch_executor_free`.
     pub fn deinit(self: *Executor) void {
-        usearch_executor_free(self.handle);
+        const status = usearch_executor_free(self.handle);
+        std.debug.assert(status == .success);
         self.* = undefined;
     }
 };

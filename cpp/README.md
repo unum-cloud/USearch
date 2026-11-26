@@ -142,10 +142,10 @@ Every output whose length only the call knows, such as matches, rows, products, 
 Each call rewinds its arena, so the previous call's views die and a steady loop allocates once.
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own.
-Nothing in C++ retires a stale view at compile time, so a view read after its arena's next call reads whatever that call wrote.
+Nothing in C++ retires a stale view at compile time, so a view read after its arena's next call reads whatever that call wrote: copy what you keep instead of holding a span across calls.
 An arena from a VRAM executor holds device memory; `arena.describe()` answers where its outputs live, and its `host_access` decides whether host code may read them: refused for CUDA and HIP device memory, readable for Apple's shared memory.
 It grows, fills and frees on that executor's first stream, so it serves only calls on that executor, any other refused with `status_code_t::device_k`.
-Destroy every arena before the executor that made it.
+Destroy every arena before the executor that made it, whose free refuses while one lives and asserts in Debug builds.
 
 ```cpp
 auto [arena, arena_status] = us::arena_t::make({.executor = executor.handle()}); // make() is host pages

@@ -1060,7 +1060,8 @@ public final class Executor: @unchecked Sendable {
         return Executor(raw: try created(executor))
     }
 
-    deinit { usearch_executor_free(raw) }
+    /// Every arena made with it holds it, so ARC frees it after them and the refusal never arises.
+    deinit { _ = usearch_executor_free(raw) }
 
     /// Waits until no call holds this executor, then adopts `mood` until the next call; a failure
     /// is the executor's own, such as a lost device, never one of a drained call.
@@ -1109,12 +1110,12 @@ func withPaths<Value>(
 /// reads what the next call wrote. To keep a result past the next call, give that call another
 /// arena. Every call uses the arena, deferred ones included, and one naming it while another
 /// call writes it is refused with `contended`. An arena serves one call at a time and is not
-/// `Sendable`. One in GPU memory, as `describe` reports, serves only calls on the executor that
-/// made it, keeps that executor alive, and answers views no host read may reach.
+/// `Sendable`. It holds the executor that made it, so ARC frees it first. One in GPU memory, as
+/// `describe` reports, serves only calls on that executor and answers views no host read may reach.
 public final class Arena {
     /// The native handle, released by `deinit`.
     let raw: usearch_arena_t
-    /// The VRAM executor that made it, held so the arena is freed first, on that executor's first stream.
+    /// The executor that made it, held so the arena is freed first, as the engine insists.
     private var executor: Executor?
     /// Whether host code may read the outputs, as the executor that made it decided once.
     private(set) var hostAccess = HostAccess.refused
@@ -1130,7 +1131,7 @@ public final class Arena {
         raw = try created(arena)
         let description = try describe()
         hostAccess = description.hostAccess
-        if description.residency == .vram { self.executor = executor }
+        self.executor = executor
     }
 
     /// Frees the arena once every deferred call naming it is final. The free refuses only while an

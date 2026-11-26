@@ -70,6 +70,9 @@ namespace fu = ashvardanian::forkunion;
 struct usearch_arena_handle_t {
     util::growing_arena<> memory {util::global_allocator};
 
+    /** The executor the arena was made with, which counts it until its free. */
+    usearch_executor_t executor = nullptr;
+
     /** The outcome of the call holding the arena, from its claim or deferred submission until just
      *  before its final status; null while free. Touched through @c serial_atomic_ref, since calls
      *  on several threads may name it. */
@@ -346,6 +349,10 @@ struct executor_t {
 
     /** Worker threads the caller asked for; honoured by remembering, never by spawning. */
     std::size_t threads = 1;
+
+    /** Arenas made with the executor and not yet freed, which refuse its free. Touched through
+     *  @c serial_atomic_ref, as any thread may make or free one. */
+    util::u32_t arenas = 0;
 };
 
 /** A call running on its caller's thread. */

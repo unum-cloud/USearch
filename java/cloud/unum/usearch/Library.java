@@ -293,6 +293,19 @@ final class Library {
         }
     }
 
+    /** Calls a free, which takes one pointer and answers its status, or nothing for a free that cannot fail. */
+    static int release(MethodHandle free, MemorySegment address) {
+        try {
+            if (free.type().returnType() == void.class) {
+                free.invokeExact(address);
+                return 0;
+            }
+            return (int) free.invokeExact(address);
+        } catch (Throwable failure) {
+            throw rethrow(failure);
+        }
+    }
+
     /** Reads the static string a name query answers. */
     static String text(MethodHandle query) {
         try {

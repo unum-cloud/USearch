@@ -108,8 +108,6 @@ typedef struct usearch_js_executor_t {
     /** The engine handle, freed by @c free or when the JavaScript wrapper is collected. */
     usearch_executor_t handle;
 
-    /** Live GPU arenas it made, each of which must be freed before it is. */
-    size_t arenas;
 } usearch_js_executor_t;
 
 /** Memory every output whose length scales with a call lands in, and the views handed over it. */
@@ -118,11 +116,8 @@ typedef struct usearch_js_arena_t {
     /** The engine handle, made with the wrapper and @c NULL once freed. */
     usearch_arena_t handle;
 
-    /** The executor a GPU arena grows, fills and frees on, held until the arena is freed; @c NULL
-     *  for host pages, which may outlive theirs. */
-    usearch_js_executor_t* executor;
-
-    /** The strong reference keeping @c executor's wrapper alive alongside it. */
+    /** The strong reference keeping its executor's wrapper alive until the arena is freed, as the
+     *  engine refuses to free an executor under its arena; @c NULL when made without one. */
     napi_ref executor_reference;
 
     /** Weak references to the @c ArrayBuffer of every view over the last call's outputs, detached

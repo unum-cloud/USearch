@@ -1562,9 +1562,10 @@ typedef struct usearch_executor_drain_t {
 USEARCH_EXPORT void usearch_executor_drain(usearch_executor_drain_t* arguments);
 
 /** Waits until no call holds the executor and its devices finished their work, releases its
- *  scratch, and frees the executor; @c NULL is safe, and it cannot fail, so it takes no
- *  outcome. Every arena it made must be freed first. */
-USEARCH_EXPORT void usearch_executor_free(usearch_executor_t executor);
+ *  scratch, and frees the executor; @c NULL is safe. Answers @c usearch_status_contended_k and
+ *  frees nothing while an arena made with it lives, as @c usearch_arena_free does while an export
+ *  is open. A thread must not free an executor another thread still submits to. */
+USEARCH_EXPORT usearch_status_t usearch_executor_free(usearch_executor_t executor);
 
 /**
  *  @brief Memory the library writes every output whose length scales with a call into, reused

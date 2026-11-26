@@ -111,7 +111,7 @@ An arena serves one call at a time, so each deferred call needs its own.
 A deferred call uses its arena as a blocking one does: another call naming it before the first is final finishes with `Status.Contended`, and `free()` waits for it.
 A view ends at the next call on its arena: that call detaches every typed array over the previous call's outputs before it rewinds them, so an old view reads as empty, with `buffer.detached` set, instead of whatever the arena holds next. `free()` detaches the views still held the same way, and a call naming a freed arena is refused with `Status.InvalidArgument`.
 An arena from a VRAM executor may hold device memory, which `arena.describe().hostAccess` names: when it is `HostAccess.Refused`, a verb throws `Status.Device` rather than view the outputs.
-It grows, fills and frees on that executor's first stream, so it serves only calls on that executor and keeps it alive until freed, and the executor's `free()` refuses with `Status.Contended` while such an arena lives; free every arena before its executor, while one made without an executor lives until it is freed.
+It grows, fills and frees on that executor's first stream, so it serves only calls on that executor and keeps it alive until freed, and the executor's `free()` refuses with `Status.Contended` while any arena made with it lives; free every arena before its executor, while one made without an executor lives until it is freed.
 
 ```js
 const { Arena, keyAt } = usearch;

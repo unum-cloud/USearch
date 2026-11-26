@@ -150,13 +150,21 @@ void usearch_arena_init(usearch_arena_init_t* arguments) {
     // Every stand-in executor computes on the host, so every arena is host pages whoever made it.
     usearch_arena_handle_t* const arena = new (std::nothrow) usearch_arena_handle_t {};
     if (reject_if(!arena, usearch_status_out_of_memory_k, "The arena could not be allocated", outcome)) return;
+    usearch_executor_t const executor = arguments->executor;
+    util::u32_t constexpr most_k = (std::numeric_limits<util::u32_t>::max)();
+    if (executor && fu::atomic_fetch_add_if_at_most(serial_atomic_ref<util::u32_t> {executor->arenas}, 1u, most_k,
+                                                    std::memory_order_acq_rel) == most_k)
+        return delete arena, propagate_error(usearch_status_overflow_k, outcome, "The executor counts too many arenas");
+    arena->executor = executor;
     *arguments->arena = arena;
 }
 
 usearch_status_t usearch_arena_free(usearch_arena_t arena) {
     wait_for_calls_using(arena);
     if (exported(arena)) return usearch_status_contended_k;
+    usearch_executor_t const executor = arena ? arena->executor : nullptr;
     delete arena;
+    if (executor) serial_atomic_ref<util::u32_t> {executor->arenas}.fetch_sub(1, std::memory_order_release);
     return usearch_status_success_k;
 }
 
@@ -251,9 +259,13 @@ void usearch_executor_drain(usearch_executor_drain_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
 }
 
-void usearch_executor_free(usearch_executor_t executor) {
+usearch_status_t usearch_executor_free(usearch_executor_t executor) {
+    if (!executor) return usearch_status_success_k;
+    if (serial_atomic_ref<util::u32_t const> {executor->arenas}.load(std::memory_order_acquire) != 0)
+        return usearch_status_contended_k;
     wait_for_calls_using(executor);
     delete executor;
+    return usearch_status_success_k;
 }
 
 #pragma region Vocabulary

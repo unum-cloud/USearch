@@ -1633,16 +1633,23 @@ USEARCH_EXPORT void usearch_arena_init(usearch_arena_init_t* arguments) {
     if (!arena) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the arena"), void();
     // A VRAM executor writes its outputs on its vendor's first stream; every other executor
     // computes on the host.
-    if (arguments->executor)
-        if (util::gpu_executor_t* const devices = std::get_if<util::gpu_executor_t>(&arguments->executor->residency)) {
+    usearch_executor_t const executor = arguments->executor;
+    arena->executor = executor;
+    if (executor)
+        if (util::gpu_executor_t* const devices = std::get_if<util::gpu_executor_t>(&executor->residency)) {
             arena->device_memory = util::gpu_arena_t::on(*devices);
-            arena->executor = arguments->executor;
             // Never taken: every VRAM executor is spawned over devices `gpu_devices` lists, and the
             // runtime lists them once per process, so the arena's device always has a position.
             if (arena_description(*arena).device < 0)
                 return delete arena,
                        propagate_error(usearch_status_device_k, outcome, "The arena's device is not listed"), void();
         }
+    // Every arena made with an executor counts, RAM included
+    util::u32_t constexpr most_k = (std::numeric_limits<util::u32_t>::max)();
+    if (executor && fu::atomic_fetch_add_if_at_most(fu::standard_atomic_ref<util::u32_t> {executor->arenas}, 1u, most_k,
+                                                    std::memory_order_acq_rel) == most_k)
+        return delete arena, propagate_error(usearch_status_overflow_k, outcome, "The executor counts too many arenas"),
+               void();
     *arguments->arena = arena;
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
@@ -1651,7 +1658,10 @@ USEARCH_EXPORT usearch_status_t usearch_arena_free(usearch_arena_t arena) {
     if (!arena) return usearch_status_success_k;
     wait_named_calls(arena->named_calls);
     if (exported(arena)) return usearch_status_contended_k;
+    usearch_executor_t const executor = arena->executor;
     delete arena;
+    // Last, as the device memory went back through the executor's stream
+    if (executor) fu::standard_atomic_ref<util::u32_t> {executor->arenas}.fetch_sub(1, std::memory_order_release);
     return usearch_status_success_k;
 }
 
@@ -1864,10 +1874,14 @@ USEARCH_EXPORT void usearch_executor_drain(usearch_executor_drain_t* arguments) 
     propagate_error(drained, outcome);
 }
 
-USEARCH_EXPORT void usearch_executor_free(usearch_executor_t executor) {
-    if (!executor) return;
+USEARCH_EXPORT usearch_status_t usearch_executor_free(usearch_executor_t executor) {
+    if (!executor) return usearch_status_success_k;
+    // A refusal never waits: the count is read before the claim
+    if (fu::standard_atomic_ref<util::u32_t> {executor->arenas}.load(std::memory_order_acquire) != 0)
+        return usearch_status_contended_k;
     take_idle_claim(*executor);
     delete executor;
+    return usearch_status_success_k;
 }
 
 #pragma endregion Executors

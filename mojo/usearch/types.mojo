@@ -1067,8 +1067,8 @@ comptime Verb[Arguments: AnyType] = def(Pointer[Arguments, MutAnyOrigin]) thin a
 comptime Release = def(Address) thin abi("C") -> None
 """The positional `_free` family - executors, indexes, cursors, streams; `NULL` is safe."""
 
-comptime ArenaFree = def(Address) thin abi("C") -> c_int
-"""`usearch_arena_free`, which answers `contended` and frees nothing while an export is open."""
+comptime StatusRelease = def(Address) thin abi("C") -> c_int
+"""The arena and executor `_free`: `contended`, with nothing freed, while an export is open or an arena lives."""
 
 comptime OutcomeStatus = def(Pointer[Outcome, MutAnyOrigin]) thin abi("C") -> c_int
 """`usearch_outcome_wait` and `usearch_outcome_status`: an outcome's status, the first once it is final."""
@@ -1363,9 +1363,10 @@ struct Executor:
 
         The loader reference is surrendered only after the call: reading the entry point is the
         last use of `library`, so without the trailing move Mojo drops the last reference - and
-        `dlclose`s the engine - between the load and the branch to it.
+        `dlclose`s the engine - between the load and the branch to it. Every arena's origin holds the executor, so none lives here
+        and the status is dropped.
         """
-        self.library.symbols().executor_free(self.address)
+        _ = self.library.symbols().executor_free(self.address)
         _ = self.library^
 
     @staticmethod

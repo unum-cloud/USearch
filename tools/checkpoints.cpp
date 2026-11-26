@@ -139,7 +139,7 @@ int checkpoints_metadata(world_t& world, int argc, char const* const* argv) {
     usearch_executor_for_ram(&placement);
     if (report_failure(outcome, "creating the CPU executor")) return EXIT_FAILURE;
     std::unique_ptr<usearch_executor_handle_t, void (*)(usearch_executor_t)> const owned_executor {
-        executor, usearch_executor_free};
+        executor, [](usearch_executor_t owned) { usearch_executor_free(owned); }};
     usearch_bytes_view_t const path = bytes_view(address);
     usearch_bytes_view_t const buffer = bytes_view(piped_bytes);
     switch (checkpoints_modality_of(metric)) {

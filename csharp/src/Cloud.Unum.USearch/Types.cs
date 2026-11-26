@@ -1365,8 +1365,9 @@ public sealed unsafe class Executor : IDisposable
     }
 
     /// <summary>
-    /// Waits out the call holding the executor, releases the scratch it owns, and frees it. Freeing
-    /// cannot fail, and a freed executor must not be used. Calls <c>usearch_executor_free</c>.
+    /// Waits out the call holding the executor, releases the scratch it owns, and frees it once every
+    /// arena made with it is disposed, because each holds a reference. A freed executor must not be
+    /// used. Calls <c>usearch_executor_free</c>.
     /// </summary>
     public void Dispose() => this._handle.Dispose();
 
@@ -1387,7 +1388,8 @@ public sealed unsafe class Executor : IDisposable
 /// <remarks>
 /// The executor it is made for places it where it computes, host pages or its GPU's memory, decided
 /// once, and nothing is allocated until a call writes into it. Every call given it rewinds it, so
-/// the views the previous call answered end there, as they do once it is disposed. An arena serves
+/// the views the previous call answered end there, as they do once it is disposed; a view is a struct
+/// over the arena's memory and is not checked, so reading one after that reads reused memory. An arena serves
 /// one call at a time: a blocking call views it until it returns, a deferred one until final, and
 /// a second call naming it meanwhile finishes with <see cref="Status.Contended"/>. A
 /// <see cref="Residency.Vram"/> arena may hold device memory, as <see cref="Describe"/> reports, whose
@@ -2185,7 +2187,7 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
-    internal static partial void usearch_executor_free(IntPtr executor);
+    internal static partial Status usearch_executor_free(IntPtr executor);
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
@@ -2280,11 +2282,9 @@ internal struct HandleReference : IDisposable
 internal sealed class NativeExecutorHandle : EngineHandle
 {
     /// <inheritdoc/>
-    protected override bool ReleaseHandle()
-    {
-        NativeMethods.usearch_executor_free(this.handle);
-        return true;
-    }
+    /// <remarks>Every arena made with the executor holds a reference to it, so the free runs after
+    /// them and a refusal is reported as a failed release rather than thrown.</remarks>
+    protected override bool ReleaseHandle() => NativeMethods.usearch_executor_free(this.handle) == Status.Success;
 }
 
 /// <summary>A <c>usearch_arena_t</c>, freed when the owning <see cref="Arena"/> is disposed or

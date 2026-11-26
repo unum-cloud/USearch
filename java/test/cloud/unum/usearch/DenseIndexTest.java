@@ -988,6 +988,15 @@ public class DenseIndexTest {
     }
 
     @Test
+    public void anExecutorRefusesToCloseUnderItsArena() {
+        Executor pool = Executor.forRam(new int[0], null, 0);
+        Arena arena = new Arena(pool);
+        assertEquals(Status.CONTENDED, assertThrows(USearchException.class, pool::close).status());
+        arena.close();
+        pool.close();
+    }
+
+    @Test
     public void theLinkedLibraryNamesItself() {
         assertFalse(Types.capabilitiesCompiled().isEmpty());
         assertFalse(Types.capabilitiesAvailable().isEmpty());

@@ -489,8 +489,9 @@ export const Executor = compiled.Executor as ExecutorConstructor;
  *  waits for it. The collector frees the arena once nothing views it; `free` releases it now, and
  *  every later call naming it is refused with {@link Status.InvalidArgument}.
  *
- *  A `Vram` arena grows, fills and frees on its executor's first stream, so it serves only calls on
- *  that executor and keeps it alive until freed; every arena is freed before its executor. */
+ *  An arena made with an executor keeps it alive until freed, and the executor's `free` throws
+ *  {@link Status.Contended} while one lives; a `Vram` arena also grows, fills and frees on that
+ *  executor's first stream, so it serves only calls on that executor. */
 export interface Arena extends Disposable {
   /** Where its outputs live, as the executor that made it decided; a verb whose outputs land in an
    *  arena the host cannot read throws {@link Status.Device} rather than view device memory. */
