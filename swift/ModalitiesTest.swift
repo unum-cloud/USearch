@@ -398,21 +398,21 @@ struct SequenceIndexTests {
     /// Mirrors the snippet under `## Sequence Indexes` in `swift/README.md`, line for line but for
     /// the `#expect` lines standing in for its `print`.
     @Test func readmeSnippet() throws {
-        let index = try SequenceIndex.initRam(SequenceOptions(metric: .levenshteinUTF8))
-        let words = ["kitten", "sitting", "mitten"].map { Array($0.utf8) }
-        try index.insert(keys: [1, 2, 3], sequences: words)
+        let index = try SequenceIndex.initRam(SequenceOptions(metric: .utf8Containment))
+        let texts = ["The quick brown fox", "A lazy dog", "Pack my box"].map { Array($0.utf8) }
+        try index.insert(keys: [1, 2, 3], sequences: texts)
 
-        let matches = try index.search([Array("sitten".utf8)], wanted: 3, arena: try Arena())
-        #expect(matches[0][0].key == 1 || matches[0][0].key == 3)
-        #expect(matches[0][0].distance == 1)
+        let matches = try index.search([Array("BROWN FOX".utf8)], wanted: 3, arena: try Arena())
+        #expect(matches[0][0].key == 1)
+        #expect(matches[0][0].distance < 1.0 / 32768)
     }
 
     /// A fresh index describes itself as empty, on a CPU class, with the metric it froze.
     @Test func initRamStartsEmpty() throws {
-        let described = try SequenceIndex.initRam(SequenceOptions(metric: .levenshteinUTF8)).describe()
+        let described = try SequenceIndex.initRam(SequenceOptions(metric: .dnaOverlap)).describe()
         #expect(described.size == 0)
         #expect(described.cpuClass != nil && described.gpuClass == nil)
-        #expect(described.metadata.metric == .levenshteinUTF8)
+        #expect(described.metadata.metric == .dnaOverlap)
     }
 
     /// A VRAM index either opens on a GPU or forwards the status the library answered.
@@ -421,10 +421,10 @@ struct SequenceIndexTests {
         #expect(status == nil || (status != .success && status != .deferred))
     }
 
-    /// Every sequence searched for comes back first under its own key, at distance zero, and reads
-    /// back whole.
+    /// Every text searched for comes back first under its own key, at distance zero, and reads
+    /// back as it was stored.
     @Test func searchFindsTheInsertedEntry() throws {
-        let index = try SequenceIndex.initRam()
+        let index = try SequenceIndex.initRam(SequenceOptions(metric: .utf8Containment))
         try index.insert(keys: [1, 2, 3], sequences: ["kitten", "sitting", "mitten"].map { Array($0.utf8) })
         #expect(try index.describe().size == 3)
         let arena = try Arena()
@@ -440,31 +440,78 @@ struct SequenceIndexTests {
 
     /// A checkpoint keeps every entry and the metric, and its metadata reads without loading it.
     @Test func checkpointRoundTrips() throws {
-        let index = try SequenceIndex.initRam(SequenceOptions(metric: .levenshteinUTF8))
+        let index = try SequenceIndex.initRam(SequenceOptions(metric: .utf8Containment))
         try index.insert(keys: [1, 2], sequences: [Array("kitten".utf8), Array("sitting".utf8)])
         let path = temporaryPath()
         defer { try? FileManager.default.removeItem(atPath: path) }
         try index.save(path: path)
-        #expect(try SequenceIndex.metadataRead(path).metric == .levenshteinUTF8)
+        let metadata = try SequenceIndex.metadataRead(path)
+        #expect(metadata.metric == .utf8Containment)
         let loaded = try SequenceIndex.loadRam(path)
         #expect(try loaded.describe().size == 2)
         #expect(try loaded.count(key: 2).entries == 1)
     }
 
-    /// Weights and window widths reach only the kinds that take them, and the library decides.
-    @Test func optionsReachOnlyTheirKinds() throws {
-        let weights = SequenceWeights(substitutionMatrix: [Int8](repeating: 0, count: 65_536), gap: 1)
-        #expect(failureStatus(of: try SequenceIndex.initRam(SequenceOptions(weights: weights))) == .configMismatch)
-        #expect(failureStatus(of: try SequenceIndex.initRam(SequenceOptions(metric: .overlap))) == .configMismatch)
-        _ = try SequenceIndex.initRam(SequenceOptions(metric: .overlap, windowWidths: [3]))
-        // The matrix crosses with no count, so the binding counts it.
-        let short = SequenceWeights(substitutionMatrix: [0], gap: 1)
-        #expect(failureStatus(of: try SequenceIndex.initRam(SequenceOptions(weights: short))) == .shapeMismatch)
+    /// Similarities over `ACGT` alone: every base scores `match` against itself, `A` and `G` score
+    /// `near` against each other, and every other pair scores zero.
+    static func nucleotideSimilarities(match: Int8, near: Int8) -> [Int8] {
+        var similarities = [Int8](repeating: 0, count: 256 * 256)
+        for base in "ACGT".utf8 { similarities[Int(base) * 256 + Int(base)] = match }
+        let adenine = Int(UInt8(ascii: "A")), guanine = Int(UInt8(ascii: "G"))
+        similarities[adenine * 256 + guanine] = near
+        similarities[guanine * 256 + adenine] = near
+        return similarities
+    }
+
+    /// The library refuses the costs no metric reads, and the binding counts what has no count.
+    @Test func costsReachTheLibrary() throws {
+        let similarities = Self.nucleotideSimilarities(match: 2, near: 0)
+        let costs = SequenceCosts(similarities: similarities, gap: 2)
+        let containment = SequenceOptions(metric: .utf8Containment, costs: costs)
+        #expect(failureStatus(of: try SequenceIndex.initRam(containment)) == .configMismatch)
+        // The table crosses with no count, so the binding counts it.
+        let short = SequenceCosts(similarities: [0], gap: 1)
+        #expect(failureStatus(of: try SequenceIndex.initRam(SequenceOptions(costs: short))) == .shapeMismatch)
+    }
+
+    /// A query that is the reverse complement of a read finds that read first, at distance zero.
+    @Test func overlapFindsAReverseComplement() throws {
+        let index = try SequenceIndex.initRam(SequenceOptions(metric: .dnaOverlap))
+        let reads = [
+            "ACGTTGCAAGGCTTAACCGGTTACGATCGA", "GGCTTAACCGGTTACGATCGATTTGCAGCA", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+        ]
+        try index.insert(keys: [1, 2, 3], sequences: reads.map { Array($0.utf8) })
+        let query = Array("TGCTGCAAATCGATCGTAACCGGTTAAGCC".utf8)
+        let matches = try index.search([query], wanted: 2, arena: try Arena())
+        #expect(matches[0][0].key == 2)
+        #expect(matches[0][0].distance == 0)
+    }
+
+    /// Under costs placing `A` close to `G`, one `A` to `G` substitution ranks above one
+    /// `A` to `C`.
+    @Test func alignmentWeighsCosts() throws {
+        let costs = SequenceCosts(similarities: Self.nucleotideSimilarities(match: 4, near: 3), gap: 4)
+        let index = try SequenceIndex.initRam(SequenceOptions(costs: costs))
+        try index.insert(keys: [1, 2], sequences: ["GCGTTGCAACGT", "CCGTTGCAACGT"].map { Array($0.utf8) })
+        let matches = try index.search([Array("ACGTTGCAACGT".utf8)], wanted: 2, arena: try Arena())
+        #expect(matches[0][0].key == 1)
+        #expect(matches[0][0].distance < matches[0][1].distance)
+    }
+
+    /// Containment needs no costs: a query held by one text finds it first, whatever the case.
+    @Test func containmentFindsTheHoldingText() throws {
+        let index = try SequenceIndex.initRam(SequenceOptions(metric: .utf8Containment))
+        let texts = [
+            "the quick brown fox jumps over the lazy dog", "a journey of a thousand miles begins with a single step",
+        ]
+        try index.insert(keys: [1, 2], sequences: texts.map { Array($0.utf8) })
+        let matches = try index.search([Array("BROWN FOX jumps".utf8)], wanted: 2, arena: try Arena())
+        #expect(matches[0][0].key == 1)
     }
 
     /// Every metric spells itself through the library's own table.
     @Test func namesAreTheLibrarys() {
-        #expect(SequenceMetric(name: SequenceMetric.overlap.description) == .overlap)
+        #expect(SequenceMetric(name: SequenceMetric.utf8Containment.description) == .utf8Containment)
         #expect(SequenceMetric(name: "not-a-metric") == nil)
     }
 }

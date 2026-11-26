@@ -495,21 +495,31 @@ usearch.capabilitiesAvailable();
 
 ## Sequence Indexes
 
-`SequenceIndex` searches byte strings, UTF-8 text, DNA, RNA and proteins under edit distances and alignments.
+`SequenceIndex` searches proteins, DNA, RNA and UTF-8 text, each under the metric made for it.
 Its verbs and receivers are the dense ones, and its sequences cross as one Apache Arrow `Tape`, bytes end to end around their offsets: text and `Uint8Array` lists are packed by `Tape.ofSequences`, and a packed `Tape` is read in place.
 
 ```js
 const { Arena, SequenceIndex, SequenceMetric, integerFromKey } = require("usearch");
 
-const words = SequenceIndex.initRam({ metric: SequenceMetric.LevenshteinUtf8 });
-words.insert([1n, 2n, 3n], ["kitten", "sitting", "mitten"]);
-const matches = words.search(["sitting"], 1, new Arena());
+const words = SequenceIndex.initRam({ metric: SequenceMetric.Utf8Containment });
+words.insert([1n, 2n, 3n], ["Kitten", "Sitting", "Mitten"]);
+const matches = words.search(["SITTING"], 1, new Arena());
 console.log(integerFromKey(matches.get(0).keys), matches.get(0).scores[0]); // 2n 0
 console.log(new TextDecoder().decode(words.get(2n, new Arena()).get(0))); // "sitting"
 ```
 
-`SequenceMetric.NeedlemanWunsch` takes a `substitutionMatrix`, an `Int8Array` of 256 × 256 scores, and a `gap` cost, read only during the call; `SequenceMetric.Overlap` takes `windowWidths` in bytes.
-A checkpoint records neither weight, so `loadRam`, `loadVram`, their `Buffer` forms and the views take them again.
+| Metric | Sequences | Score | Default costs |
+| :-- | :-- | :-- | :-- |
+| `SequenceMetric.ProteinAlignment` | proteins | global alignment with linear gaps | BLOSUM62, gap 7 |
+| `SequenceMetric.DnaOverlap` | DNA and RNA | shifted overlap, also as the reverse complement | transition half a transversion, gap 2 |
+| `SequenceMetric.Utf8Containment` | UTF-8 text | share of the query's windows the stored side lacks, case-folded | none |
+
+`costs` is `{ similarities, gap }`: an `Int8Array` of 256 × 256 scores between raw bytes, viewed for the call, beside a `gap` cost, which the library folds into classes of bytes sharing their rows and columns.
+Absent, the index scores by the metric's own costs, and a containment refuses any.
+`sketchBytes` sets the bytes of the sketch in front of each stored sequence, a multiple of four, where absent takes the metric's default of 512 for protein alignment and UTF-8 containment.
+A DNA overlap keeps no sketch and refuses any.
+A checkpoint records the classes and costs, so `loadRam`, `loadVram`, their `Buffer` forms and the views take none, and `describe().metadata` answers the `classes` its costs folded bytes into.
+Stored sequences read back folded: packed class codes for proteins, class bytes for DNA, and case-folded UTF-8 for text.
 `count` answers `{entries, totalBytes, largestBytes}`, and `get` answers a `Tape` viewed inside its arena.
 
 ## Shape Indexes

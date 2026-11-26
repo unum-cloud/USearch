@@ -17,7 +17,7 @@
 #include <vector>           // `std::vector` - a machine, its listing and its loaded classes
 
 #include "harness.hpp" // `expect_true`, `expect_equal`, `run_test_case`
-#include "lib.hpp"     // `resolve_placement`, `gpu_placement_t`, `gpu_class_bit`
+#include "classes.hpp" // `resolve_placement`, `gpu_placement_t`, `gpu_class_bit`
 
 namespace unum::usearch::test {
 

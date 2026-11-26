@@ -993,6 +993,16 @@ using us::tools::spawn_harness_executor;
 /** Every device the C interface numbers, in its order, which @c USEARCH_DEVICES indexes. */
 std::span<util::gpu_device_t const> gpu_devices() noexcept;
 
+/** The class the library lists for @p device, the one its kernels run, matched by vendor and
+ *  ordinal. */
+inline usearch_gpu_class_t listed_class(util::gpu_device_t const& device) noexcept {
+    for (usearch_gpu_device_t const& entry : tools::listed_devices())
+        if (entry.vendor == static_cast<usearch_gpu_vendor_t>(device.vendor) &&
+            entry.vendor_ordinal == device.vendor_ordinal)
+            return entry.gpu_class;
+    return usearch_gpu_class_unknown_k;
+}
+
 /** Registers @p added when it names cases, and answers every suite registered so far. */
 inline std::span<registered_suite_t const> registered_suites(registered_suite_t added = {}) noexcept {
     static registered_suite_t suites[16];
@@ -1531,6 +1541,35 @@ usearch_outcome_t walk_recall(handle<verbs_type_>& index, typename verbs_type_::
     return walked;
 }
 
+/** A VRAM index's exact scan of the first @p count queries of @p queries scores every rank as the
+ *  same index, saved under @p stem and reloaded on RAM, scans it, within @p score_band, ties free
+ *  to name other keys; and it scores every query against every entry. */
+template <typename verbs_type_>
+void expect_device_scan(handle<verbs_type_>& index, typename verbs_type_::queries_t queries, std::size_t count,
+                        std::string_view stem, double score_band) {
+    session_t& session = *index.session;
+    sz::string_t const path = formatted("{}.safegraphs", stem);
+    usearch_outcome_t outcome {};
+    verbs_type_::save(index.get(), index.executor(), bytes_view(path), &outcome);
+    if (!expect_success(outcome)) return;
+    st::vector<std::int32_t> placement;
+    typename verbs_type_::index_t copy = nullptr;
+    verbs_type_::load_ram(&copy, session.executor_for(usearch_residency_ram_k), bytes_view(path),
+                          session.ram_options(0, placement), index.geometry, &outcome);
+    for (sz::string_t const& file : files_starting_with(stem)) std::remove(file.c_str());
+    if (!expect_success(outcome)) return;
+    handle<verbs_type_> reloaded {copy, session, usearch_residency_ram_k, index.geometry};
+    copied_matches_t on_device, on_host;
+    usearch_traversal_stats_t device_stats {}, host_stats {};
+    if (!expect_success(search_queries(index, queries, count, cell_batch_k, cell_wanted_k, 0, usearch_traversal_scan_k,
+                                       device_stats, on_device)) ||
+        !expect_success(search_queries(reloaded, queries, count, cell_batch_k, cell_wanted_k, 0,
+                                       usearch_traversal_scan_k, host_stats, on_host)))
+        return;
+    expect_true(equivalent_matches(on_device, on_host, score_band));
+    expect_true(device_stats.computed_distances >= count * describe(index).size);
+}
+
 /** A walk at @p expansion keeps @p floor of the exact scan's top ten over the first @p count
  *  queries of @p queries, as @ref walk_recall judges it; a residency that serves no scan yet has no
  *  oracle to judge by. */
@@ -1700,11 +1739,14 @@ void drive_cancelled_plan(plan_type_ const& plan, usearch_outcome_t const& outco
     usearch_progress_t const cancelling {[](std::size_t, std::size_t, void*) noexcept { return usearch_cancel_k; },
                                          nullptr, 0};
     for (std::size_t calls = 0; calls <= limit; ++calls) {
-        usearch_phase_progress_t phase {};
-        call(cancelling, &phase);
+        usearch_phase_progress_t progress {};
+        call(cancelling, &progress);
         if (outcome.status != usearch_status_cancelled_k) break;
-        expect_true(plan != nullptr && phase.phase != usearch_phase_none_k && phase.phase != usearch_phase_done_k &&
-                    phase.completed <= phase.total);
+        expect_true(plan != nullptr && progress.phase != usearch_phase_none_k &&
+                        progress.phase != usearch_phase_done_k && progress.completed <= progress.total,
+                    "Cancelled call {} of {} left a {} plan in phase {} at {} of {}", calls, limit,
+                    plan != nullptr ? "live" : "null", static_cast<int>(progress.phase), progress.completed,
+                    progress.total);
     }
 }
 
@@ -1913,14 +1955,14 @@ void expect_widened(handle<verbs_type_>& index, std::string const& stem) {
         std::size_t const differing = rows_that_differ(original, kept);
         expect_true(differing == 0, "{} of {} rows changed or grew past their stored links on load_ram at {}",
                     differing, original.size(), widened_degree);
-        std::size_t linked_before = 0, linked_after = 0;
-        for (auto const& [offset, row] : kept) linked_before += row.size();
         usearch_refine_report_t report {};
         verbs_type_::refine(widened.get(), widened.executor(), &report, &outcome);
         expect_success(outcome);
-        for (auto const& [offset, row] : links_by_offset(widened)) linked_after += row.size();
-        expect_true(linked_after > linked_before, "refine kept {} links of {} at degree {}", linked_after,
-                    linked_before, widened_degree);
+        // Wider rows re-select, dropping links as well as adding them, yet reach every entry
+        expect_true(report.reachability.audited == original.size() &&
+                        report.reachability.reachable == report.reachability.audited,
+                    "refine at degree {} reached {} of {} entries", widened_degree, report.reachability.reachable,
+                    original.size());
     }
 
     handle<verbs_type_> narrowed;
@@ -1957,25 +1999,27 @@ void expect_widened(handle<verbs_type_>& index, std::string const& stem) {
     for (sz::string_t const& file : files_starting_with(stem)) std::remove(file.c_str());
 }
 
-/** Every metric kind the modality spells reads back by its name, and "unknown" is refused with
- *  @c invalid_argument, leaving the output alone. */
+/** Every metric kind the modality spells reads back by its name, "unknown" included, and
+ *  "unrecognized" is refused with @c invalid_argument, leaving the output alone. */
 template <typename verbs_type_>
 void test_metric_names() {
     using metric_t = typename verbs_type_::metric_t;
-    std::size_t spelled = 0, misread = 0;
-    for (util::u32_t kind = 1; std::string_view {verbs_type_::metric_name(static_cast<metric_t>(kind))} != "unknown";
-         ++kind) {
+    std::size_t misread = 0;
+    expect_true(std::string_view {verbs_type_::metric_name(static_cast<metric_t>(0))} == "unknown");
+    expect_true(std::string_view {verbs_type_::metric_name(static_cast<metric_t>(1))} != "unrecognized");
+    // Every kind fits three bits, and a number no kind takes reads "unrecognized".
+    for (util::u32_t kind = 0; kind != 8; ++kind) {
         metric_t const metric = static_cast<metric_t>(kind);
-        metric_t parsed {};
+        if (std::string_view {verbs_type_::metric_name(metric)} == "unrecognized") continue;
+        metric_t parsed = static_cast<metric_t>(1);
         misread += verbs_type_::metric_from_name(bytes_view(verbs_type_::metric_name(metric)), &parsed) !=
                        usearch_status_success_k ||
                    parsed != metric;
-        ++spelled;
     }
     metric_t untouched = static_cast<metric_t>(1);
-    expect_true(spelled > 0);
     expect_true(misread == 0);
-    expect_true(verbs_type_::metric_from_name(bytes_view("unknown"), &untouched) == usearch_status_invalid_argument_k);
+    expect_true(verbs_type_::metric_from_name(bytes_view("unrecognized"), &untouched) ==
+                usearch_status_invalid_argument_k);
     expect_true(untouched == static_cast<metric_t>(1));
 }
 

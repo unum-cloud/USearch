@@ -125,8 +125,10 @@ struct ram_indexes {
     };
 
     /** Every shard as SAMPLE reads it below the watermarks of @c watermarks_snapshot, scored by the
-     *  caller's metric; see @c a_sample_source. */
-    template <typename metric_type_, typename context_type_, typename coordinates_type_>
+     *  caller's metric, and walked first by the sketches of @c seeding_metric where a call brings
+     *  one; see @c a_sample_source. */
+    template <typename metric_type_, typename context_type_, typename coordinates_type_,
+              typename seeding_metric_type_ = unseeded_t>
     struct basic_sample_source {
         using key_t = typename index_t::key_t;
         using node_id_t = typename index_t::node_id_t;
@@ -137,6 +139,7 @@ struct ram_indexes {
         metric_type_& metric;
         context_type_& context;
         coordinates_type_ const& fixed_coordinates_of;
+        seeding_metric_type_* seeding_metric;
 
         value_t const& value_(shard_node_t node) const noexcept {
             return indexes.shards_[node.shard].index->published_value_of(node.node);
@@ -198,8 +201,17 @@ struct ram_indexes {
             drain();
         }
 
+        /** A greedy walk by the seeding metric, where the call brings one, then on by the exact
+         *  metric from where it stopped, as a seeded search walks twice. */
         std::size_t walk(shard_node_t from, shard_node_t toward, std::span<shard_node_t> chain) const noexcept {
-            return sample_greedy_walk(*this, from, toward, chain);
+            std::size_t seeded = 0;
+            if constexpr (!std::is_same_v<seeding_metric_type_, unseeded_t>) {
+                basic_sample_source<seeding_metric_type_, context_type_, coordinates_type_> const sketches {
+                    indexes, watermarks_snapshot, *seeding_metric, context, fixed_coordinates_of, nullptr};
+                seeded = sample_greedy_walk(sketches, from, toward, chain);
+                if (seeded) from = chain[seeded - 1];
+            }
+            return seeded + sample_greedy_walk(*this, from, toward, chain.subspan(seeded));
         }
 
         void coordinates_of(shard_node_t node, std::span<f32_t, 3> xyz) const noexcept
@@ -516,18 +528,21 @@ struct ram_indexes {
      *  @param[in,out] context The calling thread's scratch & telemetry over any allocator.
      *  @param[in] hints Optional keys whose nodes every shard's walk takes as landmarks ahead of
      *      its random draws, in hint order; a key no shard holds counts as a missing hint.
+     *  @param[in] seeding A walk every shard takes first, unfiltered, from the hinted nodes by its
+     *      own query and metric, whose nearest nodes join the hints up to a landmark batch for the
+     *      walk by @p metric; or @c unseeded_t for that walk alone.
      *  @return The matches merged.
      *
      *  @par Statuses:
      *  - @c contended_k Two windows overlapped the call or one outran the snapshot.
      */
     template <typename query_type_, typename metric_type_, typename relate_type_, typename predicate_type_,
-              typename context_allocator_type_>
+              typename context_allocator_type_, typename seeding_type_ = unseeded_t>
     expected<std::size_t> search_if(query_type_ const& query, std::span<node_id_t const> watermarks,
                                     std::span<key_t> keys, std::span<distance_t> distances, search_config_t config,
                                     relate_type_ const& relate, predicate_type_& predicate, metric_type_& metric,
                                     traversal_context_over<context_allocator_type_>& context,
-                                    std::span<key_t const> hints = {}) noexcept {
+                                    std::span<key_t const> hints = {}, seeding_type_ seeding = {}) noexcept {
         using relation_t = std::invoke_result_t<relate_type_ const&, index_t const&>;
         // A query takes a landmark list's worth of keys, as the context reserved; every shard's
         // staging marks the keys it held, and the keys none marked are missing.
@@ -536,7 +551,18 @@ struct ram_indexes {
         auto const [merged, status] = merge_shards_(
             watermarks, keys, distances,
             [&](index_t& one, node_id_t watermark, std::size_t) noexcept -> expected<std::span<scored_node_t const>> {
-                std::span<node_id_t const> const hinted = one.stage_hints_(taken, watermark, context);
+                std::span<node_id_t const> hinted = one.stage_hints_(taken, watermark, context);
+                if constexpr (!std::is_same_v<seeding_type_, unseeded_t>) {
+                    std::size_t const scored_before = context.telemetry.computed_distances;
+                    status_t const sketched = one.template fold_walk_below_<synchronization_t::concurrent_k>(
+                                                     seeding.query, seeding.metric, dummy_fold_t {}, context.results,
+                                                     context, config, watermark, hinted)
+                                                  .status;
+                    context.telemetry.computed_distances_in_seeding += context.telemetry.computed_distances -
+                                                                       scored_before;
+                    if (failed(sketched)) return {{}, sketched};
+                    hinted = one.stage_seeds_(context);
+                }
                 if constexpr (std::is_same_v<relation_t, dummy_predicate_t> &&
                               std::is_same_v<predicate_type_, dummy_predicate_t>) {
                     status_t const walked = one.template fold_walk_below_<synchronization_t::concurrent_k>(
@@ -568,13 +594,15 @@ struct ram_indexes {
      *  - @c contended_k Two windows overlapped the call or one outran the snapshot.
      *  - @c overflow_k A scratch capacity of @p context wraps when rounded.
      */
-    template <typename query_type_, typename metric_type_, typename predicate_type_, typename context_allocator_type_>
+    template <typename query_type_, typename metric_type_, typename predicate_type_, typename context_allocator_type_,
+              typename seeding_type_ = unseeded_t>
     expected<std::size_t> search_if(query_type_ const& query, std::span<node_id_t const> watermarks,
                                     std::span<key_t> keys, std::span<distance_t> distances, search_config_t config,
                                     predicate_type_& predicate, metric_type_& metric,
                                     traversal_context_over<context_allocator_type_>& context,
-                                    std::span<key_t const> hints = {}) noexcept {
-        return search_if(query, watermarks, keys, distances, config, unrelated_t {}, predicate, metric, context, hints);
+                                    std::span<key_t const> hints = {}, seeding_type_ seeding = {}) noexcept {
+        return search_if(query, watermarks, keys, distances, config, unrelated_t {}, predicate, metric, context, hints,
+                         seeding);
     }
 
     /** The exact sibling of @c search_if: every entry below each shard's watermark scored as
@@ -660,6 +688,8 @@ struct ram_indexes {
      *  @param[in] coordinates_of Writes a stored value's fixed coordinates, as
      *      <tt>void(value_t const&, std::span&lt;f32_t, 3&gt;)</tt>, or @c no_fixed_coordinates_t
      *      to solve them from distances.
+     *  @param[in,out] seeding_metric Scores the sketches every greedy walk follows first, before
+     *      @p metric walks on from where it stopped, or null under @c unseeded_t.
      *
      *  @par Statuses:
      *  - @c shape_mismatch_k An output's or the shown coordinates' length disagrees.
@@ -667,13 +697,14 @@ struct ram_indexes {
      *  - @c contended_k Two windows overlapped the call or one outran the snapshot.
      */
     template <typename metric_type_, typename context_allocator_type_,
-              typename coordinates_type_ = no_fixed_coordinates_t>
+              typename coordinates_type_ = no_fixed_coordinates_t, typename seeding_metric_type_ = unseeded_t>
     expected<sample_result_t> sample(sample_inputs<key_t> inputs, std::span<node_id_t const> watermarks,
                                      sample_outputs<key_t> outputs, sample_config_t config, metric_type_& metric,
                                      traversal_context_over<context_allocator_type_>& context,
-                                     coordinates_type_ const& coordinates_of = {}) noexcept {
-        using source_t =
-            basic_sample_source<metric_type_, traversal_context_over<context_allocator_type_>, coordinates_type_>;
+                                     coordinates_type_ const& coordinates_of = {},
+                                     seeding_metric_type_* seeding_metric = nullptr) noexcept {
+        using source_t = basic_sample_source<metric_type_, traversal_context_over<context_allocator_type_>,
+                                             coordinates_type_, seeding_metric_type_>;
         using plan_t = sample_plan<source_t>;
         std::size_t const scratch_bytes = plan_t::scratch_bytes(outputs.keys.size(), inputs.shown.size(), config);
         growing_buffer<u64_t, context_allocator_type_> scratch {context.allocator};
@@ -686,7 +717,7 @@ struct ram_indexes {
             if (watermarks.size() > shards_.size()) return {{}, status_code_t::contended_k};
             for (std::size_t shard = 0; shard != watermarks.size(); ++shard)
                 if (watermarks[shard] > shards_[shard].index->size()) return {{}, status_code_t::contended_k};
-            source_t const source {*this, watermarks, metric, context, coordinates_of};
+            source_t const source {*this, watermarks, metric, context, coordinates_of, seeding_metric};
             plan_t plan {source, inputs, outputs, config, {aligned, scratch_bytes}};
             status_t status = plan.draw();
             if (succeeded(status)) status = plan.assign_ordinals();
@@ -784,6 +815,9 @@ struct ram_indexes {
 
         /** The budget planning reserved every neighbor list for, which every shard shares. */
         std::size_t connectivity() const noexcept { return widest_connectivity(shard_plans_); }
+
+        /** The widest walk any shard plan's reach takes. */
+        std::size_t reach_expansion() const noexcept { return widest_reach_expansion(shard_plans_); }
 
         /** Units of the phase the first rounding shard plan is in, done and in all, summed over the
          *  shards in it: what a driver's progress hears at every barrier. */
@@ -936,6 +970,9 @@ struct ram_indexes {
 
         /** The budget planning reserved every neighbor list for, which every shard shares. */
         std::size_t connectivity() const noexcept { return widest_connectivity(shard_plans_); }
+
+        /** The widest walk any shard plan's reach takes. */
+        std::size_t reach_expansion() const noexcept { return widest_reach_expansion(shard_plans_); }
 
         /** Units of the phase the first rounding shard plan is in, done and in all, summed over the
          *  shards in it; none in the moves. */
@@ -1293,6 +1330,13 @@ struct ram_indexes {
         return widest;
     }
 
+    /** The widest walk any plan of @p plans takes for its reach. */
+    template <typename plan_type_>
+    static std::size_t widest_reach_expansion(growing_buffer<plan_type_, allocator_t> const& plans) noexcept {
+        std::size_t widest = 0;
+        for (plan_type_ const& plan : plans) widest = max_of(widest, plan.reach_expansion());
+        return widest;
+    }
     /** Grows @p context to what any plan of @p plans touches. */
     template <typename plan_type_, typename context_allocator_type_>
     static status_t reserve_contexts(growing_buffer<plan_type_, allocator_t> const& plans,

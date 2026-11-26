@@ -26,9 +26,14 @@
  *  nearest hub, and its restitch keeps the diverse links among each entry's own and its nearest
  *  neighborhood-mates, the health check's reach rule on top. The graph kernels, a cut's partition
  *  growth, the health check, the island components and the heal, read the neighbors matrix alone,
- *  as the CUDA basic passes do. Loads copy a run's bytes as they were saved. The host splices, in
- *  order, the contexts' source, the face's kits, and its prelude naming the kit and defining
- *  @c USEARCH_METAL_KIT_RUNGS, ahead of this file.
+ *  as the CUDA basic passes do. A kit storing a sketch in front of every sequence builds by it, the
+ *  launch naming its bytes: its builders read the stored sketch in place as their query and score a
+ *  lane to an entry, its searches prepare and score the sequence behind it, and a sketch kernel
+ *  fills the sketches of an insert's values or of a search's queries. Such a kit seeds every search
+ *  by a walk over the sketches, whose nearest nodes the search scores first. Loads copy a run's
+ *  bytes as they were saved, or scatter each saved sequence behind the sketch the same kernel
+ *  derives. The host splices, in order, the contexts' source, the face's kits, and its prelude
+ *  naming the kit and defining @c USEARCH_METAL_KIT_RUNGS, all ahead of this file.
  */
 #pragma once
 
@@ -41,9 +46,10 @@ using namespace unum::usearch::utilities;
 /** The buffer slots a kit's kernels take their bindings at: the first seven are common to every
  *  kernel reading values, and the slots of the round's columns are the graph kernels' ones, since a
  *  gather and a restitch bind the health check's columns beside them. An insert, a re-selection and
- *  its back-link bind the chains they thread; a search its query starts and its outputs; a load its
- *  run's saved values, their element sums and planned starts and the widest span it counts. The
- *  kit's parameters bind past every round column. */
+ *  its back-link bind the chains they thread and the IDs a reach lists; a search and its seeding
+ *  walk the query starts, the outputs, the seeds and the queries' sketches, which a sketch phase
+ *  writes; a load its run's saved values, their element sums and planned starts. The tables a kit's
+ *  sketches derive from and the kit's parameters bind past every round column. */
 enum metal_basic_buffer_index_t : unsigned int {
     metal_basic_arguments_buffer_k = 0,
     metal_basic_values_buffer_k = 1,
@@ -57,15 +63,19 @@ enum metal_basic_buffer_index_t : unsigned int {
     metal_basic_link_next_buffer_k = 8,
     metal_basic_touched_ids_buffer_k = 9,
     metal_basic_touched_count_buffer_k = 10,
+    metal_basic_listed_buffer_k = 11,
 
     metal_basic_query_offsets_buffer_k = 7,
     metal_basic_ids_buffer_k = 8,
     metal_basic_distances_buffer_k = 9,
+    metal_basic_seed_ids_buffer_k = 10,
+    metal_basic_query_sketches_buffer_k = 11,
+    metal_basic_range_matches_buffer_k = 12,
+    metal_basic_finished_ranges_buffer_k = 13,
 
     metal_basic_saved_buffer_k = 7,
     metal_basic_saved_offsets_buffer_k = 8,
     metal_basic_stored_offsets_buffer_k = 9,
-    metal_basic_span_words_buffer_k = 10,
 
     metal_basic_round_counters_buffer_k = 7,
     metal_basic_changed_buffer_k = 15,
@@ -76,21 +86,27 @@ enum metal_basic_buffer_index_t : unsigned int {
     metal_basic_runs_buffer_k = 20,
     metal_basic_run_items_buffer_k = 21,
 
+    metal_basic_sketch_tables_buffer_k = 22,
     metal_basic_parameters_buffer_k = 23,
 };
 
 /** Every scalar a kit's launch passes, bound at @c metal_basic_arguments_buffer_k, the CUDA
  *  records' scalars field by field: the storage's connectivity and the raw @c nk_kernel_kind_t its
  *  kits score under, a wave's or a walk's bounds and spans, the arena slice and its epochs, a
- *  search's breadth and outputs, a load's run, and the runs, the neighborhoods and the gather pass
- *  of a round. */
+ *  search's breadth and outputs, a load's run or the values a sketch phase fills, from @c first_id
+ *  and @c count of them, a round's runs, neighborhoods and gather pass, the bytes of the sketch in
+ *  front of every stored value, zero for a kit storing none, the seeds a search scores first per
+ *  query, zero for a search without seeds, and whether a re-selection walks the IDs the listed
+ *  buffer holds by offset, zero walking @b [first_id,end_id). A sketch phase naming
+ *  @c queries_count sketches a search's bare queries into rows, a sketch apart. */
 struct metal_basic_arguments_t {
     unsigned int connectivity, metric, first_id, end_id;
     unsigned int sampling_bound, span_bytes, scratch_bytes_per_warp, selection_nodes;
     unsigned int expansion, epoch_base, visited_slots, hash_shift;
     unsigned int tail_entries, slice_bytes, concurrent_walks, filling_nodes;
     unsigned int queries_count, count, runs_count, neighborhoods;
-    unsigned int pass;
+    unsigned int pass, sketch_bytes, seeds_count, ranges;
+    unsigned int listed;
 };
 
 /** Every scalar a graph kernel reads, bound at @c metal_graph_arguments_buffer_k: the neighbors
@@ -913,12 +929,14 @@ inline metal_health_t metal_health(uint rows_count, uint connectivity, device ui
         metal_warp_t::fetch_add_relaxed(counters + metal_round_stranded_islands_k, counted[1]);
 }
 
-/** Links @p member from @p owner 's row, as the RAM round's @c add_or_swap_link_ does keeping none:
- *  a free slot first; else, inside the root's component, the slot whose resident is linked to by
- *  the most entries, when it stays linked to by more than @p member and the reach rule releases it.
- *  The heal runs alone, so it writes rows with plain stores; answers whether it wrote. */
+/** Links @p member from @p owner 's row, as the RAM round's @c add_or_swap_link_ does: a free slot
+ *  first; else, inside the root's component, the slot whose resident is linked to by the most
+ *  entries, when it stays linked to by more than @p member, @p keeps does not hold it and the reach
+ *  rule releases it. The heal runs alone, writing rows with plain stores, and answers whether it
+ *  wrote the link. */
+template <typename keeps_type_>
 inline bool metal_add_or_swap_link(thread metal_health_t& health, device uint* changed, uint owner, uint member,
-                                   thread uint& changed_rows) {
+                                   thread uint& changed_rows, thread keeps_type_ const& keeps) {
     if (owner == member || owner >= health.rows_count || member >= health.rows_count) return false;
     device uint* const links = health.links_of(owner);
     uint const connectivity = health.connectivity, first = links[0];
@@ -942,6 +960,7 @@ inline bool metal_add_or_swap_link(thread metal_health_t& health, device uint* c
             if (resident >= health.rows_count || health.in_links_of(resident) <= richest_links + 1u) continue;
             richest = slot, richest_links = health.in_links_of(resident);
         }
+        if (richest != connectivity && keeps(richest ? links[richest] : first)) richest = connectivity;
         uint const displaced = richest == connectivity ? metal_unknown_k : richest ? links[richest] : first;
         if (present) {}
         else if (free_slot != connectivity) links[free_slot] = member, written = true;
@@ -969,10 +988,35 @@ inline uint metal_first_link_into_component(thread metal_health_t& health, uint 
     return metal_unknown_k;
 }
 
+/** Links unreached island entry @p entry as the RAM round's @c link_unreached_ does: from the first
+ *  of its own links inside the root's component, else, as a full hub refuses, from a free slot of
+ *  the first row of the component its links link to; answers the owner or none. */
+inline uint metal_link_unreached(thread metal_health_t& health, device uint* changed, uint entry,
+                                 thread uint& changed_rows) {
+    auto keeps_none = [](uint) { return false; };
+    auto keeps_all = [](uint) { return true; };
+    uint const owner = metal_first_link_into_component(health, entry);
+    if (owner != metal_unknown_k && metal_add_or_swap_link(health, changed, owner, entry, changed_rows, keeps_none))
+        return owner;
+    device uint* const links = health.links_of(entry);
+    for (uint slot = 0; slot != health.connectivity && links[slot] != metal_unknown_k; ++slot) {
+        uint const hop = links[slot];
+        if (hop == entry || hop >= health.rows_count) continue;
+        device uint* const hop_links = health.links_of(hop);
+        for (uint hop_slot = 0; hop_slot != health.connectivity; ++hop_slot) {
+            uint const candidate = hop_links[hop_slot];
+            if (candidate < health.rows_count && candidate != entry && health.in_component(candidate) &&
+                metal_add_or_swap_link(health, changed, candidate, entry, changed_rows, keeps_all))
+                return candidate;
+        }
+    }
+    return metal_unknown_k;
+}
+
 /** Links every unreached or stranded island component through the root's component with no
  *  distance, in rank order on one lane, as the RAM round's @c heal_ does: an unreached one's entry
- *  from the first of its own links inside the component, a stranded one's entry to the entry of the
- *  component linking to it. */
+ *  as @ref metal_link_unreached does, and a stranded one's entry to the entry of the root's
+ *  component that links to that island. */
 [[host_name("metal_heal_islands_kernel")]] kernel void metal_heal_islands_kernel(
     constant metal_graph_arguments_t& arguments [[buffer(metal_graph_arguments_buffer_k)]],
     device uint* neighbors [[buffer(metal_graph_neighbors_buffer_k)]],
@@ -995,16 +1039,16 @@ inline uint metal_first_link_into_component(thread metal_health_t& health, uint 
                                          depths_from_root, depths_to_root, in_links, shallower_in_links, reached,
                                          reaches_root, two_ways_to_root);
     uint healed = 0, changed_rows = 0;
+    auto keeps_none = [](uint) { return false; };
     for (uint rank = 0; rank != arguments.islands; ++rank) {
         if (island_components[rank] != rank) continue;
         uint const roles = island_roles[rank], member = island_entries[2 * rank], entry = island_nodes[member];
-        uint const owner = roles & metal_unreached_island_k ? metal_first_link_into_component(health, entry)
+        uint const owner = roles & metal_unreached_island_k ? metal_link_unreached(health, changed, entry, changed_rows)
                                                             : metal_unknown_k;
-        if (owner != metal_unknown_k && metal_add_or_swap_link(health, changed, owner, entry, changed_rows))
-            health.record_heal_link(owner, entry), ++healed;
+        if (owner != metal_unknown_k) health.record_heal_link(owner, entry), ++healed;
         uint const parent = island_parents[member];
         if ((roles & metal_stranded_island_k) && parent != metal_unknown_k &&
-            metal_add_or_swap_link(health, changed, entry, parent, changed_rows))
+            metal_add_or_swap_link(health, changed, entry, parent, changed_rows, keeps_none))
             health.record_heal_link(entry, parent), ++healed;
     }
     counters[metal_round_healed_k] += healed;
@@ -1085,8 +1129,6 @@ inline uint metal_keep_reach(thread metal_health_t& health, uint node, metal_sti
 
 namespace unum::usearch::basic {
 
-using query_t = typename metal_kit_t::query_t;
-
 #pragma region Walk
 
 /** A kit's selector when it names one, which every kit scoring a metric beside its diversity rule
@@ -1104,16 +1146,107 @@ struct metal_has_selector<kit_, typename metal_voided<typename kit_::selector_t>
     static constexpr constant bool value = true;
 };
 
+/** Who scores a pair, as @c score_role_t names it on the host: a search, or a builder. */
+enum metal_score_role_t : uint {
+    metal_score_search_k = 0,
+    metal_score_build_k = 1,
+};
+
+/** Whether a kit's builders score a sketch stored in front of every sequence, as many bytes as the
+ *  launch names: its @c sketch_distance scores two of them, symmetric and exact, one lane to a
+ *  pair. MSL has no requires-expression, so the specialization asks for the call's size, which
+ *  fails where the member is missing. */
+template <typename kit_, typename = void>
+struct metal_sketching_kit {
+    static constexpr constant bool value = false;
+};
+template <typename kit_>
+struct metal_sketching_kit<kit_, typename metal_voided<char[sizeof(kit_::sketch_distance(
+                                     (device uchar const*)nullptr, (device uchar const*)nullptr, 0u, 0u))]>::type> {
+    static constexpr constant bool value = true;
+};
+
+/** Whether a kit closes every stored value to a word behind the gap its sketch takes: one naming
+ *  @c sketch_tables_t, which a kit building canonically names too. */
+template <typename kit_, typename = void>
+struct metal_closes_values {
+    static constexpr constant bool value = false;
+};
+template <typename kit_>
+struct metal_closes_values<kit_, typename metal_voided<typename kit_::sketch_tables_t>::type> {
+    static constexpr constant bool value = true;
+};
+
+/** Whether @p role_ scores @p kit_ by its sketches: a builder's, for a kit building by them. */
+template <typename kit_, metal_score_role_t role_>
+struct metal_scores_by_sketch {
+    static constexpr constant bool value = role_ == metal_score_build_k && metal_sketching_kit<kit_>::value;
+};
+
+/** Whether @p role_ scores two of @p kit_ 's entries in one pass of the whole simdgroup: its
+ *  @c canonical_distance_pair scores each as its @c canonical_distance would under its own radius,
+ *  for a role scoring canonically; the specialization asks for the call's size, as above. */
+template <typename kit_, metal_score_role_t role_, typename = void>
+struct metal_paired_kit {
+    static constexpr constant bool value = false;
+};
+template <typename kit_, metal_score_role_t role_>
+struct metal_paired_kit<kit_, role_,
+                        typename metal_voided<char[sizeof(kit_::template canonical_distance_pair<1>(
+                            0u, *(thread typename kit_::canonical_query_t const*)nullptr, (device uchar const*)nullptr,
+                            0u, (device uchar const*)nullptr, 0u, 0.f, 0.f, 0u, 0u))]>::type> {
+    static constexpr constant bool value = !metal_scores_by_sketch<kit_, role_>::value;
+};
+
+/** A builder's query under a kit building by sketches: the stored sketch, read in place. */
+struct metal_sketch_query_t {
+    device uchar const* sketch;
+};
+
+/** The query @p role_ walks the kit with: the stored sketch for a builder of a kit building by
+ *  sketches, the kit's canonical query otherwise. */
+template <typename kit_, metal_score_role_t role_, bool = metal_scores_by_sketch<kit_, role_>::value>
+struct metal_query_of {
+    using type = typename kit_::canonical_query_t;
+};
+template <typename kit_, metal_score_role_t role_>
+struct metal_query_of<kit_, role_, true> {
+    using type = metal_sketch_query_t;
+};
+template <metal_score_role_t role_>
+using metal_query = typename metal_query_of<metal_kit_t, role_>::type;
+
+/** Lanes the kit scores one entry with for @p role_ on the rung @p rung : one for a sketch, its
+ *  @c canonical_lanes_per_entry of the rung otherwise. */
+template <metal_score_role_t role_>
+constexpr uint metal_lanes_per_entry(uint rung) {
+    return metal_scores_by_sketch<metal_kit_t, role_>::value ? 1u : metal_kit_t::canonical_lanes_per_entry(rung);
+}
+
 /** The ragged storage a kit reads: every value back to back, each entry's start, one more than the
- *  nodes, the kit's runtime parameters and the metric it scores under. */
+ *  nodes, the kit's runtime parameters, the metric it scores under and the bytes of the sketch in
+ *  front of every value, zero for a kit storing none. */
 struct metal_ragged_t {
     device uchar const* values;
     device ulong const* offsets;
     device uchar const* parameters;
     uint metric;
+    uint sketch_bytes;
 
-    device uchar const* data_of(uint node_id) { return values + offsets[node_id]; }
-    uint bytes_of(uint node_id) { return uint(offsets[node_id + 1] - offsets[node_id]); }
+    /** The part of @p node_id 's stored value that @p role_ reads under the kit: its sketch for a
+     *  builder of a kit building by sketches, its sequence otherwise, which for a kit closing its
+     *  values starts past the sketch and ends before the padding its closing byte counts. */
+    template <metal_score_role_t role_>
+    device uchar const* data_of(uint node_id) {
+        return values + offsets[node_id] + (metal_scores_by_sketch<metal_kit_t, role_>::value ? 0u : sketch_bytes);
+    }
+    template <metal_score_role_t role_>
+    uint bytes_of(uint node_id) {
+        uint const stored = uint(offsets[node_id + 1] - offsets[node_id]);
+        if constexpr (!metal_closes_values<metal_kit_t>::value) return stored;
+        else if constexpr (metal_scores_by_sketch<metal_kit_t, role_>::value) return sketch_bytes;
+        else return stored - sketch_bytes - uint(values[offsets[node_id + 1] - 1]);
+    }
 };
 
 /** One walker's walk: the storage it scores, the neighbors matrix and the counter words, its
@@ -1145,26 +1278,65 @@ struct metal_basic_walk_t {
 
     device uint* neighbors_for(uint node_id) { return metal_row(neighbors, node_id, connectivity); }
 
-    /** Lays the entry of @p data and @p bytes out as the kit's query in @p span. */
-    query_t prepare(device uchar const* data, uint bytes, device uchar* span) {
-        return metal_kit_t::prepare(storage.parameters, data, bytes, span, lane);
+    /** Lays the entry of @p data and @p bytes, the part @p role_ reads, out as the query @p role_
+     *  walks the kit with: the sketch as it is, or the kit's canonical query in @p span. */
+    template <metal_score_role_t role_>
+    metal_query<role_> prepare(device uchar const* data, uint bytes, device uchar* span) {
+        if constexpr (metal_scores_by_sketch<metal_kit_t, role_>::value) return metal_sketch_query_t {data};
+        else return metal_kit_t::canonical_prepare(storage.parameters, data, bytes, span, lane);
     }
-    query_t prepare_node(uint node_id, device uchar* span) {
-        return prepare(storage.data_of(node_id), storage.bytes_of(node_id), span);
+    template <metal_score_role_t role_>
+    metal_query<role_> prepare_node(uint node_id, device uchar* span) {
+        return prepare<role_>(storage.data_of<role_>(node_id), storage.bytes_of<role_>(node_id), span);
     }
 };
 
-/** The distance on rung @p rung_ from @p query to the entry of @p node_id, exact within @p radius
- *  and above it past; infinite for the sentinel. Every lane of the entry's group calls it. */
-template <uint rung_>
-inline float metal_score_entry(thread metal_ragged_t& storage, thread query_t const& query, uint node_id, float radius,
-                               uint lane, uint simdgroup) {
+/** The distance @p kit_ scores for @p role_ on rung @p rung_ from @p query to the entry of
+ *  @p node_id, exact within @p radius and above it past, and exact at any radius for a sketch;
+ *  infinite for the sentinel. Every lane of the entry's group calls it. */
+template <typename kit_, metal_score_role_t role_, uint rung_>
+inline float metal_score_entry(thread metal_ragged_t& storage, thread metal_query<role_> const& query, uint node_id,
+                               float radius, uint lane, uint simdgroup) {
     if (node_id == metal_unknown_k) return numeric_limits<float>::infinity();
-    device uchar const* const data = storage.data_of(node_id);
-    uint const bytes = storage.bytes_of(node_id);
-    float const lower_bound = metal_kit_t::lower_bound(storage.metric, query, data, bytes);
-    if (lower_bound > radius) return lower_bound;
-    return metal_kit_t::template score<rung_>(storage.metric, query, data, bytes, radius, lane, simdgroup);
+    device uchar const* const data = storage.data_of<role_>(node_id);
+    if constexpr (metal_scores_by_sketch<kit_, role_>::value)
+        return kit_::sketch_distance(query.sketch, data, storage.sketch_bytes, lane);
+    else {
+        uint const bytes = storage.bytes_of<role_>(node_id);
+        float const lower_bound = kit_::canonical_lower_bound(storage.metric, query, data, bytes);
+        if (lower_bound > radius) return lower_bound;
+        return kit_::template canonical_distance<rung_>(storage.metric, query, data, bytes, radius, lane, simdgroup);
+    }
+}
+
+/** The distances @p kit_ scores for @p role_ on rung @p rung_ from @p query to the entries of
+ *  @p first_id and @p second_id, exact within @p radius as @ref metal_score_entry scores them:
+ *  infinite for the sentinel, the lower bound past @p radius, and in one paired pass when both
+ *  entries need scoring; every lane of the simdgroup calls it with the same IDs. */
+template <typename kit_, metal_score_role_t role_, uint rung_>
+inline float2 metal_score_pair(thread metal_ragged_t& storage, thread metal_query<role_> const& query, uint first_id,
+                               uint second_id, float radius, uint lane, uint simdgroup) {
+    device uchar const* const first = first_id == metal_unknown_k ? nullptr : storage.data_of<role_>(first_id);
+    device uchar const* const second = second_id == metal_unknown_k ? nullptr : storage.data_of<role_>(second_id);
+    uint const first_bytes = first ? storage.bytes_of<role_>(first_id) : 0u;
+    uint const second_bytes = second ? storage.bytes_of<role_>(second_id) : 0u;
+    float2 distances = float2(first ? kit_::canonical_lower_bound(storage.metric, query, first, first_bytes)
+                                    : numeric_limits<float>::infinity(),
+                              second ? kit_::canonical_lower_bound(storage.metric, query, second, second_bytes)
+                                     : numeric_limits<float>::infinity());
+    // An unbounded radius holds the sentinel's infinity within it, so the ID decides.
+    bool const first_scored = first && !(distances.x > radius);
+    bool const second_scored = second && !(distances.y > radius);
+    if (first_scored && second_scored)
+        return kit_::template canonical_distance_pair<rung_>(storage.metric, query, first, first_bytes, second,
+                                                             second_bytes, radius, radius, lane, simdgroup);
+    if (first_scored)
+        distances.x = kit_::template canonical_distance<rung_>(storage.metric, query, first, first_bytes, radius, lane,
+                                                               simdgroup);
+    if (second_scored)
+        distances.y = kit_::template canonical_distance<rung_>(storage.metric, query, second, second_bytes, radius,
+                                                               lane, simdgroup);
+    return distances;
 }
 
 /** The radius a kit may prune past at a scored node: its packed distance, as the CUDA walks read
@@ -1179,17 +1351,20 @@ inline float metal_radius_of(thread metal_sorted_candidates<slots_>& frontier) {
 inline float metal_radius_of(thread metal_arena_frontier&) { return numeric_limits<float>::infinity(); }
 
 /**
- *  @brief Scores each round of a walk's entries with the whole threadgroup: simdgroup zero posts
- *      the query and an entry per lane, and every simdgroup scores its share on @p rung_.
+ *  @brief Scores each round of a walk's entries for @p role_ with the whole threadgroup:
+ *      simdgroup zero posts the query and an entry per lane, and every simdgroup scores its share
+ *      on @p rung_.
  *
  *  Simdgroups score @p lanes_per_entry_ lanes to an entry, in turns when an entry takes more lanes
- *  than the threadgroup's simdgroups split evenly. Only simdgroup zero walks, so the frontier, the
- *  visited set and the query's span stay its own; the others @ref serve rounds until it
- *  @ref finish es. Two barriers bracket every round, so the posted entries are read between them
- *  alone, as the CUDA and HIP block schedules do.
+ *  than the threadgroup's simdgroups split evenly, and two neighbouring entries a turn for a paired
+ *  kit. Only simdgroup zero walks, so the frontier, the visited set and the query's span stay its
+ *  own; the others @ref serve rounds until it @ref finish es. Two barriers bracket every round, so
+ *  the posted entries are read between them alone, as the CUDA and HIP block schedules do.
  */
-template <uint rung_, uint lanes_per_entry_>
+template <metal_score_role_t role_, uint rung_, uint lanes_per_entry_>
 struct metal_schedule {
+    static constexpr constant metal_score_role_t role_k = role_;
+    using query_t = metal_query<role_>;
     static constexpr constant uint entries_per_simdgroup_k = metal_warp_t::width_k / lanes_per_entry_;
     static constexpr constant uint entries_per_group_k = entries_per_simdgroup_k * metal_simdgroups_k;
     static_assert(metal_warp_t::width_k % entries_per_group_k == 0, "Four simdgroups split 32 entries evenly");
@@ -1241,10 +1416,18 @@ struct metal_schedule {
         query_t const query = posted->query;
         float const radius = posted->radius;
         uint const entries = posted->entries;
+        if constexpr (metal_paired_kit<metal_kit_t, role_>::value && lanes_per_entry_ == metal_warp_t::width_k) {
+            for (uint first = 2 * simdgroup; first < entries; first += 2 * metal_simdgroups_k) {
+                float2 const distances = metal_score_pair<metal_kit_t, role_, rung_>(
+                    storage, query, posted->ids[first], posted->ids[first + 1], radius, lane, simdgroup);
+                if (lane == 0) posted->distances[first] = distances.x, posted->distances[first + 1] = distances.y;
+            }
+            return;
+        }
         for (uint first = simdgroup * entries_per_simdgroup_k; first < entries; first += entries_per_group_k) {
             uint const position = first + lane / lanes_per_entry_;
-            float const distance = metal_score_entry<rung_>(storage, query, posted->ids[position], radius, lane,
-                                                            simdgroup);
+            float const distance = metal_score_entry<metal_kit_t, role_, rung_>(storage, query, posted->ids[position],
+                                                                                radius, lane, simdgroup);
             if (lane % lanes_per_entry_ == 0) posted->distances[position] = distance;
         }
     }
@@ -1253,10 +1436,12 @@ struct metal_schedule {
     static void barrier_() { threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup); }
 };
 
-/** The schedule of every kit whose lane scores an entry alone: each lane scores its own entry, and
- *  a simdgroup walks by itself. */
-template <uint rung_>
-struct metal_schedule<rung_, 1> {
+/** The schedule of every kit whose lane scores an entry alone, as every builder by sketches does:
+ *  each lane scores its own entry, and a simdgroup walks by itself. */
+template <metal_score_role_t role_, uint rung_>
+struct metal_schedule<role_, rung_, 1> {
+    static constexpr constant metal_score_role_t role_k = role_;
+    using query_t = metal_query<role_>;
     struct shared_t {
         uint unused;
     };
@@ -1267,28 +1452,42 @@ struct metal_schedule<rung_, 1> {
 
     void open() {}
     float score(thread query_t const& query, uint node_id, float radius) {
-        return metal_score_entry<rung_>(storage, query, node_id, radius, lane, 0);
+        return metal_score_entry<metal_kit_t, role_, rung_>(storage, query, node_id, radius, lane, 0);
     }
     void serve() {}
     void finish() {}
 };
 
-/** The schedule a walk on kit rung @p rung_index_ scores through. */
-template <uint rung_index_>
-using metal_schedule_of =
-    metal_schedule<metal_kit_t::rungs_k[rung_index_], metal_kit_t::lanes_per_row(metal_kit_t::rungs_k[rung_index_])>;
+/** The schedule a walk for @p role_ on kit rung @p rung_index_ scores through. */
+template <metal_score_role_t role_, uint rung_index_>
+using metal_schedule_of = metal_schedule<role_, metal_kit_t::canonical_rungs_k[rung_index_],
+                                         metal_lanes_per_entry<role_>(metal_kit_t::canonical_rungs_k[rung_index_])>;
 
 /** Scores one staged batch of @p count IDs in @c ids against @p query and folds it into the
  *  frontier; past the full candidates' worst rank nothing enters, so each entry is scored within
  *  the distance of that worst rank. */
 template <typename frontier_, typename schedule_>
 inline void metal_score_into_frontier(thread metal_basic_walk_t& walk, thread frontier_& frontier,
-                                      thread schedule_& schedule, thread query_t const& query, uint count) {
+                                      thread schedule_& schedule, thread typename schedule_::query_t const& query,
+                                      uint count) {
     walk.scored_count += count;
     float const radius = metal_radius_of(frontier);
     uint const node_id = walk.lane < count ? walk.ids[walk.lane] : metal_unknown_k;
     float const distance = schedule.score(query, node_id, radius);
     frontier.push_batch(walk.lane < count ? metal_make(distance, node_id) : metal_sentinel_k, walk.lane);
+}
+
+/** Scores into the frontier the seeds the simdgroup's lanes name, one each, the sentinel for none:
+ *  the ones the walk visited already drop, and the rest score as one gathered batch. */
+template <typename frontier_, typename schedule_>
+inline void metal_score_seeds(thread metal_basic_walk_t& walk, thread frontier_& frontier, thread schedule_& schedule,
+                              thread typename schedule_::query_t const& query, uint seed_id) {
+    bool const fresh = metal_test_and_set(walk, seed_id);
+    uint const fresh_mask = metal_warp_t::ballot(fresh);
+    if (fresh) walk.ids[popcount(fresh_mask & metal_warp_t::below(walk.lane))] = seed_id;
+    metal_warp_t::sync();
+    if (fresh_mask) metal_score_into_frontier(walk, frontier, schedule, query, popcount(fresh_mask));
+    metal_warp_t::sync();
 }
 
 /** Continues a greedy best-first walk toward @p query over whatever the frontier holds, as the
@@ -1298,10 +1497,12 @@ inline void metal_score_into_frontier(thread metal_basic_walk_t& walk, thread fr
  *  time, since a basic kit pays per entry. Read-only on the graph. */
 template <typename frontier_, typename schedule_>
 inline void metal_search_ahead(thread metal_basic_walk_t& walk, thread frontier_& frontier, thread schedule_& schedule,
-                               thread query_t const& query, uint first, uint bound, uint first_invisible) {
+                               thread typename schedule_::query_t const& query, uint first, uint bound,
+                               uint first_invisible) {
     ulong held = metal_sentinel_k;
     uint held_at_hop = 0, pending = 0;
-    bool seeding = true;
+    // Seeds already scored take the first random batch's place, as on RAM.
+    bool seeding = frontier.nearest() == metal_sentinel_k;
     auto score = [&](uint count) { metal_score_into_frontier(walk, frontier, schedule, query, count); };
     while (true) {
         if (seeding) {
@@ -1364,7 +1565,9 @@ inline uint metal_keep_diverse(thread metal_basic_walk_t& walk, thread schedule_
 #pragma unroll 1
     for (uint candidate = 0; candidate < candidates_count && kept_count < walk.connectivity; ++candidate) {
         float const to_query = candidate_distances[candidate];
-        query_t const pivot = kept_count ? walk.prepare_node(candidate_ids[candidate], walk.pivot_span) : query_t {};
+        typename schedule_::query_t const pivot = kept_count ? walk.prepare_node<schedule_::role_k>(
+                                                                   candidate_ids[candidate], walk.pivot_span)
+                                                             : typename schedule_::query_t {};
         bool diverse = true;
         // Simdgroup-uniform bounds.
         for (uint base = 0; base < kept_count && diverse; base += metal_warp_t::width_k) {
@@ -1385,9 +1588,9 @@ inline uint metal_keep_diverse(thread metal_basic_walk_t& walk, thread schedule_
  *  the kit's selector, or by the diversity rule for a kit naming none; answers the kept count, the
  *  kept positions ascending. */
 template <typename kit_, typename schedule_>
-inline uint metal_select(thread metal_basic_walk_t& walk, thread schedule_& schedule, thread query_t const& query,
-                         device uint const* candidate_ids, device float const* candidate_distances,
-                         uint candidates_count, device uint* kept_positions) {
+inline uint metal_select(thread metal_basic_walk_t& walk, thread schedule_& schedule,
+                         thread typename schedule_::query_t const& query, device uint const* candidate_ids,
+                         device float const* candidate_distances, uint candidates_count, device uint* kept_positions) {
     if constexpr (metal_has_selector<kit_>::value)
         return kit_::selector_t::template select<kit_>(query, walk.storage.values, walk.storage.offsets, candidate_ids,
                                                        candidates_count, walk.connectivity, kept_positions, walk.lane);
@@ -1420,7 +1623,7 @@ inline uint metal_backfill(thread metal_basic_walk_t& walk, uint candidates_coun
  *  @c selected_ids; answers the kept count. */
 template <typename frontier_, typename schedule_>
 inline uint metal_select_neighbors(thread metal_basic_walk_t& walk, thread frontier_& frontier,
-                                   thread schedule_& schedule, thread query_t const& query) {
+                                   thread schedule_& schedule, thread typename schedule_::query_t const& query) {
     uint candidates_count = 0;
     auto stage = [&](uint rank, ulong entry) {
         bool const live = rank < walk.selection_nodes && entry != metal_sentinel_k;
@@ -1444,21 +1647,26 @@ inline uint metal_select_neighbors(thread metal_basic_walk_t& walk, thread front
 
 /** The chains a wave's walkers thread their picks onto for the back-link launch behind them: each
  *  node's last pick, unknown for none, the pick each was threaded before, and the nodes any walker
- *  picked with their count. */
+ *  picked with their count; and the IDs a reach's walkers re-select by offset, null for a wave
+ *  walking its own IDs from the first. */
 struct metal_back_links_t {
     device uint* heads;
     device uint* next;
     device uint* touched_ids;
     device atomic_uint* touched_count;
+    device uint const* listed;
+
+    /** The node the walker at @p offset of a launch from @p first_id walks. */
+    uint walked(uint first_id, uint offset) const { return listed ? listed[offset] : first_id + offset; }
 };
 
-/** Threads the @p selected_count picks of @p node_id onto their targets' chains, listing each
- *  target the first time any walker of the launch picks it. */
-inline void metal_thread_back_links(thread metal_basic_walk_t& walk, metal_back_links_t links, uint node_id,
-                                    uint first_id, uint selected_count) {
+/** Threads the @p selected_count picks of the walker at @p offset onto their targets' chains,
+ *  listing each target the first time any walker of the launch picks it. */
+inline void metal_thread_back_links(thread metal_basic_walk_t& walk, metal_back_links_t links, uint offset,
+                                    uint selected_count) {
     for (uint slot = walk.lane; slot < selected_count; slot += metal_warp_t::width_k) {
         uint const target = walk.selected_ids[slot];
-        uint const pick = (node_id - first_id) * walk.connectivity + slot;
+        uint const pick = offset * walk.connectivity + slot;
         uint const previous = metal_warp_t::exchange_acquire(links.heads + target, pick);
         links.next[pick] = previous;
         if (previous == metal_unknown_k)
@@ -1486,8 +1694,8 @@ inline void metal_publish_row(thread metal_basic_walk_t& walk, uint node_id, uin
  *  the back-link launch behind the wave. */
 template <typename frontier_, typename schedule_>
 inline void metal_insert_one(thread metal_basic_walk_t& walk, thread schedule_& schedule, metal_back_links_t links,
-                             uint node_id, uint first_id, uint end_id) {
-    query_t const query = walk.prepare_node(node_id, walk.query_span);
+                             uint node_id, uint offset, uint end_id) {
+    metal_query<metal_score_build_k> const query = walk.prepare_node<metal_score_build_k>(node_id, walk.query_span);
     frontier_ frontier;
     frontier.clear(walk);
     // A virgin index publishes an empty node instead of walking.
@@ -1497,16 +1705,17 @@ inline void metal_insert_one(thread metal_basic_walk_t& walk, thread schedule_& 
     uint const selected_count = metal_select_neighbors(walk, frontier, schedule, query);
     metal_publish_row(walk, node_id, selected_count);
     if (walk.lane == 0) atomic_fetch_add_explicit(walk.counters + metal_published_k, 1u, memory_order_relaxed);
-    metal_thread_back_links(walk, links, node_id, first_id, selected_count);
+    metal_thread_back_links(walk, links, offset, selected_count);
 }
 
-/** Re-selects the published row of @p node_id once its wave's back-links made the wave's nodes
- *  reachable from one another: walks from the row's own neighbors over every node below
- *  @p sampling_bound, selects again, rewrites the row and threads the new picks. */
+/** Re-selects the published row of @p node_id, the walker at @p offset, once its wave's back-links
+ *  made the wave's nodes reachable from one another: walks from the row's own neighbors over every
+ *  node below @p sampling_bound, selects again, counts the row changed when it gains a member,
+ *  rewrites the row and threads the new picks. */
 template <typename frontier_, typename schedule_>
 inline void metal_reselect_one(thread metal_basic_walk_t& walk, thread schedule_& schedule, metal_back_links_t links,
-                               uint node_id, uint first_id, uint sampling_bound) {
-    query_t const query = walk.prepare_node(node_id, walk.query_span);
+                               uint node_id, uint offset, uint sampling_bound) {
+    metal_query<metal_score_build_k> const query = walk.prepare_node<metal_score_build_k>(node_id, walk.query_span);
     frontier_ frontier;
     frontier.clear(walk);
     metal_test_and_set(walk, node_id);
@@ -1516,19 +1725,24 @@ inline void metal_reselect_one(thread metal_basic_walk_t& walk, thread schedule_
         uint const slot = slot_base + walk.lane;
         uint const seed_id = slot < walk.connectivity ? metal_warp_t::load_acquire(own + slot) : metal_unknown_k;
         bool const usable = seed_id < sampling_bound && seed_id != node_id;
-        bool const fresh = metal_test_and_set(walk, usable ? seed_id : metal_unknown_k);
-        uint const fresh_mask = metal_warp_t::ballot(fresh);
-        if (fresh) walk.ids[popcount(fresh_mask & metal_warp_t::below(walk.lane))] = seed_id;
-        metal_warp_t::sync();
-        if (fresh_mask) metal_score_into_frontier(walk, frontier, schedule, query, popcount(fresh_mask));
-        metal_warp_t::sync();
+        metal_score_seeds(walk, frontier, schedule, query, usable ? seed_id : metal_unknown_k);
     }
     metal_search_ahead(walk, frontier, schedule, query, 0, sampling_bound, sampling_bound);
     walk.tail_compactions += frontier.compactions();
     walk.tail_dropped += frontier.dropped();
     uint const selected_count = metal_select_neighbors(walk, frontier, schedule, query);
+    bool gained = false;
+    for (uint slot = walk.lane; slot < selected_count; slot += metal_warp_t::width_k) {
+        uint const picked = walk.selected_ids[slot];
+        bool held = false;
+        for (uint live_slot = 0; live_slot != walk.connectivity && !held; ++live_slot)
+            held = metal_warp_t::load_relaxed(own + live_slot) == picked;
+        gained = gained || !held;
+    }
+    if (metal_warp_t::ballot(gained) && walk.lane == 0)
+        atomic_fetch_add_explicit(walk.counters + metal_changed_k, 1u, memory_order_relaxed);
     metal_publish_row(walk, node_id, selected_count);
-    metal_thread_back_links(walk, links, node_id, first_id, selected_count);
+    metal_thread_back_links(walk, links, offset, selected_count);
 }
 
 /** Gathers @p node_id 's live links, other than itself and the sentinels, into @c candidate_ids
@@ -1605,7 +1819,7 @@ inline void metal_back_link_one(thread metal_basic_walk_t& walk, thread schedule
         uint chained_end = live_count;
         if (walk.lane == 0)
             for (; pick != metal_unknown_k && chained_end != walk.selection_nodes; pick = links.next[pick])
-                candidate_ids[chained_end++] = first_id + pick / connectivity;
+                candidate_ids[chained_end++] = links.walked(first_id, pick / connectivity);
         chained_end = metal_warp_t::shuffle(chained_end, 0);
         pick = metal_warp_t::shuffle(pick, 0);
         metal_warp_t::sync();
@@ -1619,7 +1833,7 @@ inline void metal_back_link_one(thread metal_basic_walk_t& walk, thread schedule
             continue;
         }
 
-        query_t const query = walk.prepare_node(node_id, walk.query_span);
+        metal_query<metal_score_build_k> const query = walk.prepare_node<metal_score_build_k>(node_id, walk.query_span);
         metal_sorted_buffer sorted_candidates {walk.scored_entries, 0, walk.selection_nodes};
         for (uint slot_base = 0; slot_base < candidates_count; slot_base += metal_warp_t::width_k) {
             uint const slot = slot_base + walk.lane;
@@ -1649,17 +1863,32 @@ inline void metal_back_link_one(thread metal_basic_walk_t& walk, thread schedule
     }
 }
 
-/** One query's full walk: prepares the query into its span, walks the graph, and writes its nearest
- *  @p count IDs and distances ascending, sentinels past the live prefix. Safe against concurrent
+/** A search's outputs and seeds: its nearest IDs and distances, @b [queries,count], each query's
+ *  seeds, @b [queries,seeds_count], which a seeding walk writes and a search walk scores first, and
+ *  the queries' sketches a seeding walk scores by, a sketch apart. */
+struct metal_walk_outputs_t {
+    device uint* result_ids;
+    device float* result_distances;
+    device uint* seed_ids;
+    device uchar const* query_sketches;
+};
+
+/** One query's full walk for @p role_: a search prepares the query into its span, scores its seeds
+ *  first where the launch names any, walks the graph, and writes its nearest @c count IDs and
+ *  distances ascending, sentinels past the live prefix; a seeding walk scores the query's sketch
+ *  and writes its nearest @c seeds_count IDs as the query's seeds. Safe against concurrent
  *  insertions: the walk gates on every slot-zero word and never writes the graph. */
-template <typename frontier_, typename schedule_>
+template <metal_score_role_t role_, typename frontier_, typename schedule_>
 inline void metal_walk_one(thread metal_basic_walk_t& walk, thread schedule_& schedule,
                            constant metal_basic_arguments_t& arguments, device uchar const* queries,
-                           device ulong const* query_offsets, device uint* result_ids, device float* result_distances,
-                           uint query_index) {
+                           device ulong const* query_offsets, metal_walk_outputs_t outputs, uint query_index) {
     ulong const origin = query_offsets[0], first = query_offsets[query_index] - origin;
-    query_t const query = walk.prepare(queries + first, uint(query_offsets[query_index + 1] - origin - first),
-                                       walk.query_span);
+    device uchar const* query_data = queries + first;
+    uint query_bytes = uint(query_offsets[query_index + 1] - origin - first);
+    if constexpr (metal_scores_by_sketch<metal_kit_t, role_>::value)
+        query_data = outputs.query_sketches + ulong(query_index) * arguments.sketch_bytes,
+        query_bytes = arguments.sketch_bytes;
+    metal_query<role_> const query = walk.prepare<role_>(query_data, query_bytes, walk.query_span);
     // Concurrent walks the batch leaves idle widen this one, never past its filling nodes.
     uint live = walk.lane == 0 ? atomic_fetch_add_explicit(walk.counters + metal_live_k, 1u, memory_order_relaxed) + 1
                                : 0;
@@ -1668,15 +1897,100 @@ inline void metal_walk_one(thread metal_basic_walk_t& walk, thread schedule_& sc
                                  arguments.filling_nodes);
     frontier_ frontier;
     frontier.clear(walk);
+    uint const seeds_count = arguments.seeds_count;
+    if constexpr (role_ == metal_score_search_k && metal_sketching_kit<metal_kit_t>::value) {
+        device uint const* const seeds = metal_row(outputs.seed_ids, query_index, seeds_count);
+        for (uint slot_base = 0; slot_base < seeds_count; slot_base += metal_warp_t::width_k) {
+            uint const slot = slot_base + walk.lane;
+            uint const seed_id = slot < seeds_count ? seeds[slot] : metal_unknown_k;
+            metal_score_seeds(walk, frontier, schedule, query,
+                              seed_id < arguments.sampling_bound ? seed_id : metal_unknown_k);
+        }
+    }
     metal_search_ahead(walk, frontier, schedule, query, 0, arguments.sampling_bound, arguments.sampling_bound);
     if (walk.lane == 0) atomic_fetch_sub_explicit(walk.counters + metal_live_k, 1u, memory_order_relaxed);
     walk.tail_compactions += frontier.compactions();
     walk.tail_dropped += frontier.dropped();
 
     // The rank extraction shuffles, so every lane takes part and only in-range ones store.
-    uint const count = arguments.count;
-    device uint* const ids_row = metal_row(result_ids, query_index, count);
-    device float* const distances_row = metal_row(result_distances, query_index, count);
+    if constexpr (role_ == metal_score_search_k) {
+        uint const count = arguments.count;
+        device uint* const ids_row = metal_row(outputs.result_ids, query_index, count);
+        device float* const distances_row = metal_row(outputs.result_distances, query_index, count);
+        auto write_rank = [&](uint rank, ulong entry) {
+            if (rank >= count) return;
+            ids_row[rank] = metal_id_of(entry);
+            distances_row[rank] = metal_distance_of(entry);
+        };
+        frontier.for_each_rank(count, walk.lane, write_rank);
+    }
+    else {
+        device uint* const seeds_row = metal_row(outputs.seed_ids, query_index, seeds_count);
+        auto write_seed = [&](uint rank, ulong entry) {
+            if (rank < seeds_count) seeds_row[rank] = metal_id_of(entry);
+        };
+        frontier.for_each_rank(seeds_count, walk.lane, write_seed);
+    }
+}
+
+/** A scan's ranges: each range's nearest @c count matches, @b [queries,ranges,count], and per
+ *  query the ranges finished, zeroed per launch, so the last to finish merges them. */
+struct metal_scan_outputs_t {
+    device ulong* range_matches;
+    device atomic_uint* finished_ranges;
+};
+
+/** One range of one query's exact scan, ranges counting @p item past the queries, as the CUDA and
+ *  HIP scans run it: every published node of the range scores against the query a simdgroup-width
+ *  at a time within the worst kept match, the range's nearest @c count matches land in its row, and
+ *  the last range of a query to finish merges every row into the query's outputs, ascending. */
+template <typename frontier_, typename schedule_>
+inline void metal_scan_one(thread metal_basic_walk_t& walk, thread schedule_& schedule,
+                           constant metal_basic_arguments_t& arguments, device uchar const* queries,
+                           device ulong const* query_offsets, metal_walk_outputs_t outputs, metal_scan_outputs_t scan,
+                           uint item) {
+    // Ranges lead, so the walkers in flight read the same nodes.
+    uint const query_index = item % arguments.queries_count, range = item / arguments.queries_count;
+    ulong const origin = query_offsets[0], first = query_offsets[query_index] - origin;
+    metal_query<metal_score_search_k> const query = walk.prepare<metal_score_search_k>(
+        queries + first, uint(query_offsets[query_index + 1] - origin - first), walk.query_span);
+    frontier_ frontier;
+    frontier.clear(walk);
+    uint const count = arguments.count, ranges = arguments.ranges;
+    ulong const bound = arguments.sampling_bound, range_nodes = divide_round_up(arguments.sampling_bound, ranges);
+    ulong const range_first = min(ulong(range) * range_nodes, bound), range_end = min(range_first + range_nodes, bound);
+    for (ulong base = range_first; base < range_end; base += metal_warp_t::width_k) {
+        ulong const node = base + walk.lane;
+        bool const published = node < range_end &&
+                               metal_warp_t::load_acquire(walk.neighbors_for(uint(node))) != metal_unknown_k;
+        uint const published_mask = metal_warp_t::ballot(published);
+        if (published) walk.ids[popcount(published_mask & metal_warp_t::below(walk.lane))] = uint(node);
+        metal_warp_t::sync();
+        if (published_mask) metal_score_into_frontier(walk, frontier, schedule, query, popcount(published_mask));
+        metal_warp_t::sync();
+    }
+    device ulong* const query_matches = metal_row(scan.range_matches, query_index, ranges * count);
+    device ulong* const range_row = query_matches + range * count;
+    auto keep_rank = [&](uint rank, ulong entry) {
+        if (rank < count) range_row[rank] = entry;
+    };
+    frontier.for_each_rank(count, walk.lane, keep_rank);
+    walk.tail_compactions += frontier.compactions();
+    walk.tail_dropped += frontier.dropped();
+    // Every range's matches are written before the finish that lets the last range read them.
+    metal_warp_t::fence();
+    uint finished = walk.lane == 0
+                        ? atomic_fetch_add_explicit(scan.finished_ranges + query_index, 1u, memory_order_relaxed) + 1
+                        : 0;
+    finished = metal_warp_t::shuffle(finished, 0);
+    if (finished != ranges) return;
+    metal_warp_t::fence();
+    frontier.clear(walk);
+    for (uint base = 0; base < ranges * count; base += metal_warp_t::width_k)
+        frontier.push_batch(base + walk.lane < ranges * count ? query_matches[base + walk.lane] : metal_sentinel_k,
+                            walk.lane);
+    device uint* const ids_row = metal_row(outputs.result_ids, query_index, count);
+    device float* const distances_row = metal_row(outputs.result_distances, query_index, count);
     auto write_rank = [&](uint rank, ulong entry) {
         if (rank >= count) return;
         ids_row[rank] = metal_id_of(entry);
@@ -1728,7 +2042,7 @@ inline void metal_gather_one(thread metal_basic_walk_t& walk, thread schedule_& 
     uint4 const run = round.runs[run_index];
     uint const offset = position - round.run_entries[run_index];
     uint const node_id = round.pass ? round.neighborhood_entries[run.x + offset] : run.x + offset;
-    query_t const query = walk.prepare_node(node_id, walk.query_span);
+    metal_query<metal_score_build_k> const query = walk.prepare_node<metal_score_build_k>(node_id, walk.query_span);
     device uint const* const hubs = round.hub_nodes + run.z;
     ulong nearest = metal_sentinel_k;
     float radius = numeric_limits<float>::infinity();
@@ -1757,8 +2071,8 @@ struct metal_restitch_tally_t {
  *  kept once a row's worth is full; answers how many. */
 template <typename schedule_>
 inline uint metal_nearest_mates(thread metal_basic_walk_t& walk, thread schedule_& schedule,
-                                thread query_t const& query, uint node_id, device uint const* entries, uint count,
-                                uint live_count) {
+                                thread typename schedule_::query_t const& query, uint node_id,
+                                device uint const* entries, uint count, uint live_count) {
     uint const connectivity = walk.connectivity;
     device uint* const candidate_ids = walk.candidate_ids;
     metal_sorted_buffer nearest {walk.scored_entries, 0, connectivity};
@@ -1811,7 +2125,7 @@ inline void metal_restitch_one(thread metal_basic_walk_t& walk, thread schedule_
 
     // The live links first; a self-loop in slot zero means none.
     uint const live_count = metal_gather_live(walk, node_id, health.rows_count);
-    query_t const query = walk.prepare_node(node_id, walk.query_span);
+    metal_query<metal_score_build_k> const query = walk.prepare_node<metal_score_build_k>(node_id, walk.query_span);
     uint const mates_count = metal_nearest_mates(walk, schedule, query, node_id, round.neighborhood_entries + first,
                                                  count, live_count);
     // Simdgroup-uniform bounds.
@@ -1938,12 +2252,13 @@ enum metal_build_walk_t : uint {
     metal_build_refine_k = 1,
 };
 
-/** The walkers of one launch: a simdgroup each under a lane schedule, a threadgroup each under a
- *  threadgroup one, whose slices and schedule state the kernel opens. */
-template <uint rung_index_>
+/** The walkers of one launch scoring for @p role_: a simdgroup each under a lane schedule, a
+ *  threadgroup each under a threadgroup one, whose slices and schedule state the kernel opens. */
+template <metal_score_role_t role_, uint rung_index_>
 struct metal_walkers {
-    using schedule_t = metal_schedule_of<rung_index_>;
-    static constexpr constant bool alone_k = metal_kit_t::lanes_per_row(metal_kit_t::rungs_k[rung_index_]) == 1;
+    using schedule_t = metal_schedule_of<role_, rung_index_>;
+    static constexpr constant bool alone_k = metal_lanes_per_entry<role_>(
+                                                 metal_kit_t::canonical_rungs_k[rung_index_]) == 1;
 
     static uint slice_of(uint group, uint simdgroup) {
         return alone_k ? group * metal_simdgroups_k + simdgroup : group;
@@ -1961,35 +2276,39 @@ struct metal_walkers {
 };
 
 /** One walker inserts or re-selects one node of a wave at a time, assigning itself the wave's
- *  offsets from the launch counter, and threads its picks for the back-link launch behind it. */
+ *  offsets from the launch counter, and threads its picks for the back-link launch behind it; a
+ *  re-selection over listed IDs walks the ID at each offset, every ID once, so each row still has
+ *  one writer in the launch. */
 template <uint rung_index_, uint slots_, metal_build_walk_t walk_kind_>
 inline void metal_build(constant metal_basic_arguments_t& arguments, metal_ragged_t storage, device uint* neighbors,
                         device uchar* arena, device atomic_uint* counters, metal_back_links_t links,
-                        threadgroup typename metal_walkers<rung_index_>::schedule_t::shared_t* posted, uint group,
-                        uint simdgroup, uint lane) {
-    using walkers_t = metal_walkers<rung_index_>;
+                        threadgroup
+                        typename metal_walkers<metal_score_build_k, rung_index_>::schedule_t::shared_t* posted,
+                        uint group, uint simdgroup, uint lane) {
+    using walkers_t = metal_walkers<metal_score_build_k, rung_index_>;
     using frontier_t = typename metal_frontier_of<slots_>::type;
     metal_basic_walk_t walk = metal_open(arguments, storage, neighbors, arena, counters,
                                          walkers_t::slice_of(group, simdgroup), simdgroup, lane);
     auto schedule = walkers_t::schedule(posted, storage, simdgroup, lane);
-    auto build = [&](uint node_id) {
+    auto build = [&](uint offset) {
+        uint const node_id = links.walked(arguments.first_id, offset);
         // A wave's offsets fit the epoch's word, as a wave never outgrows the epoch's range.
-        walk.epoch = arguments.epoch_base + (node_id - arguments.first_id) + 1;
+        walk.epoch = arguments.epoch_base + offset + 1;
         walk.random = metal_lane_generator(node_id, lane);
         if (walk_kind_ == metal_build_refine_k)
-            metal_reselect_one<frontier_t>(walk, schedule, links, node_id, arguments.first_id,
-                                           arguments.sampling_bound);
-        else metal_insert_one<frontier_t>(walk, schedule, links, node_id, arguments.first_id, arguments.end_id);
+            metal_reselect_one<frontier_t>(walk, schedule, links, node_id, offset, arguments.sampling_bound);
+        else metal_insert_one<frontier_t>(walk, schedule, links, node_id, offset, arguments.end_id);
     };
-    metal_for_each_assigned(schedule, (device uint*)(counters + metal_assigned_k), arguments.first_id, arguments.end_id,
-                            build);
+    metal_for_each_assigned(schedule, (device uint*)(counters + metal_assigned_k), 0,
+                            arguments.end_id - arguments.first_id, build);
     if (schedule.posted && simdgroup != 0) return;
     metal_flush(walk);
 }
 
 /*  The entry points, one instantiation per kit rung the prelude counts and register rung the
  *  host's ladder names: 2, 4, 8 and 16 slots of 32 lanes, and slot zero's arena frontier past the
- *  widest, each under the name the host looks it up by. */
+ *  widest, each under the name the host looks it up by; the seeding walks on the first kit rung
+ *  alone, as no length sizes a sketch. */
 
 /** One walker per node of a wave on the register rung of @p slots_, inserting it. */
 template <uint rung_index_, uint slots_>
@@ -2005,14 +2324,16 @@ kernel void usearch_basic_insert_kernel(constant metal_basic_arguments_t& argume
                                         device uint* touched_ids [[buffer(metal_basic_touched_ids_buffer_k)]],
                                         device atomic_uint* touched_count
                                         [[buffer(metal_basic_touched_count_buffer_k)]],
+                                        device uint const* listed [[buffer(metal_basic_listed_buffer_k)]],
                                         device uchar const* parameters [[buffer(metal_basic_parameters_buffer_k)]],
                                         uint group [[threadgroup_position_in_grid]],
                                         uint simdgroup [[simdgroup_index_in_threadgroup]],
                                         uint lane [[thread_index_in_simdgroup]]) {
-    threadgroup typename metal_walkers<rung_index_>::schedule_t::shared_t posted;
+    threadgroup typename metal_walkers<metal_score_build_k, rung_index_>::schedule_t::shared_t posted;
     metal_build<rung_index_, slots_, metal_build_insert_k>(
-        arguments, {values, offsets, parameters, arguments.metric}, neighbors, arena, counters,
-        {link_heads, link_next, touched_ids, touched_count}, &posted, group, simdgroup, lane);
+        arguments, {values, offsets, parameters, arguments.metric, arguments.sketch_bytes}, neighbors, arena, counters,
+        {link_heads, link_next, touched_ids, touched_count, arguments.listed ? listed : nullptr}, &posted, group,
+        simdgroup, lane);
 }
 
 /** One walker per node of a wave on the register rung of @p slots_, re-selecting its row once the
@@ -2028,14 +2349,16 @@ kernel void metal_refine_kernel(constant metal_basic_arguments_t& arguments [[bu
                                 device uint* link_next [[buffer(metal_basic_link_next_buffer_k)]],
                                 device uint* touched_ids [[buffer(metal_basic_touched_ids_buffer_k)]],
                                 device atomic_uint* touched_count [[buffer(metal_basic_touched_count_buffer_k)]],
+                                device uint const* listed [[buffer(metal_basic_listed_buffer_k)]],
                                 device uchar const* parameters [[buffer(metal_basic_parameters_buffer_k)]],
                                 uint group [[threadgroup_position_in_grid]],
                                 uint simdgroup [[simdgroup_index_in_threadgroup]],
                                 uint lane [[thread_index_in_simdgroup]]) {
-    threadgroup typename metal_walkers<rung_index_>::schedule_t::shared_t posted;
+    threadgroup typename metal_walkers<metal_score_build_k, rung_index_>::schedule_t::shared_t posted;
     metal_build<rung_index_, slots_, metal_build_refine_k>(
-        arguments, {values, offsets, parameters, arguments.metric}, neighbors, arena, counters,
-        {link_heads, link_next, touched_ids, touched_count}, &posted, group, simdgroup, lane);
+        arguments, {values, offsets, parameters, arguments.metric, arguments.sketch_bytes}, neighbors, arena, counters,
+        {link_heads, link_next, touched_ids, touched_count, arguments.listed ? listed : nullptr}, &posted, group,
+        simdgroup, lane);
 }
 
 /** One walker back-links one node the walk launch before it touched, assigning itself the touched
@@ -2052,14 +2375,16 @@ kernel void metal_back_link_kernel(constant metal_basic_arguments_t& arguments
                                    device uint* link_next [[buffer(metal_basic_link_next_buffer_k)]],
                                    device uint* touched_ids [[buffer(metal_basic_touched_ids_buffer_k)]],
                                    device atomic_uint* touched_count [[buffer(metal_basic_touched_count_buffer_k)]],
+                                   device uint const* listed [[buffer(metal_basic_listed_buffer_k)]],
                                    device uchar const* parameters [[buffer(metal_basic_parameters_buffer_k)]],
                                    uint group [[threadgroup_position_in_grid]],
                                    uint simdgroup [[simdgroup_index_in_threadgroup]],
                                    uint lane [[thread_index_in_simdgroup]]) {
-    using walkers_t = metal_walkers<rung_index_>;
+    using walkers_t = metal_walkers<metal_score_build_k, rung_index_>;
     threadgroup typename walkers_t::schedule_t::shared_t posted;
-    metal_ragged_t const storage {values, offsets, parameters, arguments.metric};
-    metal_back_links_t const links {link_heads, link_next, touched_ids, touched_count};
+    metal_ragged_t const storage {values, offsets, parameters, arguments.metric, arguments.sketch_bytes};
+    metal_back_links_t const links {link_heads, link_next, touched_ids, touched_count,
+                                    arguments.listed ? listed : nullptr};
     metal_basic_walk_t walk = metal_open(arguments, storage, neighbors, arena, counters,
                                          walkers_t::slice_of(group, simdgroup), simdgroup, lane);
     auto schedule = walkers_t::schedule(&posted, storage, simdgroup, lane);
@@ -2074,8 +2399,32 @@ kernel void metal_back_link_kernel(constant metal_basic_arguments_t& arguments
     metal_flush(walk);
 }
 
-/** One walker per query on the register rung of @p slots_, the arena frontier at zero; walkers take
- *  queries from the batch counter, as builders take entries. */
+/** One walker per query for @p role_, a search or its seeding walk, on the register rung of
+ *  @p slots_, the arena frontier at zero; walkers take queries from the batch counter, as builders
+ *  take their entries. */
+template <metal_score_role_t role_, uint rung_index_, uint slots_>
+inline void metal_walk(constant metal_basic_arguments_t& arguments, metal_ragged_t storage, device uint* neighbors,
+                       device uchar const* queries, device uchar* arena, device atomic_uint* counters,
+                       device ulong const* query_offsets, metal_walk_outputs_t outputs,
+                       threadgroup typename metal_walkers<role_, rung_index_>::schedule_t::shared_t* posted, uint group,
+                       uint simdgroup, uint lane) {
+    using walkers_t = metal_walkers<role_, rung_index_>;
+    metal_basic_walk_t walk = metal_open(arguments, storage, neighbors, arena, counters,
+                                         walkers_t::slice_of(group, simdgroup), simdgroup, lane);
+    auto schedule = walkers_t::schedule(posted, storage, simdgroup, lane);
+    auto search = [&](uint query_index) {
+        walk.epoch = arguments.epoch_base + query_index + 1;
+        walk.random = metal_lane_generator(query_index, lane);
+        metal_walk_one<role_, typename metal_frontier_of<slots_>::type>(walk, schedule, arguments, queries,
+                                                                        query_offsets, outputs, query_index);
+    };
+    metal_for_each_assigned(schedule, (device uint*)(counters + metal_assigned_k), 0, arguments.queries_count, search);
+    if (schedule.posted && simdgroup != 0) return;
+    metal_flush<role_ == metal_score_search_k ? metal_searching_k : metal_seeding_k>(walk);
+}
+
+/** One walker per query on the register rung of @p slots_, scoring its seeds first where the launch
+ *  names any. */
 template <uint rung_index_, uint slots_>
 kernel void metal_search_kernel(constant metal_basic_arguments_t& arguments [[buffer(metal_basic_arguments_buffer_k)]],
                                 device uchar const* values [[buffer(metal_basic_values_buffer_k)]],
@@ -2087,25 +2436,80 @@ kernel void metal_search_kernel(constant metal_basic_arguments_t& arguments [[bu
                                 device ulong const* query_offsets [[buffer(metal_basic_query_offsets_buffer_k)]],
                                 device uint* ids [[buffer(metal_basic_ids_buffer_k)]],
                                 device float* distances [[buffer(metal_basic_distances_buffer_k)]],
+                                device uint* seed_ids [[buffer(metal_basic_seed_ids_buffer_k)]],
+                                device uchar const* query_sketches [[buffer(metal_basic_query_sketches_buffer_k)]],
                                 device uchar const* parameters [[buffer(metal_basic_parameters_buffer_k)]],
                                 uint group [[threadgroup_position_in_grid]],
                                 uint simdgroup [[simdgroup_index_in_threadgroup]],
                                 uint lane [[thread_index_in_simdgroup]]) {
-    using walkers_t = metal_walkers<rung_index_>;
+    threadgroup typename metal_walkers<metal_score_search_k, rung_index_>::schedule_t::shared_t posted;
+    metal_walk<metal_score_search_k, rung_index_, slots_>(
+        arguments, {values, offsets, parameters, arguments.metric, arguments.sketch_bytes}, neighbors, queries, arena,
+        counters, query_offsets, {ids, distances, seed_ids, query_sketches}, &posted, group, simdgroup, lane);
+}
+
+/** One walker per query on the register rung of @p slots_, walking by the query's sketch and
+ *  writing its nearest nodes as its search's seeds; empty for a kit building canonically, which
+ *  seeds nothing and whose pipeline the host never builds. */
+template <uint rung_index_, uint slots_>
+kernel void metal_seed_kernel(constant metal_basic_arguments_t& arguments [[buffer(metal_basic_arguments_buffer_k)]],
+                              device uchar const* values [[buffer(metal_basic_values_buffer_k)]],
+                              device ulong const* offsets [[buffer(metal_basic_offsets_buffer_k)]],
+                              device uint* neighbors [[buffer(metal_basic_neighbors_buffer_k)]],
+                              device uchar const* queries [[buffer(metal_basic_staging_buffer_k)]],
+                              device uchar* arena [[buffer(metal_basic_arena_buffer_k)]],
+                              device atomic_uint* counters [[buffer(metal_basic_counters_buffer_k)]],
+                              device ulong const* query_offsets [[buffer(metal_basic_query_offsets_buffer_k)]],
+                              device uint* ids [[buffer(metal_basic_ids_buffer_k)]],
+                              device float* distances [[buffer(metal_basic_distances_buffer_k)]],
+                              device uint* seed_ids [[buffer(metal_basic_seed_ids_buffer_k)]],
+                              device uchar const* query_sketches [[buffer(metal_basic_query_sketches_buffer_k)]],
+                              device uchar const* parameters [[buffer(metal_basic_parameters_buffer_k)]],
+                              uint group [[threadgroup_position_in_grid]],
+                              uint simdgroup [[simdgroup_index_in_threadgroup]],
+                              uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup typename metal_walkers<metal_score_build_k, rung_index_>::schedule_t::shared_t posted;
+    if constexpr (metal_sketching_kit<metal_kit_t>::value)
+        metal_walk<metal_score_build_k, rung_index_, slots_>(
+            arguments, {values, offsets, parameters, arguments.metric, arguments.sketch_bytes}, neighbors, queries,
+            arena, counters, query_offsets, {ids, distances, seed_ids, query_sketches}, &posted, group, simdgroup,
+            lane);
+}
+
+/** One walker per range of a query on the register rung of @p slots_, scoring every published node
+ *  of the range; walkers take ranges from the batch counter, ranges leading. */
+template <uint rung_index_, uint slots_>
+kernel void metal_scan_kernel(constant metal_basic_arguments_t& arguments [[buffer(metal_basic_arguments_buffer_k)]],
+                              device uchar const* values [[buffer(metal_basic_values_buffer_k)]],
+                              device ulong const* offsets [[buffer(metal_basic_offsets_buffer_k)]],
+                              device uint* neighbors [[buffer(metal_basic_neighbors_buffer_k)]],
+                              device uchar const* queries [[buffer(metal_basic_staging_buffer_k)]],
+                              device uchar* arena [[buffer(metal_basic_arena_buffer_k)]],
+                              device atomic_uint* counters [[buffer(metal_basic_counters_buffer_k)]],
+                              device ulong const* query_offsets [[buffer(metal_basic_query_offsets_buffer_k)]],
+                              device uint* ids [[buffer(metal_basic_ids_buffer_k)]],
+                              device float* distances [[buffer(metal_basic_distances_buffer_k)]],
+                              device ulong* range_matches [[buffer(metal_basic_range_matches_buffer_k)]],
+                              device atomic_uint* finished_ranges [[buffer(metal_basic_finished_ranges_buffer_k)]],
+                              device uchar const* parameters [[buffer(metal_basic_parameters_buffer_k)]],
+                              uint group [[threadgroup_position_in_grid]],
+                              uint simdgroup [[simdgroup_index_in_threadgroup]],
+                              uint lane [[thread_index_in_simdgroup]]) {
+    using walkers_t = metal_walkers<metal_score_search_k, rung_index_>;
     threadgroup typename walkers_t::schedule_t::shared_t posted;
-    metal_ragged_t const storage {values, offsets, parameters, arguments.metric};
+    metal_ragged_t const storage {values, offsets, parameters, arguments.metric, arguments.sketch_bytes};
     metal_basic_walk_t walk = metal_open(arguments, storage, neighbors, arena, counters,
                                          walkers_t::slice_of(group, simdgroup), simdgroup, lane);
     auto schedule = walkers_t::schedule(&posted, storage, simdgroup, lane);
-    auto search = [&](uint query_index) {
-        walk.epoch = arguments.epoch_base + query_index + 1;
-        walk.random = metal_lane_generator(query_index, lane);
-        metal_walk_one<typename metal_frontier_of<slots_>::type>(walk, schedule, arguments, queries, query_offsets, ids,
-                                                                 distances, query_index);
+    auto scan = [&](uint item) {
+        metal_scan_one<typename metal_frontier_of<slots_>::type>(walk, schedule, arguments, queries, query_offsets,
+                                                                 {ids, distances, nullptr, nullptr},
+                                                                 {range_matches, finished_ranges}, item);
     };
-    metal_for_each_assigned(schedule, (device uint*)(counters + metal_assigned_k), 0, arguments.queries_count, search);
+    metal_for_each_assigned(schedule, (device uint*)(counters + metal_assigned_k), 0,
+                            arguments.queries_count * arguments.ranges, scan);
     if (schedule.posted && simdgroup != 0) return;
-    metal_flush(walk);
+    metal_flush<metal_searching_k>(walk);
 }
 
 /** One walker files one entry of a gather's runs at a time under its nearest hub, assigning itself
@@ -2128,9 +2532,9 @@ kernel void metal_gather_kernel(constant metal_basic_arguments_t& arguments [[bu
                                 uint group [[threadgroup_position_in_grid]],
                                 uint simdgroup [[simdgroup_index_in_threadgroup]],
                                 uint lane [[thread_index_in_simdgroup]]) {
-    using walkers_t = metal_walkers<rung_index_>;
+    using walkers_t = metal_walkers<metal_score_build_k, rung_index_>;
     threadgroup typename walkers_t::schedule_t::shared_t posted;
-    metal_ragged_t const storage {values, offsets, parameters, arguments.metric};
+    metal_ragged_t const storage {values, offsets, parameters, arguments.metric, arguments.sketch_bytes};
     metal_round_t const round {entry_neighborhoods, neighborhood_entries, nullptr, hub_nodes,     runs,
                                run_entries,         arguments.runs_count, 0,       arguments.pass};
     metal_basic_walk_t walk = metal_open(arguments, storage, neighbors, arena, counters,
@@ -2169,9 +2573,9 @@ kernel void metal_restitch_kernel(
     device uchar const* parameters [[buffer(metal_basic_parameters_buffer_k)]],
     uint group [[threadgroup_position_in_grid]], uint simdgroup [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
-    using walkers_t = metal_walkers<rung_index_>;
+    using walkers_t = metal_walkers<metal_score_build_k, rung_index_>;
     threadgroup typename walkers_t::schedule_t::shared_t posted;
-    metal_ragged_t const storage {values, offsets, parameters, arguments.metric};
+    metal_ragged_t const storage {values, offsets, parameters, arguments.metric, arguments.sketch_bytes};
     metal_round_t const round {
         nullptr, neighborhood_entries, neighborhood_offsets, nullptr, nullptr, nullptr, 0, arguments.neighborhoods, 0};
     metal_health_t health;
@@ -2196,45 +2600,129 @@ kernel void metal_restitch_kernel(
     metal_flush(walk);
 }
 
-/** Copies one run of a load's saved values into the tape at its planned starts, a byte a thread,
- *  as every kit stores them: saved and stored alike, back to back. */
+/** Writes into @p sketch the @p sketch_bytes sketch of the stored @p sequence for a sketching kit,
+ *  once the simdgroup's copy of the sequence is visible, through simdgroup @p simdgroup 's share of
+ *  the threadgroup's @p scratch ; nothing for any other. */
+template <typename kit_>
+inline void metal_sketch_stored(device uchar const* tables, device uchar const* sequence, uint bytes, uint lane,
+                                device uchar* sketch, uint sketch_bytes, threadgroup uchar* scratch, uint simdgroup) {
+    if constexpr (metal_sketching_kit<kit_>::value) {
+        metal_warp_t::sync();
+        kit_::sketch_write(tables, sequence, bytes, lane, sketch, sketch_bytes,
+                           scratch + simdgroup * kit_::sketch_scratch_bytes(sketch_bytes));
+    }
+}
+
+/**
+ *  @brief Stores one run of a load for the kit @p kit_, closed where it closes its values.
+ *
+ *  For a kit closing its values a simdgroup per value copies the saved sequence behind the gap its
+ *  sketch of the launch's bytes takes, writes the closing padding and its count, and under a
+ *  sketching kit fills the sketch from the stored sequence. For any other kit a thread copies a
+ *  byte into the tape at the run's planned starts, saved and stored alike, back to back. The saved
+ *  sums count bytes from the run's first, and every stored value starts on a word of the tape, as
+ *  its planned start says. A walker is a simdgroup of the grid, striding its values.
+ */
+template <typename kit_>
+inline void metal_load_values(constant metal_basic_arguments_t& arguments, device uchar* tape,
+                              device uchar const* saved, device ulong const* saved_offsets,
+                              device ulong const* stored_offsets, device uchar const* tables,
+                              threadgroup uchar* scratch, uint position, uint threads, uint walker, uint walkers,
+                              uint lane) {
+    if constexpr (metal_closes_values<kit_>::value) {
+        ulong const saved_first = saved_offsets[0];
+        uint const sketch_bytes = arguments.sketch_bytes;
+        for (uint value = walker; value < arguments.count; value += walkers) {
+            device uchar const* const source = saved + (saved_offsets[value] - saved_first);
+            uint const bytes = uint(saved_offsets[value + 1] - saved_offsets[value]);
+            ulong const first = stored_offsets[value], end = stored_offsets[value + 1];
+            device uchar* const sequence = tape + first + sketch_bytes;
+            uint const closing = uint(end - first) - sketch_bytes - bytes;
+            for (uint byte = lane; byte < bytes; byte += metal_warp_t::width_k) sequence[byte] = source[byte];
+            if (lane < closing) sequence[bytes + lane] = uchar(lane + 1 == closing ? closing : 0u);
+            metal_sketch_stored<kit_>(tables, sequence, bytes, lane, tape + first, sketch_bytes, scratch,
+                                      walker % metal_simdgroups_k);
+        }
+    }
+    else {
+        ulong const first = stored_offsets[0], bytes = stored_offsets[arguments.count] - first;
+        for (ulong byte = position; byte < bytes; byte += threads) tape[first + byte] = saved[byte];
+    }
+}
+
+/** Fills for the kit @p kit_ the sketch of every one of the @c count values from @c first_id : a
+ *  simdgroup per value, striding the grid, each sketch written from its own value's sequence, in
+ *  front of a stored value or, where the launch names @c queries_count, into a bare query's row of
+ *  @p sketches; nothing for a kit storing none. */
+template <typename kit_>
+inline void metal_sketch_values(constant metal_basic_arguments_t& arguments, device uchar* tape,
+                                device ulong const* offsets, device uchar const* tables, device uchar* sketches,
+                                threadgroup uchar* scratch, uint walker, uint walkers, uint lane) {
+    if constexpr (metal_sketching_kit<kit_>::value) {
+        uint const sketch_bytes = arguments.sketch_bytes;
+        threadgroup uchar* const ranks = scratch +
+                                         walker % metal_simdgroups_k * kit_::sketch_scratch_bytes(sketch_bytes);
+        for (uint value = walker; value < arguments.count; value += walkers) {
+            ulong const first = offsets[arguments.first_id + value], end = offsets[arguments.first_id + value + 1];
+            if (arguments.queries_count)
+                kit_::sketch_write(tables, tape + first, uint(end - first), lane,
+                                   sketches + ulong(value) * sketch_bytes, sketch_bytes, ranks);
+            else
+                kit_::sketch_write(tables, tape + first + sketch_bytes,
+                                   uint(end - first) - sketch_bytes - uint(tape[end - 1]), lane, tape + first,
+                                   sketch_bytes, ranks);
+        }
+    }
+}
+
+/** Stores one run of a load's saved values into the tape at its planned starts, as the kit stores
+ *  them. */
 [[host_name("metal_load_values_kernel")]] kernel void metal_load_values_kernel(
     constant metal_basic_arguments_t& arguments [[buffer(metal_basic_arguments_buffer_k)]],
     device uchar* tape [[buffer(metal_basic_values_buffer_k)]],
     device uchar const* saved [[buffer(metal_basic_saved_buffer_k)]],
+    device ulong const* saved_offsets [[buffer(metal_basic_saved_offsets_buffer_k)]],
     device ulong const* stored_offsets [[buffer(metal_basic_stored_offsets_buffer_k)]],
-    uint position [[thread_position_in_grid]], uint threads [[threads_per_grid]]) {
-    ulong const first = stored_offsets[0], bytes = stored_offsets[arguments.count] - first;
-    for (ulong byte = position; byte < bytes; byte += threads) tape[first + byte] = saved[byte];
+    device uchar const* tables [[buffer(metal_basic_sketch_tables_buffer_k)]],
+    threadgroup uchar* scratch [[threadgroup(0)]], uint position [[thread_position_in_grid]],
+    uint threads [[threads_per_grid]], uint group [[threadgroup_position_in_grid]],
+    uint groups [[threadgroups_per_grid]], uint simdgroup [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    metal_load_values<metal_kit_t>(arguments, tape, saved, saved_offsets, stored_offsets, tables, scratch, position,
+                                   threads, group * metal_simdgroups_k + simdgroup, groups * metal_simdgroups_k, lane);
 }
 
-/** Raises the load's span word to the widest stored entry of the run, rounded up to the 16 bytes a
- *  span takes, each simdgroup folding its lanes' spans before one atomic maximum. */
-[[host_name("metal_size_spans_kernel")]] kernel void metal_size_spans_kernel(
+/** Fills the sketch in front of every sequence of an insert's values, written in place by the
+ *  host, or of every query of a search, into the query's row. */
+[[host_name("metal_sketch_values_kernel")]] kernel void metal_sketch_values_kernel(
     constant metal_basic_arguments_t& arguments [[buffer(metal_basic_arguments_buffer_k)]],
-    device ulong const* stored_offsets [[buffer(metal_basic_stored_offsets_buffer_k)]],
-    device atomic_uint* span_words [[buffer(metal_basic_span_words_buffer_k)]],
-    uint position [[thread_position_in_grid]], uint threads [[threads_per_grid]],
+    device uchar* tape [[buffer(metal_basic_values_buffer_k)]],
+    device ulong const* offsets [[buffer(metal_basic_offsets_buffer_k)]],
+    device uchar* sketches [[buffer(metal_basic_query_sketches_buffer_k)]],
+    device uchar const* tables [[buffer(metal_basic_sketch_tables_buffer_k)]],
+    threadgroup uchar* scratch [[threadgroup(0)]], uint group [[threadgroup_position_in_grid]],
+    uint groups [[threadgroups_per_grid]], uint simdgroup [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
-    uint widest = 0;
-    for (uint node = position; node < arguments.count; node += threads)
-        widest = max(widest, (uint(stored_offsets[node + 1] - stored_offsets[node]) + 15u) & ~15u);
-    widest = simd_max(widest);
-    if (lane == 0 && widest) atomic_fetch_max_explicit(span_words, widest, memory_order_relaxed);
+    metal_sketch_values<metal_kit_t>(arguments, tape, offsets, tables, sketches, scratch,
+                                     group * metal_simdgroups_k + simdgroup, groups * metal_simdgroups_k, lane);
 }
 
 #if !defined(USEARCH_METAL_KIT_RUNGS) || USEARCH_METAL_KIT_RUNGS < 1 || USEARCH_METAL_KIT_RUNGS > 8
 #error "The host's prelude counts the kit's rungs, one to eight, in USEARCH_METAL_KIT_RUNGS"
 #endif
 
-#define USEARCH_METAL_BUILD                                                                                            \
-    constant metal_basic_arguments_t &, device uchar const *, device ulong const *, device uint *, device uchar *,     \
-        device atomic_uint *, device uint *, device uint *, device uint *, device atomic_uint *, device uchar const *, \
-        uint, uint, uint
+#define USEARCH_METAL_BUILD                                                                                           \
+    constant metal_basic_arguments_t &, device uchar const *, device ulong const *, device uint *, device uchar *,    \
+        device atomic_uint *, device uint *, device uint *, device uint *, device atomic_uint *, device uint const *, \
+        device uchar const *, uint, uint, uint
 #define USEARCH_METAL_SEARCH                                                                             \
     constant metal_basic_arguments_t &, device uchar const *, device ulong const *, device uint *,       \
         device uchar const *, device uchar *, device atomic_uint *, device ulong const *, device uint *, \
-        device float *, device uchar const *, uint, uint, uint
+        device float *, device uint *, device uchar const *, device uchar const *, uint, uint, uint
+#define USEARCH_METAL_SCAN                                                                               \
+    constant metal_basic_arguments_t &, device uchar const *, device ulong const *, device uint *,       \
+        device uchar const *, device uchar *, device atomic_uint *, device ulong const *, device uint *, \
+        device float *, device ulong *, device atomic_uint *, device uchar const *, uint, uint, uint
 #define USEARCH_METAL_GATHER                                                                                       \
     constant metal_basic_arguments_t &, device uchar const *, device ulong const *, device uint *, device uchar *, \
         device atomic_uint *, device uint *, device ushort *, device uint const *, device uint const *,            \
@@ -2265,6 +2753,16 @@ template [[host_name("metal_search_kernel_0_2")]] kernel void metal_search_kerne
 template [[host_name("metal_search_kernel_0_4")]] kernel void metal_search_kernel<0, 4>(USEARCH_METAL_SEARCH);
 template [[host_name("metal_search_kernel_0_8")]] kernel void metal_search_kernel<0, 8>(USEARCH_METAL_SEARCH);
 template [[host_name("metal_search_kernel_0_16")]] kernel void metal_search_kernel<0, 16>(USEARCH_METAL_SEARCH);
+template [[host_name("metal_scan_kernel_0_0")]] kernel void metal_scan_kernel<0, 0>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_0_2")]] kernel void metal_scan_kernel<0, 2>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_0_4")]] kernel void metal_scan_kernel<0, 4>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_0_8")]] kernel void metal_scan_kernel<0, 8>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_0_16")]] kernel void metal_scan_kernel<0, 16>(USEARCH_METAL_SCAN);
+template [[host_name("metal_seed_kernel_0_0")]] kernel void metal_seed_kernel<0, 0>(USEARCH_METAL_SEARCH);
+template [[host_name("metal_seed_kernel_0_2")]] kernel void metal_seed_kernel<0, 2>(USEARCH_METAL_SEARCH);
+template [[host_name("metal_seed_kernel_0_4")]] kernel void metal_seed_kernel<0, 4>(USEARCH_METAL_SEARCH);
+template [[host_name("metal_seed_kernel_0_8")]] kernel void metal_seed_kernel<0, 8>(USEARCH_METAL_SEARCH);
+template [[host_name("metal_seed_kernel_0_16")]] kernel void metal_seed_kernel<0, 16>(USEARCH_METAL_SEARCH);
 template [[host_name("metal_back_link_kernel_0")]] kernel void metal_back_link_kernel<0>(USEARCH_METAL_BUILD);
 template [[host_name("metal_gather_neighborhoods_kernel_0")]] kernel void metal_gather_kernel<0>(USEARCH_METAL_GATHER);
 template [[host_name("metal_restitch_kernel_0")]] kernel void metal_restitch_kernel<0>(USEARCH_METAL_RESTITCH);
@@ -2290,6 +2788,11 @@ template [[host_name("metal_search_kernel_1_2")]] kernel void metal_search_kerne
 template [[host_name("metal_search_kernel_1_4")]] kernel void metal_search_kernel<1, 4>(USEARCH_METAL_SEARCH);
 template [[host_name("metal_search_kernel_1_8")]] kernel void metal_search_kernel<1, 8>(USEARCH_METAL_SEARCH);
 template [[host_name("metal_search_kernel_1_16")]] kernel void metal_search_kernel<1, 16>(USEARCH_METAL_SEARCH);
+template [[host_name("metal_scan_kernel_1_0")]] kernel void metal_scan_kernel<1, 0>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_1_2")]] kernel void metal_scan_kernel<1, 2>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_1_4")]] kernel void metal_scan_kernel<1, 4>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_1_8")]] kernel void metal_scan_kernel<1, 8>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_1_16")]] kernel void metal_scan_kernel<1, 16>(USEARCH_METAL_SCAN);
 template [[host_name("metal_back_link_kernel_1")]] kernel void metal_back_link_kernel<1>(USEARCH_METAL_BUILD);
 template [[host_name("metal_gather_neighborhoods_kernel_1")]] kernel void metal_gather_kernel<1>(USEARCH_METAL_GATHER);
 template [[host_name("metal_restitch_kernel_1")]] kernel void metal_restitch_kernel<1>(USEARCH_METAL_RESTITCH);
@@ -2316,6 +2819,11 @@ template [[host_name("metal_search_kernel_2_2")]] kernel void metal_search_kerne
 template [[host_name("metal_search_kernel_2_4")]] kernel void metal_search_kernel<2, 4>(USEARCH_METAL_SEARCH);
 template [[host_name("metal_search_kernel_2_8")]] kernel void metal_search_kernel<2, 8>(USEARCH_METAL_SEARCH);
 template [[host_name("metal_search_kernel_2_16")]] kernel void metal_search_kernel<2, 16>(USEARCH_METAL_SEARCH);
+template [[host_name("metal_scan_kernel_2_0")]] kernel void metal_scan_kernel<2, 0>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_2_2")]] kernel void metal_scan_kernel<2, 2>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_2_4")]] kernel void metal_scan_kernel<2, 4>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_2_8")]] kernel void metal_scan_kernel<2, 8>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_2_16")]] kernel void metal_scan_kernel<2, 16>(USEARCH_METAL_SCAN);
 template [[host_name("metal_back_link_kernel_2")]] kernel void metal_back_link_kernel<2>(USEARCH_METAL_BUILD);
 template [[host_name("metal_gather_neighborhoods_kernel_2")]] kernel void metal_gather_kernel<2>(USEARCH_METAL_GATHER);
 template [[host_name("metal_restitch_kernel_2")]] kernel void metal_restitch_kernel<2>(USEARCH_METAL_RESTITCH);
@@ -2342,6 +2850,11 @@ template [[host_name("metal_search_kernel_3_2")]] kernel void metal_search_kerne
 template [[host_name("metal_search_kernel_3_4")]] kernel void metal_search_kernel<3, 4>(USEARCH_METAL_SEARCH);
 template [[host_name("metal_search_kernel_3_8")]] kernel void metal_search_kernel<3, 8>(USEARCH_METAL_SEARCH);
 template [[host_name("metal_search_kernel_3_16")]] kernel void metal_search_kernel<3, 16>(USEARCH_METAL_SEARCH);
+template [[host_name("metal_scan_kernel_3_0")]] kernel void metal_scan_kernel<3, 0>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_3_2")]] kernel void metal_scan_kernel<3, 2>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_3_4")]] kernel void metal_scan_kernel<3, 4>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_3_8")]] kernel void metal_scan_kernel<3, 8>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_3_16")]] kernel void metal_scan_kernel<3, 16>(USEARCH_METAL_SCAN);
 template [[host_name("metal_back_link_kernel_3")]] kernel void metal_back_link_kernel<3>(USEARCH_METAL_BUILD);
 template [[host_name("metal_gather_neighborhoods_kernel_3")]] kernel void metal_gather_kernel<3>(USEARCH_METAL_GATHER);
 template [[host_name("metal_restitch_kernel_3")]] kernel void metal_restitch_kernel<3>(USEARCH_METAL_RESTITCH);
@@ -2368,6 +2881,11 @@ template [[host_name("metal_search_kernel_4_2")]] kernel void metal_search_kerne
 template [[host_name("metal_search_kernel_4_4")]] kernel void metal_search_kernel<4, 4>(USEARCH_METAL_SEARCH);
 template [[host_name("metal_search_kernel_4_8")]] kernel void metal_search_kernel<4, 8>(USEARCH_METAL_SEARCH);
 template [[host_name("metal_search_kernel_4_16")]] kernel void metal_search_kernel<4, 16>(USEARCH_METAL_SEARCH);
+template [[host_name("metal_scan_kernel_4_0")]] kernel void metal_scan_kernel<4, 0>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_4_2")]] kernel void metal_scan_kernel<4, 2>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_4_4")]] kernel void metal_scan_kernel<4, 4>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_4_8")]] kernel void metal_scan_kernel<4, 8>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_4_16")]] kernel void metal_scan_kernel<4, 16>(USEARCH_METAL_SCAN);
 template [[host_name("metal_back_link_kernel_4")]] kernel void metal_back_link_kernel<4>(USEARCH_METAL_BUILD);
 template [[host_name("metal_gather_neighborhoods_kernel_4")]] kernel void metal_gather_kernel<4>(USEARCH_METAL_GATHER);
 template [[host_name("metal_restitch_kernel_4")]] kernel void metal_restitch_kernel<4>(USEARCH_METAL_RESTITCH);
@@ -2394,6 +2912,11 @@ template [[host_name("metal_search_kernel_5_2")]] kernel void metal_search_kerne
 template [[host_name("metal_search_kernel_5_4")]] kernel void metal_search_kernel<5, 4>(USEARCH_METAL_SEARCH);
 template [[host_name("metal_search_kernel_5_8")]] kernel void metal_search_kernel<5, 8>(USEARCH_METAL_SEARCH);
 template [[host_name("metal_search_kernel_5_16")]] kernel void metal_search_kernel<5, 16>(USEARCH_METAL_SEARCH);
+template [[host_name("metal_scan_kernel_5_0")]] kernel void metal_scan_kernel<5, 0>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_5_2")]] kernel void metal_scan_kernel<5, 2>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_5_4")]] kernel void metal_scan_kernel<5, 4>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_5_8")]] kernel void metal_scan_kernel<5, 8>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_5_16")]] kernel void metal_scan_kernel<5, 16>(USEARCH_METAL_SCAN);
 template [[host_name("metal_back_link_kernel_5")]] kernel void metal_back_link_kernel<5>(USEARCH_METAL_BUILD);
 template [[host_name("metal_gather_neighborhoods_kernel_5")]] kernel void metal_gather_kernel<5>(USEARCH_METAL_GATHER);
 template [[host_name("metal_restitch_kernel_5")]] kernel void metal_restitch_kernel<5>(USEARCH_METAL_RESTITCH);
@@ -2420,6 +2943,11 @@ template [[host_name("metal_search_kernel_6_2")]] kernel void metal_search_kerne
 template [[host_name("metal_search_kernel_6_4")]] kernel void metal_search_kernel<6, 4>(USEARCH_METAL_SEARCH);
 template [[host_name("metal_search_kernel_6_8")]] kernel void metal_search_kernel<6, 8>(USEARCH_METAL_SEARCH);
 template [[host_name("metal_search_kernel_6_16")]] kernel void metal_search_kernel<6, 16>(USEARCH_METAL_SEARCH);
+template [[host_name("metal_scan_kernel_6_0")]] kernel void metal_scan_kernel<6, 0>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_6_2")]] kernel void metal_scan_kernel<6, 2>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_6_4")]] kernel void metal_scan_kernel<6, 4>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_6_8")]] kernel void metal_scan_kernel<6, 8>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_6_16")]] kernel void metal_scan_kernel<6, 16>(USEARCH_METAL_SCAN);
 template [[host_name("metal_back_link_kernel_6")]] kernel void metal_back_link_kernel<6>(USEARCH_METAL_BUILD);
 template [[host_name("metal_gather_neighborhoods_kernel_6")]] kernel void metal_gather_kernel<6>(USEARCH_METAL_GATHER);
 template [[host_name("metal_restitch_kernel_6")]] kernel void metal_restitch_kernel<6>(USEARCH_METAL_RESTITCH);
@@ -2446,6 +2974,11 @@ template [[host_name("metal_search_kernel_7_2")]] kernel void metal_search_kerne
 template [[host_name("metal_search_kernel_7_4")]] kernel void metal_search_kernel<7, 4>(USEARCH_METAL_SEARCH);
 template [[host_name("metal_search_kernel_7_8")]] kernel void metal_search_kernel<7, 8>(USEARCH_METAL_SEARCH);
 template [[host_name("metal_search_kernel_7_16")]] kernel void metal_search_kernel<7, 16>(USEARCH_METAL_SEARCH);
+template [[host_name("metal_scan_kernel_7_0")]] kernel void metal_scan_kernel<7, 0>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_7_2")]] kernel void metal_scan_kernel<7, 2>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_7_4")]] kernel void metal_scan_kernel<7, 4>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_7_8")]] kernel void metal_scan_kernel<7, 8>(USEARCH_METAL_SCAN);
+template [[host_name("metal_scan_kernel_7_16")]] kernel void metal_scan_kernel<7, 16>(USEARCH_METAL_SCAN);
 template [[host_name("metal_back_link_kernel_7")]] kernel void metal_back_link_kernel<7>(USEARCH_METAL_BUILD);
 template [[host_name("metal_gather_neighborhoods_kernel_7")]] kernel void metal_gather_kernel<7>(USEARCH_METAL_GATHER);
 template [[host_name("metal_restitch_kernel_7")]] kernel void metal_restitch_kernel<7>(USEARCH_METAL_RESTITCH);

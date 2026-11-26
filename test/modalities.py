@@ -95,7 +95,7 @@ def test_direct_construction_of_a_modality_is_refused(modality: type):
 @pytest.mark.parametrize(
     ("index", "description"),
     [
-        (lambda: SequenceIndex.init_ram(SequenceMetric.LEVENSHTEIN_UTF8), SequenceIndexDescription),
+        (lambda: SequenceIndex.init_ram(), SequenceIndexDescription),
         (lambda: ShapesIndex.init_ram(ShapesMetric.HAUSDORFF), ShapesIndexDescription),
         (lambda: GeospatialIndex.init_ram(), GeospatialIndexDescription),
     ],
@@ -113,16 +113,16 @@ def test_init_ram_starts_empty(index, description: type):
 
 def test_init_ram_keeps_the_metric():
     """The metric a sequence or shapes index froze reads back as the enum it was given."""
-    assert SequenceIndex.init_ram(SequenceMetric.LEVENSHTEIN_UTF8).describe().metadata.metric is (
-        SequenceMetric.LEVENSHTEIN_UTF8
-    )
+    metadata = SequenceIndex.init_ram(SequenceMetric.DNA_OVERLAP).describe().metadata
+    assert metadata.metric is SequenceMetric.DNA_OVERLAP
+    assert metadata.classes == 4
     assert ShapesIndex.init_ram(ShapesMetric.HAUSDORFF).describe().metadata.metric is ShapesMetric.HAUSDORFF
 
 
 def test_modality_enums_carry_the_library_spellings():
     """Every member is named by the library's dash-separated spelling of its value, in value order."""
     spellings = {
-        SequenceMetric: "levenshtein levenshtein-utf8 needleman-wunsch overlap",
+        SequenceMetric: "protein-alignment dna-overlap utf8-containment",
         ShapesMetric: "chamfer hausdorff gromov-wasserstein wasserstein-procrustes",
     }
     for enum, spelled in spellings.items():
@@ -152,6 +152,48 @@ def test_sequence_search_finds_the_inserted_entry():
     matches = index.search(["sitting"], 1, Arena())
     assert keys_to_integers(np.asarray(matches.keys)[0]).tolist() == [2]
     assert np.asarray(matches.distances)[0, 0] == 0
+
+
+def nucleotide_similarities(match: int, near: int) -> npt.NDArray[np.int8]:
+    """Scores `match` between equal nucleotides and `near` between `A` and `G`, zero elsewhere."""
+    similarities = np.zeros((256, 256), dtype=np.int8)
+    for nucleotide in b"ACGT":
+        similarities[nucleotide, nucleotide] = match
+    similarities[ord("A"), ord("G")] = similarities[ord("G"), ord("A")] = near
+    return similarities
+
+
+def test_sequence_overlap_scores_the_reverse_complement():
+    """A query that is the reverse complement of a read finds that read first, at distance zero."""
+    index = SequenceIndex.init_ram(SequenceMetric.DNA_OVERLAP)
+    reads = [b"ACGTTGCAAGGCTTAACCGGTTACGATCGA", b"GGCTTAACCGGTTACGATCGATTTGCAGCA", b"T" * 30]
+    index.insert([1, 2, 3], reads)
+    matches = index.search([b"TGCTGCAAATCGATCGTAACCGGTTAAGCC"], 2, Arena())
+    assert keys_to_integers(np.asarray(matches.keys)[0]).tolist()[0] == 2
+    assert np.asarray(matches.distances)[0, 0] == 0
+
+
+def test_sequence_alignment_ranks_by_similarities():
+    """Under similarities where `A` and `G` are near, an `A` to `G` substitution ranks above an `A` to `C` one."""
+    index = SequenceIndex.init_ram(SequenceMetric.PROTEIN_ALIGNMENT, similarities=nucleotide_similarities(4, 3), gap=4)
+    index.insert([1, 2], [b"GCGTTGCAACGT", b"CCGTTGCAACGT"])
+    matches = index.search([b"ACGTTGCAACGT"], 2, Arena())
+    assert keys_to_integers(np.asarray(matches.keys)[0]).tolist() == [1, 2]
+    distances = np.asarray(matches.distances)[0]
+    assert distances[0] < distances[1]
+
+
+def test_sequence_containment_finds_the_holding_text():
+    """A substring of one entry finds that entry first, whatever its case, and takes no costs."""
+    index = SequenceIndex.init_ram(SequenceMetric.UTF8_CONTAINMENT)
+    index.insert(
+        [1, 2],
+        ["The Quick Brown Fox jumps over the lazy dog", "a journey of a thousand miles begins with a single step"],
+    )
+    matches = index.search(["BROWN FOX JUMPS"], 2, Arena())
+    assert keys_to_integers(np.asarray(matches.keys)[0]).tolist()[0] == 1
+    with pytest.raises(Error):
+        SequenceIndex.init_ram(SequenceMetric.UTF8_CONTAINMENT, similarities=nucleotide_similarities(2, 0), gap=2)
 
 
 def test_shapes_search_finds_the_inserted_entry(seed: int):

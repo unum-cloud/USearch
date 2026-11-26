@@ -3545,8 +3545,8 @@ check_binding_reference_counts_absent() {
 # on its own CUDA, HIP and Metal streams; kernel calls may still take their handles.
 check_sub_library_scheduling_absent() {
     local scheduled
-    scheduled=$(grep -E '\b(nk|sz)_stream_(init|free|synchronize)[a-z_]*\b|\b(nk|sz)_allocator_init_(device|pinned|unified)[a-z_]*\b|\bnk::(stream_t|device_t)\b|\b(nk|sz)_device_(enter|leave)_[a-z]+_\b|\bsz_metal_[a-z_]+\b|\b(nk|sz)_count_devices_[a-z]+\b' \
-        "$staged_added_unquoted_path" || true)
+    # A `*_source` name is a kernel's source text, which an engine compiles itself.
+    scheduled=$(sed -E 's/(^|[^A-Za-z0-9_])(nk|sz)_[a-z_]*_source([^A-Za-z0-9_]|$)/\1\3/g' "$staged_added_unquoted_path" | grep -E '\b(nk|sz)_stream_(init|free|synchronize)[a-z_]*\b|\b(nk|sz)_allocator_init_(device|pinned|unified)[a-z_]*\b|\bnk::(stream_t|device_t)\b|\b(nk|sz)_device_(enter|leave)_[a-z]+_\b|\bsz_metal_[a-z_]+\b|\b(nk|sz)_count_devices_[a-z]+\b' || true)
     [ -z "$scheduled" ] || reject_with_reason "$scheduled" \
         "$staged_path manages a stream, device or memory through NumKong or StringZilla; an engine creates," \
         "            synchronizes and frees its own CUDA, HIP and Metal streams and memory, and passes kernels their handles:"

@@ -579,25 +579,32 @@ println!("{} entries under {key}, contained: {}", index.count(key)?, index.conta
 
 ## Sequence Indexes
 
-A `SequenceIndex` searches byte strings, UTF-8 text, DNA, RNA and proteins under edit distances and alignments.
+A `SequenceIndex` searches proteins, DNA, RNA and UTF-8 text, each under the metric made for it.
 Its sequences cross as one `Tape`, the Apache Arrow `Binary` layout of bytes end to end around one more offset than entries: `Tape::of` packs separate entries, and `Tape::new` views the two runs of an Arrow column as they are.
 
 ```rust
-let options = SequenceOptions {
-    metric: SequenceMetric::LevenshteinUtf8,
-    ..SequenceOptions::default()
-};
+let options = SequenceOptions { metric: SequenceMetric::Utf8Containment, ..SequenceOptions::default() };
 let index = SequenceIndex::init_ram(&options, &[])?;
-let words = Tape::of(["kitten", "sitting", "mitten"]);
+let words = Tape::of(["The Quick Brown Fox", "jumps over the lazy dog", "a single step"]);
 index.insert([Key::from(1u64), Key::from(2u64), Key::from(3u64)], words)?;
 
 let mut arena = Arena::new()?;
-let matches = index.search(Tape::of(["sittin"]), 1, &mut arena)?;
+let matches = index.search(Tape::of(["LAZY DOG"]), 1, &mut arena)?;
 assert_eq!(matches.query(0)?.keys, [Key::from(2u64)]);
-assert_eq!(matches.query(0)?.distances[0], 1.0); // one edit away
 ```
 
-`SequenceMetric::NeedlemanWunsch` takes `SequenceWeights`, a 256 × 256 substitution matrix with a gap cost, and `SequenceMetric::Overlap` takes `window_widths`; every load and view names the weights again, since no checkpoint records them.
+| Metric | Sequences | Score | Default costs |
+| :-- | :-- | :-- | :-- |
+| `SequenceMetric::ProteinAlignment` | proteins | global alignment with linear gaps | BLOSUM62, gap 7 |
+| `SequenceMetric::DnaOverlap` | DNA and RNA | shifted overlap, also as the reverse complement | transition half a transversion, gap 2 |
+| `SequenceMetric::Utf8Containment` | UTF-8 text | share of the query's windows the stored side lacks, case-folded | none |
+
+`SequenceOptions::costs` takes a `SequenceCosts`, 256 × 256 similarities between raw bytes with a gap cost; `None` keeps the metric's own, and a containment refuses any.
+`SequenceOptions::sketch_bytes` sets the bytes of the sketch in front of each stored sequence, a multiple of four, where zero takes the metric's default of 512 for protein alignment and UTF-8 containment.
+A DNA overlap keeps no sketch and refuses any.
+Inputs are raw bytes, which the library folds into classes itself, so there is nothing to pack.
+A checkpoint records the classes and costs, so loads and views take none.
+Stored sequences read back folded: packed class codes for proteins, class bytes for DNA, and case-folded UTF-8 for text.
 `get` writes a key's sequences into an arena as `TapeEntries`, and `count` reports a key's entries with their total and largest byte lengths.
 The verbs come from `SequenceVerbs`, and the receivers, reports and plans work as the dense ones do: `refine` and `reshard` take a `SequenceRefinePlan` or a `SequenceReshardPlan` and answer a `RefineReport`.
 

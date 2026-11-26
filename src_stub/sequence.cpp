@@ -7,22 +7,25 @@
  *
  *  Variable-length payloads cannot ride a strided run, so this modality's batches are tapes - the
  *  bytes end to end around Apache Arrow offsets - the shape most worth testing here, because a
- *  binding that handles strides correctly may still mishandle an offset off by one. The weights
- *  are the other half: a Levenshtein kind refuses any and an alignment kind refuses to go without
- *  them, so a binding pairing the wrong two learns immediately.
+ *  binding that handles strides correctly may still mishandle an offset off by one. The costs are
+ *  the other half: a containment takes none and no costs go without similarities, so a binding that
+ *  pairs the wrong fields learns at once.
  *
  *  @section sequence_stub_blind_spots What It Cannot Tell You
  *
  *  Search is an exact scan, so recall is trivially perfect and ties fall in insertion order. The
  *  alignment kernels are textbook dynamic programming with no band, no vectorization, and quadratic
- *  cost, so a corpus of long sequences is slow rather than wrong. Weighted scores are similarities
- *  and reported as their negation, which ranks correctly but is not the engine's scale. Refinement
+ *  cost, so a corpus of long sequences is slow rather than wrong. Alignments report the unrounded
+ *  costs their similarities give, which rank correctly but are not the engine's scale. Refinement
  *  keeps no edges to re-select, so its @c changed is a constant zero rather than a settling signal,
- *  and a caller must not read it as one. A checkpoint holds its own weights, so a load or view
- *  checks only that weights are named where the kind needs them, and a view copies its checkpoint
- *  rather than mapping it. Traversal statistics are plausible fiction: shaped correctly, invented
- *  numerically. A checkpoint is a binary blob of this file's own memory image, readable by nothing
- *  but this stub itself.
+ *  and a caller must not read it as one. An overlap charges the unrounded costs its similarities
+ *  give, where the engine rounds them to integers of at most 15. A containment reports the share of
+ *  the query's windows the stored side lacks alone, and folds the case of ASCII letters where the
+ *  engine folds Unicode's. A stored sequence reads back as its raw bytes, never as class codes or
+ *  folded text. A checkpoint holds its own costs, so a load or view takes none, and a view copies
+ *  its checkpoint rather than mapping it. Traversal statistics are plausible fiction: shaped
+ *  correctly, invented numerically. A checkpoint is a binary blob of this file's own memory image,
+ *  readable by nothing else.
  *
  *  Keeping no edges, the stand-in links every one of its entries to its exact nearest at the frozen
  *  connectivity, the lists a perfect graph would hold where the engine's are the ones it stored. A
@@ -31,7 +34,10 @@
  *  library's plan walks its graph, placing its draws as the library does.
  */
 
+#include <cmath> // `std::floor`, `std::ceil`
+
 #include <algorithm> // `std::stable_sort`
+#include <array>     // `std::array`
 #include <limits>    // `std::numeric_limits`
 #include <optional>  // `std::optional`
 #include <span>      // `std::span`
@@ -39,6 +45,7 @@
 
 #include "usearch/types.h"
 #include "usearch/sequence_index.h"
+#include "usearch/sequence/alphabet.hpp" // `protein_similarities`, `dna_similarities`, `dna_complement`
 
 #include "lib.hpp"
 
@@ -53,11 +60,14 @@ namespace stub {
 
 #pragma region Storage
 
-/** The alphabet of a byte-level substitution matrix, one row and column per byte. */
+/** The alphabet of a byte-level similarity matrix, one row and column per byte. */
 constexpr std::size_t alphabet_k = 256;
 
-/** What a handle froze at construction, or adopted from a checkpoint, with the scoring parameters
- *  only an alignment kind holds. */
+/** Classes the similarities of an alphabet fold bytes into at most. */
+constexpr std::size_t classes_limit_k = 32;
+
+/** What a handle froze at construction, or adopted from a checkpoint: the metric, the costs it was
+ *  given or its metric's own, and what they fold into. */
 struct sequence_index_options_t {
 
     /** What entries are compared by. */
@@ -66,18 +76,28 @@ struct sequence_index_options_t {
     /** The connections-per-node bound the handle was built with. */
     std::size_t connectivity = 0;
 
+    /** Bytes of the sketch the handle was built with; zero for the metric's default. */
+    std::size_t sketch_bytes = 0;
+
     /** Upper bound on entries sharing one key. */
     std::size_t values_per_key = 0;
 
-    /** Row-major @c alphabet_k × @c alphabet_k scores; empty under a uniform metric. */
-    std::vector<util::i8_t> substitution;
+    /** Row-major similarities, @c alphabet_k rows of @c alphabet_k; empty for a containment. */
+    std::vector<util::i8_t> similarities;
 
-    /** Cost of one unaligned symbol. */
+    /** Cost of one unaligned symbol; zero for a containment. */
     util::i8_t gap = 0;
 
-    /** Window widths in bytes the overlap kind compares at; empty under every other kind. */
-    std::vector<std::size_t> window_widths;
+    /** The class the similarities fold every byte into; empty for a containment. */
+    std::vector<util::u8_t> byte_classes;
+
+    /** Classes the similarities fold bytes into; zero for a containment. */
+    std::size_t classes = 0;
 };
+
+/** The windows a containment and an overlap compare, as the header says. */
+constexpr std::size_t containment_widths_k[] = {5, 8};
+constexpr std::size_t overlap_widths_k[] = {12, 19};
 
 using sequence_payload_t = std::vector<std::byte>;
 using sequence_entry_t = entry<sequence_payload_t>;
@@ -90,82 +110,85 @@ using sequence_index_t = handle<sequence_payload_t, sequence_index_options_t>;
 using sequence_cursor_t = graph_cursor<sequence_index_t>;
 
 /** Whether a handle frozen at @p other takes entries of an index frozen at @p index: the same
- *  kind, weights, window widths and connectivity. */
+ *  kind, costs and connectivity. */
 static bool same_kind(sequence_index_options_t const& index, sequence_index_options_t const& other) {
     return index.metric == other.metric && index.connectivity == other.connectivity &&
-           index.substitution == other.substitution && index.gap == other.gap &&
-           index.window_widths == other.window_widths;
-}
-
-/** Whether the kind scores without scoring parameters, and so refuses any weights. */
-static bool levenshtein_metric(usearch_sequence_metric_t metric) {
-    return metric == usearch_sequence_metric_levenshtein_bytes_k ||
-           metric == usearch_sequence_metric_levenshtein_utf8_k;
-}
-
-/** Whether the kind reads a substitution matrix and gap costs. */
-static bool alignment_metric(usearch_sequence_metric_t metric) {
-    return metric == usearch_sequence_metric_needleman_wunsch_k;
+           index.similarities == other.similarities && index.gap == other.gap;
 }
 
 /** Whether the kind is one this build implements at all. */
 static bool known_metric(usearch_sequence_metric_t metric) {
-    return levenshtein_metric(metric) || alignment_metric(metric) || metric == usearch_sequence_metric_overlap_k;
+    return metric == usearch_sequence_metric_protein_alignment_k || metric == usearch_sequence_metric_dna_overlap_k ||
+           metric == usearch_sequence_metric_utf8_containment_k;
+}
+
+/**
+ *  @brief Folds the similarities @p options holds into the class of every byte; false once
+ *      @p outcome records why the costs are refused.
+ *
+ *  Bytes sharing their rows and columns share a class, numbered in the order their first bytes
+ *  come. A DNA overlap's must fold into the four letters' classes, one apiece, with the letters'
+ *  complements kept apart.
+ */
+static bool fold_costs(sequence_index_options_t& options, usearch_outcome_t* outcome) {
+    std::vector<util::i8_t> const& similarities = options.similarities;
+    options.byte_classes.clear(), options.classes = 0;
+    std::vector<std::size_t> firsts;
+    auto const score = [&](std::size_t first, std::size_t second) { return similarities[first * alphabet_k + second]; };
+    auto const alike = [&](std::size_t first, std::size_t second) {
+        for (std::size_t other = 0; other != alphabet_k; ++other)
+            if (score(first, other) != score(second, other) || score(other, first) != score(other, second))
+                return false;
+        return true;
+    };
+    std::size_t const folded_bytes = similarities.empty() ? 0 : alphabet_k;
+    for (std::size_t byte = 0; byte != folded_bytes; ++byte) {
+        std::size_t code = 0;
+        while (code != firsts.size() && !alike(firsts[code], byte)) ++code;
+        if (code == firsts.size()) firsts.push_back(byte);
+        if (reject_if(firsts.size() > classes_limit_k, usearch_status_config_mismatch_k,
+                      "The similarities fold into more than 32 classes", outcome))
+            return false;
+        options.byte_classes.push_back(static_cast<util::u8_t>(code));
+    }
+    options.classes = firsts.size();
+    if (reject_if(options.classes == 1, usearch_status_config_mismatch_k, "The similarities fold into one class",
+                  outcome) ||
+        reject_if(options.classes && options.gap < 0, usearch_status_config_mismatch_k, "The gap cost is negative",
+                  outcome))
+        return false;
+    for (std::size_t const first : firsts)
+        for (std::size_t const second : firsts)
+            if (reject_if(score(first, first) + score(second, second) < 2 * score(first, second),
+                          usearch_status_config_mismatch_k, "A pair scores above its mean self-score", outcome))
+                return false;
+    if (options.metric != usearch_sequence_metric_dna_overlap_k) return true;
+    constexpr std::string_view letters_k = "ACGT";
+    auto const class_of = [&](char letter) { return options.byte_classes[static_cast<unsigned char>(letter)]; };
+    util::u32_t taken = 0;
+    std::array<util::u8_t, classes_limit_k> complements {};
+    for (char const letter : letters_k)
+        taken |= 1u << class_of(letter), complements[class_of(letter)] = class_of(us::sequence::dna_complement(letter));
+    bool split = options.classes != letters_k.size() || taken != (1u << letters_k.size()) - 1u;
+    for (std::size_t byte = 0; byte != alphabet_k && !split; ++byte)
+        if (char const complement = us::sequence::dna_complement(static_cast<char>(byte)))
+            split = complements[options.byte_classes[byte]] != class_of(complement);
+    return !reject_if(split, usearch_status_config_mismatch_k, "Costs must fold into the four letters' classes",
+                      outcome);
 }
 
 #pragma endregion Storage
 
 #pragma region Scoring
 
-/** Decodes UTF-8 into code points, treating a malformed byte as its own code point. */
-static void decode_utf8(util::bytes_view_t bytes, std::vector<util::u32_t>& points) {
-    points.clear();
-    for (std::size_t position = 0; position != bytes.size();) {
-        util::u8_t const leading = std::to_integer<util::u8_t>(bytes[position]);
-        std::size_t width = 1;
-        util::u32_t point = leading;
-        if ((leading & 0xE0) == 0xC0) width = 2, point = leading & 0x1F;
-        else if ((leading & 0xF0) == 0xE0) width = 3, point = leading & 0x0F;
-        else if ((leading & 0xF8) == 0xF0) width = 4, point = leading & 0x07;
-        if (position + width > bytes.size()) width = 1, point = leading;
-        for (std::size_t continuation = 1; continuation != width; ++continuation) {
-            util::u8_t const following = std::to_integer<util::u8_t>(bytes[position + continuation]);
-            if ((following & 0xC0) != 0x80) {
-                width = 1, point = leading;
-                break;
-            }
-            point = (point << 6) | (following & 0x3F);
-        }
-        points.push_back(point);
-        position += width;
-    }
-}
-
-/** Levenshtein distance with unit substitution, insertion, and deletion costs. */
-template <typename unit_>
-static double levenshtein(std::span<unit_ const> first, std::span<unit_ const> second, std::vector<std::size_t>& row) {
-    row.resize(second.size() + 1);
-    for (std::size_t column = 0; column != row.size(); ++column) row[column] = column;
-    for (std::size_t above = 0; above != first.size(); ++above) {
-        std::size_t diagonal = row[0];
-        row[0] = above + 1;
-        for (std::size_t column = 0; column != second.size(); ++column) {
-            std::size_t const substitution = diagonal + (first[above] == second[column] ? 0 : 1);
-            diagonal = row[column + 1];
-            row[column + 1] = util::min_of(substitution, util::min_of(row[column], row[column + 1]) + 1);
-        }
-    }
-    return static_cast<double>(row[second.size()]);
-}
-
-/** Needleman-Wunsch with a linear gap: the least cost turning @p first into @p second, a
- *  substitution costing the mean of the two symbols' self-scores less their shared score and every
- *  unaligned symbol @c gap, as the header defines the kind. */
-static double global_alignment(util::bytes_view_t first, util::bytes_view_t second,
+/** Global alignment with a linear gap under costs: the least cost turning @p first into @p second,
+ *  a mismatch costing the mean of the two symbols' self-similarities less their shared similarity
+ *  and every unaligned symbol @c gap, as the header defines the score. */
+static double costed_alignment(util::bytes_view_t first, util::bytes_view_t second,
                                sequence_index_options_t const& parameters, std::vector<double>& row) {
     auto const score = [&](std::byte a, std::byte b) {
         return static_cast<double>(
-            parameters.substitution[std::to_integer<std::size_t>(a) * alphabet_k + std::to_integer<std::size_t>(b)]);
+            parameters.similarities[std::to_integer<std::size_t>(a) * alphabet_k + std::to_integer<std::size_t>(b)]);
     };
     double const gap = parameters.gap;
     row.resize(second.size() + 1);
@@ -184,53 +207,187 @@ static double global_alignment(util::bytes_view_t first, util::bytes_view_t seco
     return row[second.size()];
 }
 
+/** One window of a sequence and the place it starts at. */
+struct sequence_placed_window_t {
+    std::string_view window;
+    std::size_t place;
+};
+
 /** Reusable buffers, so scoring a whole corpus allocates once rather than per pair. */
 struct sequence_search_scratch_t {
-    std::vector<util::u32_t> query_points;
-    std::vector<util::u32_t> entry_points;
-    std::vector<std::size_t> unsigned_row;
     std::vector<double> cost_row;
     std::vector<std::string_view> query_windows;
+    std::vector<std::string_view> stored_windows;
+    std::vector<sequence_placed_window_t> placed_windows;
+    std::vector<std::ptrdiff_t> shifts;
+    std::vector<std::byte> query_classes;
+    std::vector<std::byte> stored_classes;
+    std::vector<std::byte> complement;
 };
 
 /** Windows of @p width in a sequence of @p length bytes. */
 static std::size_t windows_in(std::size_t length, std::size_t width) { return length < width ? 0 : length - width + 1; }
 
-/** The overlap kind: the stored windows the query lacks, over whichever side has more windows. */
-static double window_overlap(util::bytes_view_t query, util::bytes_view_t stored, std::span<std::size_t const> widths,
-                             std::vector<std::string_view>& query_windows) {
+/** Containment: the query's distinct windows the stored side lacks, over its distinct windows. */
+static double window_containment(util::bytes_view_t query, util::bytes_view_t stored,
+                                 std::span<std::size_t const> widths, std::vector<std::string_view>& query_windows,
+                                 std::vector<std::string_view>& stored_windows) {
     std::string_view const query_text = util::chars_of(query), stored_text = util::chars_of(stored);
-    std::size_t query_count = 0, stored_count = 0, hits = 0;
+    std::size_t distinct = 0, held = 0;
     for (std::size_t const width : widths) {
         query_windows.clear();
+        stored_windows.clear();
         for (std::size_t start = 0; start != windows_in(query_text.size(), width); ++start)
             query_windows.push_back(query_text.substr(start, width));
-        std::sort(query_windows.begin(), query_windows.end());
         for (std::size_t start = 0; start != windows_in(stored_text.size(), width); ++start)
-            hits += std::binary_search(query_windows.begin(), query_windows.end(), stored_text.substr(start, width));
-        query_count += query_windows.size();
-        stored_count += windows_in(stored_text.size(), width);
+            stored_windows.push_back(stored_text.substr(start, width));
+        std::sort(query_windows.begin(), query_windows.end());
+        query_windows.erase(std::unique(query_windows.begin(), query_windows.end()), query_windows.end());
+        std::sort(stored_windows.begin(), stored_windows.end());
+        for (std::string_view const window : query_windows)
+            held += std::binary_search(stored_windows.begin(), stored_windows.end(), window);
+        distinct += query_windows.size();
     }
-    std::size_t const longer = util::max_of(query_count, stored_count);
-    return longer ? static_cast<double>(longer - hits) / static_cast<double>(longer) : 1.0;
+    return distinct ? static_cast<double>(distinct - held) / static_cast<double>(distinct) : 1.0;
 }
 
-/** Scores one pair under the frozen kind. The constructor and @c adopt refuse a kind
- *  this build does not know, so every enumerator reaching here is one of the four. */
+/**
+ *  @brief Shifted overlap, as the header's reference computes it: the windows of @p query_text
+ *      found once in it vote for a shift against @p stored_text, and the symbols the winning shift
+ *      lays over each other are aligned inside a band under the costs of @p parameters.
+ *
+ *  The two texts are what windows compare, the class of every byte, and @p query and @p stored are
+ *  the bytes the costs read.
+ */
+static double shifted_overlap(util::bytes_view_t query, util::bytes_view_t stored, std::string_view query_text,
+                              std::string_view stored_text, sequence_index_options_t const& parameters,
+                              sequence_search_scratch_t& scratch) {
+    constexpr double scale_k = static_cast<double>(1u << 23), ceiling_k = 32767.0 * 256 + 255;
+    std::vector<sequence_placed_window_t>& placed = scratch.placed_windows;
+    std::vector<std::ptrdiff_t>& shifts = scratch.shifts;
+    shifts.clear();
+    for (std::size_t const width : overlap_widths_k) {
+        placed.clear();
+        for (std::size_t place = 0; place != windows_in(query_text.size(), width); ++place)
+            placed.push_back({query_text.substr(place, width), place});
+        std::sort(placed.begin(), placed.end(),
+                  [](sequence_placed_window_t const& first, sequence_placed_window_t const& second) {
+                      return first.window < second.window;
+                  });
+        // A window the query repeats names no single shift, so only the ones it holds once vote.
+        for (std::size_t place = 0; place != windows_in(stored_text.size(), width); ++place) {
+            std::string_view const window = stored_text.substr(place, width);
+            std::size_t const found = static_cast<std::size_t>(
+                std::lower_bound(placed.begin(), placed.end(), window,
+                                 [](sequence_placed_window_t const& lower, std::string_view higher) {
+                                     return lower.window < higher;
+                                 }) -
+                placed.begin());
+            if (found == placed.size() || placed[found].window != window) continue;
+            if (found + 1 != placed.size() && placed[found + 1].window == window) continue;
+            shifts.push_back(static_cast<std::ptrdiff_t>(place) - static_cast<std::ptrdiff_t>(placed[found].place));
+        }
+    }
+    // The most voted shift, the least one winning a tie.
+    std::sort(shifts.begin(), shifts.end());
+    std::ptrdiff_t shift = 0;
+    std::size_t held = 0;
+    for (std::size_t first = 0, last = 0; first != shifts.size(); first = last) {
+        while (last != shifts.size() && shifts[last] == shifts[first]) ++last;
+        if (last - first > held) held = last - first, shift = shifts[first];
+    }
+    if (held < 2) return ceiling_k / scale_k;
+
+    std::ptrdiff_t const query_size = static_cast<std::ptrdiff_t>(query.size());
+    std::ptrdiff_t const stored_size = static_cast<std::ptrdiff_t>(stored.size());
+    std::size_t const low = static_cast<std::size_t>(util::max_of<std::ptrdiff_t>(0, -shift));
+    std::size_t const high = static_cast<std::size_t>(util::min_of(query_size, stored_size - shift));
+    std::size_t const span = high - low, band = util::min_of<std::size_t>(64, util::max_of<std::size_t>(4, span / 16));
+    util::bytes_view_t const aligned_query = query.subspan(low, span);
+    util::bytes_view_t const aligned_stored = stored.subspan(
+        static_cast<std::size_t>(static_cast<std::ptrdiff_t>(low) + shift), span);
+    double const gap = parameters.gap;
+    auto const score = [&](std::byte a, std::byte b) {
+        return static_cast<double>(
+            parameters.similarities[std::to_integer<std::size_t>(a) * alphabet_k + std::to_integer<std::size_t>(b)]);
+    };
+    auto const cost = [&](std::byte a, std::byte b) { return (score(a, a) + score(b, b)) / 2 - score(a, b); };
+    // One row of the table, the cells further than the band from the diagonal left unreachable.
+    std::vector<double>& row = scratch.cost_row;
+    row.assign(span + 1, std::numeric_limits<double>::infinity());
+    for (std::size_t column = 0; column <= util::min_of(band, span); ++column)
+        row[column] = static_cast<double>(column) * gap;
+    for (std::size_t above = 1; above <= span; ++above) {
+        std::size_t const first = above > band ? above - band : 0, last = util::min_of(span, above + band);
+        double diagonal = row[first ? first - 1 : 0];
+        if (first) row[first - 1] = std::numeric_limits<double>::infinity();
+        else row[0] = static_cast<double>(above) * gap;
+        for (std::size_t column = util::max_of<std::size_t>(first, 1); column <= last; ++column) {
+            double const aligned = diagonal + cost(aligned_query[above - 1], aligned_stored[column - 1]);
+            diagonal = row[column];
+            row[column] = util::min_of(aligned, util::min_of(row[column - 1], row[column]) + gap);
+        }
+    }
+    std::size_t const shorter = util::min_of(query.size(), stored.size()),
+                      longer = util::max_of(query.size(), stored.size());
+    double const charged = row[span] + gap * static_cast<double>(shorter - span);
+    double const most = 2 * gap * static_cast<double>(shorter);
+    double const primary = most > 0      ? util::min_of(32767.0, std::floor(charged * 32767 / most))
+                           : charged > 0 ? 32767.0
+                                         : 0.0;
+    double const secondary = std::ceil(static_cast<double>(longer - span) * 255 / static_cast<double>(longer));
+    return (primary * 256 + secondary) / scale_k;
+}
+
+/** The class of every byte of @p sequence in @p classes, as an overlap's windows compare them. */
+static util::bytes_view_t window_classes(sequence_index_options_t const& parameters, util::bytes_view_t sequence,
+                                         std::vector<std::byte>& classes) {
+    classes.resize(sequence.size());
+    for (std::size_t symbol = 0; symbol != sequence.size(); ++symbol)
+        classes[symbol] = static_cast<std::byte>(
+            parameters.byte_classes[std::to_integer<std::size_t>(sequence[symbol])]);
+    return classes;
+}
+
+/** @p sequence with the case of its ASCII letters folded, into @p folded. */
+static util::bytes_view_t folded_text(util::bytes_view_t sequence, std::vector<std::byte>& folded) {
+    folded.assign(sequence.begin(), sequence.end());
+    for (std::byte& symbol : folded)
+        if (symbol >= std::byte {'A'} && symbol <= std::byte {'Z'}) symbol |= std::byte {'a' - 'A'};
+    return folded;
+}
+
+/** Scores @p query as it stands against @p stored under the frozen kind. The constructor and
+ *  @c adopt refuse a kind this build does not know, so every enumerator here is one of three. */
+static double image_distance(sequence_index_options_t const& parameters, util::bytes_view_t query,
+                             util::bytes_view_t stored, sequence_search_scratch_t& scratch) {
+    switch (parameters.metric) {
+    case usearch_sequence_metric_utf8_containment_k:
+        return window_containment(folded_text(query, scratch.query_classes),
+                                  folded_text(stored, scratch.stored_classes), containment_widths_k,
+                                  scratch.query_windows, scratch.stored_windows);
+    case usearch_sequence_metric_dna_overlap_k:
+        return shifted_overlap(query, stored, util::chars_of(window_classes(parameters, query, scratch.query_classes)),
+                               util::chars_of(window_classes(parameters, stored, scratch.stored_classes)), parameters,
+                               scratch);
+    default: return costed_alignment(query, stored, parameters, scratch.cost_row);
+    }
+}
+
+/** Scores one pair under the frozen kind: the query as it stands and, for a DNA overlap, as its
+ *  reverse complement, the lower distance counting. */
 static double distance(sequence_index_t const& index, util::bytes_view_t query, util::bytes_view_t stored,
                        sequence_search_scratch_t& scratch) {
     sequence_index_options_t const& parameters = index.options;
-    switch (parameters.metric) {
-    case usearch_sequence_metric_levenshtein_utf8_k:
-        decode_utf8(query, scratch.query_points);
-        decode_utf8(stored, scratch.entry_points);
-        return levenshtein<util::u32_t>(scratch.query_points, scratch.entry_points, scratch.unsigned_row);
-    case usearch_sequence_metric_needleman_wunsch_k:
-        return global_alignment(query, stored, parameters, scratch.cost_row);
-    case usearch_sequence_metric_overlap_k:
-        return window_overlap(query, stored, parameters.window_widths, scratch.query_windows);
-    default: return levenshtein<std::byte>(query, stored, scratch.unsigned_row);
+    double const forward = image_distance(parameters, query, stored, scratch);
+    if (parameters.metric != usearch_sequence_metric_dna_overlap_k) return forward;
+    scratch.complement.resize(query.size());
+    for (std::size_t symbol = 0; symbol != query.size(); ++symbol) {
+        // A byte that is no letter reads as T, whose complement is A.
+        char const letter = us::sequence::dna_complement(std::to_integer<char>(query[query.size() - 1 - symbol]));
+        scratch.complement[symbol] = static_cast<std::byte>(letter ? letter : 'A');
     }
+    return util::min_of(forward, image_distance(parameters, scratch.complement, stored, scratch));
 }
 
 /** Refuses a tape of anything but bytes, the one element a sequence is made of. */
@@ -309,20 +466,26 @@ struct sequence_checkpoint_prefix_t {
     /** The connections-per-node bound the handle was built with. */
     std::size_t connectivity;
 
+    /** Bytes of the sketch the handle was built with. */
+    std::size_t sketch_bytes;
+
     /** How many entries follow the prefix. */
     std::size_t entries;
 
     /** Bytes of entry payload that follow, keys and lengths included. */
     std::size_t payload_bytes;
 
-    /** What entries are compared by; it alone says whether a matrix follows. */
+    /** What entries are compared by. */
     usearch_sequence_metric_t metric;
+
+    /** Classes the similarities fold bytes into; zero for a containment. */
+    std::size_t classes;
+
+    /** Whether a similarity matrix follows. */
+    bool costed;
 
     /** Cost of one unaligned symbol. */
     util::i8_t gap;
-
-    /** How many window widths follow the matrix, each a @c std::size_t. */
-    std::size_t window_widths_count;
 };
 
 /** The per-entry overhead of the blob: the key, then the byte length that follows it. */
@@ -335,9 +498,7 @@ static std::size_t payload_extent(sequence_index_t const& index, std::size_t ent
     return extent;
 }
 
-static std::size_t parameter_bytes(sequence_index_t const& index) {
-    return index.options.substitution.size() + index.options.window_widths.size() * sizeof(std::size_t);
-}
+static std::size_t parameter_bytes(sequence_index_t const& index) { return index.options.similarities.size(); }
 
 static std::optional<std::size_t> serialized_bytes(sequence_index_t const& index, std::size_t entries) {
     return blob_bytes(sizeof(sequence_checkpoint_prefix_t) + parameter_bytes(index), payload_extent(index, entries), 1);
@@ -346,23 +507,21 @@ static std::optional<std::size_t> serialized_bytes(sequence_index_t const& index
 static void write_into(sequence_index_t const& index, std::size_t entries, util::bytes_span_t target) {
     sequence_checkpoint_prefix_t prefix {};
     prefix.connectivity = index.options.connectivity;
+    prefix.sketch_bytes = index.options.sketch_bytes;
     prefix.entries = entries;
     prefix.payload_bytes = payload_extent(index, entries);
     prefix.metric = index.options.metric;
+    prefix.classes = index.options.classes;
+    prefix.costed = !index.options.similarities.empty();
     prefix.gap = index.options.gap;
-    prefix.window_widths_count = index.options.window_widths.size();
     write_pod(target, prefix);
     util::bytes_span_t cursor = target.subspan(sizeof(prefix));
 
-    if (!index.options.substitution.empty()) {
+    if (!index.options.similarities.empty()) {
         [[maybe_unused]] util::status_t const copied = util::copy_bytes(
-            cursor.first(index.options.substitution.size()),
-            util::bytes_of(index.options.substitution.data(), index.options.substitution.size()));
-        cursor = cursor.subspan(index.options.substitution.size());
-    }
-    for (std::size_t const width : index.options.window_widths) {
-        write_pod(cursor, width);
-        cursor = cursor.subspan(sizeof(width));
+            cursor.first(index.options.similarities.size()),
+            util::bytes_of(index.options.similarities.data(), index.options.similarities.size()));
+        cursor = cursor.subspan(index.options.similarities.size());
     }
     for (std::size_t position = 0; position != entries; ++position) {
         sequence_entry_t const& entry = index.entries[position];
@@ -383,18 +542,14 @@ static bool parse_prefix(sequence_checkpoint_prefix_t& prefix, util::bytes_view_
                   "The checkpoint ends early", outcome))
         return false;
     prefix = read_pod<sequence_checkpoint_prefix_t>(blob);
-    std::size_t const table = alignment_metric(prefix.metric) ? alphabet_k * alphabet_k : 0;
-    if (reject_if(prefix.window_widths_count > blob.size() / sizeof(std::size_t), usearch_status_malformed_k,
-                  "The checkpoint lists more widths than it holds", outcome))
-        return false;
-    std::size_t const widths = prefix.window_widths_count * sizeof(std::size_t);
-    return fits_blob(blob, sizeof(sequence_checkpoint_prefix_t) + table + widths, prefix.payload_bytes, 1, outcome);
+    std::size_t const table = prefix.costed ? alphabet_k * alphabet_k : 0;
+    return fits_blob(blob, sizeof(sequence_checkpoint_prefix_t) + table, prefix.payload_bytes, 1, outcome);
 }
 
 /** Writes what a checkpoint froze into @p metadata, answering whether its metric is one we know. */
 static bool describe(usearch_sequence_metadata_t& metadata, sequence_checkpoint_prefix_t const& prefix) {
     if (!known_metric(prefix.metric)) return false;
-    metadata = {prefix.metric, prefix.connectivity};
+    metadata = {prefix.metric, prefix.connectivity, prefix.classes, prefix.sketch_bytes};
     return true;
 }
 
@@ -404,6 +559,7 @@ static bool adopt(sequence_index_options_t& options, sequence_checkpoint_prefix_
     if (!known_metric(prefix.metric)) return false;
     options.metric = prefix.metric;
     options.connectivity = prefix.connectivity;
+    options.sketch_bytes = prefix.sketch_bytes;
     return true;
 }
 
@@ -424,19 +580,15 @@ static bool read_from(sequence_index_t& index, util::bytes_view_t blob, usearch_
     index.options.gap = prefix.gap;
 
     util::bytes_view_t cursor = blob.subspan(sizeof(sequence_checkpoint_prefix_t));
-    index.options.substitution.clear();
-    if (alignment_metric(prefix.metric)) {
-        index.options.substitution.resize(alphabet_k * alphabet_k);
+    index.options.similarities.clear();
+    if (prefix.costed) {
+        index.options.similarities.resize(alphabet_k * alphabet_k);
         [[maybe_unused]] util::status_t const copied = util::copy_bytes(
-            util::bytes_of(index.options.substitution.data(), index.options.substitution.size()),
-            cursor.first(index.options.substitution.size()));
-        cursor = cursor.subspan(index.options.substitution.size());
+            util::bytes_of(index.options.similarities.data(), index.options.similarities.size()),
+            cursor.first(index.options.similarities.size()));
+        cursor = cursor.subspan(index.options.similarities.size());
     }
-    index.options.window_widths.resize(prefix.window_widths_count);
-    for (std::size_t& width : index.options.window_widths) {
-        width = read_pod<std::size_t>(cursor);
-        cursor = cursor.subspan(sizeof(width));
-    }
+    if (!fold_costs(index.options, outcome)) return index.reset(), false;
 
     sequence_payload_t payload;
     for (std::size_t position = 0; position != entries; ++position) {
@@ -463,15 +615,22 @@ static bool read_from(sequence_index_t& index, util::bytes_view_t blob, usearch_
     return true;
 }
 
-/** Refuses weights a Levenshtein kind would ignore, and their absence where an alignment kind
- *  needs them, so a binding pairing the wrong two learns at once. */
-static bool reject_weights(usearch_sequence_metric_t metric, usearch_sequence_weights_t const* weights,
-                           usearch_outcome_t* outcome) {
-    if (reject_if(!alignment_metric(metric) && weights, usearch_status_config_mismatch_k,
-                  "Only an alignment kind takes weights", outcome))
+/** Refuses sketch bytes off a multiple of four, and any for a DNA overlap, which has no sketch. */
+static bool reject_sketch_bytes(usearch_sequence_metric_t metric, std::size_t sketch_bytes,
+                                usearch_outcome_t* outcome) {
+    return reject_if(sketch_bytes % 4, usearch_status_config_mismatch_k, "Sketch bytes come in fours", outcome) ||
+           reject_if(sketch_bytes && metric == usearch_sequence_metric_dna_overlap_k, usearch_status_config_mismatch_k,
+                     "A DNA overlap keeps no sketch", outcome);
+}
+
+/** Refuses the costs no fold reads, so a binding pairing the wrong fields learns at once. */
+static bool reject_costs(usearch_sequence_metric_t metric, usearch_sequence_costs_t const* costs,
+                         usearch_outcome_t* outcome) {
+    if (!costs) return false;
+    if (reject_if(!costs->similarities, usearch_status_invalid_argument_k, "Costs need similarities", outcome))
         return true;
-    return reject_if(alignment_metric(metric) && (!weights || !weights->substitution_matrix),
-                     usearch_status_config_mismatch_k, "An alignment kind needs a substitution matrix", outcome);
+    return reject_if(metric == usearch_sequence_metric_utf8_containment_k, usearch_status_config_mismatch_k,
+                     "A containment takes no costs", outcome);
 }
 
 /** Writes @p shard's whole image into @p blob; false once @p outcome records why not. */
@@ -487,11 +646,10 @@ static bool serialize_shard(sequence_index_t const& shard, std::vector<std::byte
 
 /** A new handle holding the checkpoint in @p blob, or null once the outcome records why not. */
 template <typename index_type_>
-static index_type_* open_checkpoint(util::bytes_view_t blob, usearch_sequence_weights_t const* weights,
-                                    usearch_outcome_t* outcome) {
+static index_type_* open_checkpoint(util::bytes_view_t blob, usearch_outcome_t* outcome) {
     index_type_* const index = new (std::nothrow) index_type_();
     if (reject_if(!index, usearch_status_out_of_memory_k, "The handle could not be allocated", outcome)) return nullptr;
-    if (read_from(*index, blob, outcome) && !reject_weights(index->options.metric, weights, outcome)) return index;
+    if (read_from(*index, blob, outcome)) return index;
     delete index;
     return nullptr;
 }
@@ -511,10 +669,9 @@ extern "C" {
 
 char const* usearch_sequence_metric_name(usearch_sequence_metric_t metric) {
     switch (metric) {
-    case usearch_sequence_metric_levenshtein_bytes_k: return "levenshtein";
-    case usearch_sequence_metric_levenshtein_utf8_k: return "levenshtein-utf8";
-    case usearch_sequence_metric_needleman_wunsch_k: return "needleman-wunsch";
-    case usearch_sequence_metric_overlap_k: return "overlap";
+    case usearch_sequence_metric_protein_alignment_k: return "protein-alignment";
+    case usearch_sequence_metric_dna_overlap_k: return "dna-overlap";
+    case usearch_sequence_metric_utf8_containment_k: return "utf8-containment";
     case usearch_sequence_metric_unknown_k: return "unknown";
     default: return "unrecognized";
     }
@@ -522,9 +679,10 @@ char const* usearch_sequence_metric_name(usearch_sequence_metric_t metric) {
 
 usearch_status_t usearch_sequence_metric_from_name(usearch_bytes_view_t name, usearch_sequence_metric_t* metric) {
     if (named(name, "unknown")) return *metric = usearch_sequence_metric_unknown_k, usearch_status_success_k;
-    for (int code = usearch_sequence_metric_levenshtein_bytes_k; code <= usearch_sequence_metric_overlap_k; ++code)
-        if (named(name, usearch_sequence_metric_name(static_cast<usearch_sequence_metric_t>(code))))
-            return *metric = static_cast<usearch_sequence_metric_t>(code), usearch_status_success_k;
+    for (usearch_sequence_metric_t const known :
+         {usearch_sequence_metric_protein_alignment_k, usearch_sequence_metric_dna_overlap_k,
+          usearch_sequence_metric_utf8_containment_k})
+        if (named(name, usearch_sequence_metric_name(known))) return *metric = known, usearch_status_success_k;
     return usearch_status_invalid_argument_k;
 }
 
@@ -533,31 +691,32 @@ void usearch_sequence_init_ram(usearch_sequence_init_ram_t* arguments) {
     *arguments->index = nullptr;
     if (reject_ceiling(arguments->ram.cpu_class_ceiling, outcome)) return;
     usearch_sequence_metric_t const metric = arguments->metric;
-    usearch_sequence_weights_t const* const weights = arguments->weights;
+    usearch_sequence_costs_t const* const costs = arguments->costs;
     if (reject_if(!known_metric(metric), usearch_status_unknown_kind_k, "The stand-in does not implement that metric",
                   outcome))
         return;
-    if (reject_weights(metric, weights, outcome)) return;
-    std::span<std::size_t const> const widths {arguments->window_widths,
-                                               arguments->window_widths ? arguments->window_widths_count : 0};
-    if (reject_if((metric == usearch_sequence_metric_overlap_k) == widths.empty(), usearch_status_config_mismatch_k,
-                  "The overlap kind needs window widths, and only it takes any", outcome))
-        return;
-    if (reject_if(std::find(widths.begin(), widths.end(), 0u) != widths.end(), usearch_status_invalid_argument_k,
-                  "A window is empty", outcome))
-        return;
+    if (reject_costs(metric, costs, outcome) || reject_sketch_bytes(metric, arguments->sketch_bytes, outcome)) return;
     usearch_sequence_index_handle_t* const index = new (std::nothrow) usearch_sequence_index_handle_t();
     if (reject_if(!index, usearch_status_out_of_memory_k, "The handle could not be allocated", outcome)) return;
     index->options.metric = metric;
-    index->options.window_widths.assign(widths.begin(), widths.end());
     index->options.connectivity = arguments->connectivity ? arguments->connectivity : util::connectivity_16_k;
+    index->options.sketch_bytes = arguments->sketch_bytes;
     index->options.values_per_key = arguments->values_per_key;
-    if (weights) {
-        // Copied rather than viewed, so a binding whose matrix dies after this call still scores.
-        index->options.substitution.assign(weights->substitution_matrix,
-                                           weights->substitution_matrix + alphabet_k * alphabet_k);
-        index->options.gap = weights->gap;
+    // Copied rather than viewed, so a binding whose tables die after this call still scores.
+    std::vector<util::i8_t>& similarities = index->options.similarities;
+    if (costs) {
+        similarities.assign(costs->similarities, costs->similarities + alphabet_k * alphabet_k);
+        index->options.gap = costs->gap;
     }
+    else if (metric != usearch_sequence_metric_utf8_containment_k) {
+        similarities.resize(alphabet_k * alphabet_k);
+        us::sequence::byte_similarities_span_t const own {similarities.data(), alphabet_k * alphabet_k};
+        bool const dna = metric == usearch_sequence_metric_dna_overlap_k;
+        if (dna) us::sequence::dna_similarities(own);
+        else us::sequence::protein_similarities(own);
+        index->options.gap = dna ? us::sequence::dna_gap_k : us::sequence::protein_gap_k;
+    }
+    if (!fold_costs(index->options, outcome)) return delete index;
     index->shard_capacity = arguments->ram.shard_capacity;
     *arguments->index = index;
 }
@@ -588,9 +747,7 @@ void usearch_sequence_load_ram(usearch_sequence_load_ram_t* arguments) {
     if (!read_file(arguments->path, blob, outcome)) return;
     usearch_sequence_index_handle_t* const index = open_parts<usearch_sequence_index_handle_t>(
         blob, arguments->path,
-        [&](util::bytes_view_t part) {
-            return open_checkpoint<usearch_sequence_index_handle_t>(part, arguments->weights, outcome);
-        },
+        [&](util::bytes_view_t part) { return open_checkpoint<usearch_sequence_index_handle_t>(part, outcome); },
         outcome);
     if (!index) return;
     index->options.values_per_key = arguments->values_per_key;
@@ -601,7 +758,7 @@ void usearch_sequence_load_ram(usearch_sequence_load_ram_t* arguments) {
 void usearch_sequence_load_ram_buffer(usearch_sequence_load_ram_buffer_t* arguments) {
     load_ram_buffer<usearch_sequence_load_ram_buffer>(
         arguments, [&](util::bytes_view_t blob, usearch_outcome_t* outcome) {
-            return open_checkpoint<usearch_sequence_index_handle_t>(blob, arguments->weights, outcome);
+            return open_checkpoint<usearch_sequence_index_handle_t>(blob, outcome);
         });
 }
 
@@ -623,9 +780,7 @@ void usearch_sequence_view_ram(usearch_sequence_view_ram_t* arguments) {
     // its zero cost.
     usearch_sequence_index_handle_t* const index = open_parts<usearch_sequence_index_handle_t>(
         served.view(), arguments->path,
-        [&](util::bytes_view_t part) {
-            return open_checkpoint<usearch_sequence_index_handle_t>(part, arguments->weights, outcome);
-        },
+        [&](util::bytes_view_t part) { return open_checkpoint<usearch_sequence_index_handle_t>(part, outcome); },
         outcome);
     if (!index) return;
     index->served = std::move(served);
@@ -642,9 +797,7 @@ void usearch_sequence_view_nvme(usearch_sequence_view_nvme_t* arguments) {
     // Serves the drives' checkpoint as the RAM view does, mirroring only the residency's refusals.
     usearch_sequence_index_handle_t* const index = open_parts<usearch_sequence_index_handle_t>(
         served.view(), arguments->path,
-        [&](util::bytes_view_t part) {
-            return open_checkpoint<usearch_sequence_index_handle_t>(part, arguments->weights, outcome);
-        },
+        [&](util::bytes_view_t part) { return open_checkpoint<usearch_sequence_index_handle_t>(part, outcome); },
         outcome);
     if (!index) return;
     index->served = std::move(served);
@@ -685,10 +838,10 @@ void usearch_sequence_describe(usearch_sequence_describe_t* arguments) {
     // Held shared like every other reader, so a size taken beside an insertion is not a data race.
     std::shared_lock readers(index.mutex);
     *arguments->description = {
-        {index.options.metric, index.options.connectivity},
+        {index.options.metric, index.options.connectivity, index.options.classes, index.options.sketch_bytes},
         index.entries.size(),
         index.entries.capacity(),
-        payload_extent(index, index.entries.size()) + index.options.substitution.size(),
+        payload_extent(index, index.entries.size()) + index.options.similarities.size(),
         usearch_cpu_class_serial_k,
         usearch_gpu_class_unknown_k,
         index.shards(),
@@ -775,6 +928,10 @@ void usearch_sequence_search(usearch_sequence_search_t* arguments) {
     if (reject_tape(queries, count, outcome)) return;
     if (reject_bytes(queries, outcome)) return;
     if (reject_traversal(arguments->traversal, outcome)) return;
+    usearch_matches_view_t const* const hints = arguments->hints;
+    if (reject_if(hints && count && (!hints->counts || (hints->columns && !hints->keys)),
+                  usearch_status_invalid_argument_k, "The hints must name keys and counts", outcome))
+        return;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
                                                       {queries.data, offsets_address(queries)}, outcome);
     matches_outputs_t outputs {};

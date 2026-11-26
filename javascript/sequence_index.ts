@@ -2,8 +2,8 @@
  *  @file javascript/sequence_index.ts
  *  @author Ash Vardanian
  *  @date November 16, 2026
- *  @brief Similarity search over byte sequences under edit distances and alignments, and the
- *      receivers its verbs run through.
+ *  @brief Similarity search over sequences: protein alignments, DNA overlaps and UTF-8
+ *      containments, and the receivers its verbs run through.
  */
 import {
   Completion,
@@ -53,33 +53,56 @@ import {
   denseCall,
 } from "./dense_index";
 
-/** How a sequence index scores two sequences, spelled as the library names each kind.
+/** What the sequences are and the score ranking them, spelled as the library names each metric.
+ *  Every metric stores a sequence folded, and `get` returns the stored form, never the bytes an
+ *  insertion passed: packed class codes for a protein alignment, one class code a byte for a DNA
+ *  overlap, and case-folded UTF-8 for a containment.
  *  @enum {string}
  *  @readonly */
 export enum SequenceMetric {
-  /** Single-byte insertions, deletions and substitutions, every edit costing one. */
-  Levenshtein = "levenshtein",
-  /** The same edits over decoded UTF-8 code points. */
-  LevenshteinUtf8 = "levenshtein-utf8",
-  /** Global alignment under a substitution matrix and a flat gap cost. */
-  NeedlemanWunsch = "needleman-wunsch",
-  /** The share of the larger window set the other side misses. */
-  Overlap = "overlap",
+  /** Global alignment of proteins with linear gap costs: BLOSUM62 with a gap of 7 over the 20
+   *  amino acids unless the index names its own costs. Both sequences are aligned end to end over
+   *  the classes the costs fold bytes into, and every unaligned symbol is charged the gap cost, so
+   *  a score is quadratic in time. A stored sequence reads back as its class codes, five bits
+   *  apiece, little-endian behind one byte counting the slots the last bytes leave unused. */
+  ProteinAlignment = "protein-alignment",
+  /** Shifted overlap of DNA or RNA: the cost of aligning the two sequences where one slides over
+   *  the other, at the shift most windows vote for, on either strand. Bytes fold into the four
+   *  classes of A, C, G and T in either case, U read as T, under costs that charge a transition
+   *  half a transversion and a gap of 2, unless the index names its own. The query also scores as
+   *  its reverse complement, and the lower distance counts. A stored sequence reads back as its
+   *  class codes, one byte apiece. */
+  DnaOverlap = "dna-overlap",
+  /** Window containment of UTF-8 text: the share of the query's distinct windows the stored side
+   *  lacks, whatever the case. A text is case-folded as Unicode folds it before it is stored or
+   *  scored, which may lengthen it up to three times. Asymmetric, and exact at every radius. A
+   *  stored text reads back folded. Takes no costs. */
+  Utf8Containment = "utf8-containment",
+}
+
+/** How alike two bytes are and the cost of leaving one unaligned, where an index scores by other
+ *  costs than its metric's own. A DNA overlap needs costs folding bytes into exactly the four
+ *  classes of A, C, G and T. */
+export interface SequenceCosts {
+  /** Row-major 256 × 256 signed scores between raw bytes, folded into at most 32 classes of bytes
+   *  sharing their rows and columns; viewed for the call, and recorded by checkpoints so loads
+   *  and views take none. */
+  similarities?: Int8Array;
+  /** Cost of one unaligned symbol, beside the similarities. */
+  gap?: number;
 }
 
 /** The scoring every sequence index freezes at initialization, whatever its residency. */
 export interface SequenceOptions {
-  /** How sequences are scored; defaults to `levenshtein`. */
+  /** What the sequences are and the score ranking them; defaults to `protein-alignment`. */
   metric?: SequenceMetric;
-  /** Row-major 256 × 256 signed scores over bytes, which Needleman-Wunsch alone takes; viewed
-   *  for the call. */
-  substitutionMatrix?: Int8Array;
-  /** Cost of one unaligned symbol, beside the substitution matrix. */
-  gap?: number;
-  /** Window widths in bytes, which the overlap kind alone takes. */
-  windowWidths?: number[];
+  /** The costs to score by; absent for the metric's own, and refused for `utf8-containment`. */
+  costs?: SequenceCosts;
   /** Neighbors per node; absent derives it. */
   connectivity?: number;
+  /** Bytes of the sketch in front of each stored sequence, a multiple of four; absent takes the
+   *  metric's default, and `dna-overlap` keeps none. */
+  sketchBytes?: number;
   /** Entries one key may hold; absent is unbounded. */
   valuesPerKey?: number;
   /** The newest CPU class dispatch may pick, by canonical name; absent means no ceiling. */
@@ -88,16 +111,8 @@ export interface SequenceOptions {
   gpuClassCeiling?: string;
 }
 
-/** The weights a loaded or viewed Needleman-Wunsch checkpoint scores with, never recorded in it. */
-export interface SequenceWeights {
-  /** Row-major 256 × 256 signed scores over bytes. */
-  substitutionMatrix?: Int8Array;
-  /** Cost of one unaligned symbol. */
-  gap?: number;
-}
-
 /** Optional settings of a load from a path or a buffer. */
-export interface SequenceLoadConfig extends SequenceWeights {
+export interface SequenceLoadConfig {
   /** The workers the read fans out over; absent reads on the calling thread. */
   executor?: Executor;
   /** NUMA node IDs for a RAM load, or CUDA ordinals for a VRAM one; absent derives them. */
@@ -109,7 +124,7 @@ export interface SequenceLoadConfig extends SequenceWeights {
 }
 
 /** Optional settings of a view from NVMe drives. */
-export interface SequenceViewNvmeConfig extends SequenceWeights {
+export interface SequenceViewNvmeConfig {
   /** The NVMe executor whose rings read the checkpoint. */
   executor?: Executor;
   /** The drives to serve the parts from; absent serves each where its manifest points. */
@@ -118,12 +133,16 @@ export interface SequenceViewNvmeConfig extends SequenceWeights {
   cpuClassCeiling?: string;
 }
 
-/** The metric and connectivity a checkpoint froze. */
+/** The metric and geometry a checkpoint froze. */
 export interface SequenceMetadata {
   /** How the checkpoint scores sequences. */
   metric: SequenceMetric;
   /** Neighbors per node the graph was built with. */
   connectivity: number;
+  /** Classes the recorded costs folded bytes into; zero for a containment. */
+  classes: number;
+  /** Bytes of the sketch in front of each stored sequence; zero when the metric keeps none. */
+  sketchBytes: number;
 }
 
 /** A live index's frozen metadata and current counters, each read once. */
@@ -190,12 +209,13 @@ function sequencesOf(sequences: SequencesLike): Tape {
   return sequences instanceof Tape ? sequences : Tape.ofSequences(sequences);
 }
 
-function weightsOf(weights: SequenceWeights): [Int8Array | undefined, number | undefined] {
-  return [weights.substitutionMatrix, weights.gap];
-}
-
 function metadataOf(read: CompiledSequenceMetadata): SequenceMetadata {
-  return { metric: read.metric as SequenceMetric, connectivity: read.connectivity };
+  return {
+    metric: read.metric as SequenceMetric,
+    connectivity: read.connectivity,
+    classes: read.classes,
+    sketchBytes: read.sketchBytes,
+  };
 }
 
 const answerTape = (outputs: CompiledTape): Tape => new Tape(outputs.data as Uint8Array, outputs.offsets, Scalar.U8);
@@ -733,11 +753,11 @@ export class SequenceIndex implements Disposable {
     return new SequenceIndex(
       indexSeal,
       compiled.CompiledSequenceIndex.initRam(
-        options.metric ?? SequenceMetric.Levenshtein,
-        options.substitutionMatrix,
-        options.gap,
-        options.windowWidths,
+        options.metric ?? SequenceMetric.ProteinAlignment,
+        options.costs?.similarities,
+        options.costs?.gap,
         options.connectivity,
+        options.sketchBytes,
         options.valuesPerKey,
         memoryDomains,
         options.cpuClassCeiling,
@@ -754,11 +774,11 @@ export class SequenceIndex implements Disposable {
     return new SequenceIndex(
       indexSeal,
       compiled.CompiledSequenceIndex.initVram(
-        options.metric ?? SequenceMetric.Levenshtein,
-        options.substitutionMatrix,
-        options.gap,
-        options.windowWidths,
+        options.metric ?? SequenceMetric.ProteinAlignment,
+        options.costs?.similarities,
+        options.costs?.gap,
         options.connectivity,
+        options.sketchBytes,
         options.valuesPerKey,
         devices,
         options.gpuClassCeiling,
@@ -776,7 +796,6 @@ export class SequenceIndex implements Disposable {
         config.placement,
         config.valuesPerKey,
         config.classCeiling,
-        ...weightsOf(config),
       ),
     );
   }
@@ -791,7 +810,6 @@ export class SequenceIndex implements Disposable {
         config.placement,
         config.valuesPerKey,
         config.classCeiling,
-        ...weightsOf(config),
       ),
     );
   }
@@ -806,7 +824,6 @@ export class SequenceIndex implements Disposable {
         config.placement,
         config.valuesPerKey,
         config.classCeiling,
-        ...weightsOf(config),
       ),
     );
   }
@@ -821,30 +838,20 @@ export class SequenceIndex implements Disposable {
         config.placement,
         config.valuesPerKey,
         config.classCeiling,
-        ...weightsOf(config),
       ),
     );
   }
 
   /** Serves a checkpoint in place through a memory mapping, as a read-only index. */
-  static viewRam(path: string, weights: SequenceWeights & { cpuClassCeiling?: string } = {}): SequenceIndex {
-    return new SequenceIndex(
-      indexSeal,
-      compiled.CompiledSequenceIndex.viewRam(path, weights.cpuClassCeiling, ...weightsOf(weights)),
-    );
+  static viewRam(path: string, config: { cpuClassCeiling?: string } = {}): SequenceIndex {
+    return new SequenceIndex(indexSeal, compiled.CompiledSequenceIndex.viewRam(path, config.cpuClassCeiling));
   }
 
   /** Serves a checkpoint in place from NVMe drives, as a read-only index. */
   static viewNvme(path: string, config: SequenceViewNvmeConfig = {}): SequenceIndex {
     return new SequenceIndex(
       indexSeal,
-      compiled.CompiledSequenceIndex.viewNvme(
-        path,
-        config.executor,
-        config.paths,
-        config.cpuClassCeiling,
-        ...weightsOf(config),
-      ),
+      compiled.CompiledSequenceIndex.viewNvme(path, config.executor, config.paths, config.cpuClassCeiling),
     );
   }
 

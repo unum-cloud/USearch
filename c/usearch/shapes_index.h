@@ -925,8 +925,7 @@ typedef struct usearch_shapes_search_t {
      *  it. */
     size_t expansion_factor;
 
-    /** How entries are reached: a walk, the default, or an exact scan of every entry, on RAM and
-     *  NVMe. */
+    /** How entries are reached: a walk, the default, or an exact scan of every entry. */
     usearch_traversal_t traversal;
 
     /** The @b optional predicate, asked about a batch of candidates at a time. */
@@ -963,8 +962,8 @@ typedef struct usearch_shapes_search_t {
  *
  *  @par Statuses:
  *  - @c usearch_status_unknown_kind_k A @c traversal other than a walk or a scan.
- *  - @c usearch_status_unsupported_k A scan of a VRAM handle, a @c predicate on one, or @c hints
- *    on any handle but a RAM one.
+ *  - @c usearch_status_unsupported_k A @c predicate on a VRAM handle, or @c hints on any handle but
+ *    a RAM one.
  *  - @c usearch_status_invalid_argument_k @c hints naming no counts, or columns but no keys.
  *  - @c usearch_status_shape_mismatch_k A hinted query counts more keys than the hints' columns.
  */

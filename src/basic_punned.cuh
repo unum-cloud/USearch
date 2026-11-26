@@ -119,6 +119,14 @@ inline std::size_t decimal_in(std::string_view text) noexcept {
     return value;
 }
 
+/** The value of the hexadecimal @p digit a checkpoint's metadata spells, or minus one for any
+ *  other character. */
+constexpr int hexadecimal_in(char digit) noexcept {
+    if (digit >= '0' && digit <= '9') return digit - '0';
+    if (digit >= 'a' && digit <= 'f') return digit - 'a' + 10;
+    return -1;
+}
+
 #pragma endregion Crossings
 
 #pragma region Variant Tables
@@ -155,6 +163,12 @@ inline util::expected<counted_tape_t> counted_tape_of(
     auto const [offsets, status] = offsets_of(tape, count, pages);
     return {{tape.data, offsets, tape.scalar}, status};
 }
+
+/** Folds the case of every text of @p texts back to back on @p memory, on @p threads where there
+ *  are any and on the caller otherwise. */
+using fold_texts_t = util::expected<counted_tape_t> (*)(counted_tape_t texts,
+                                                        util::growing_arena<util::forkunion_allocator_t>& memory,
+                                                        util::ram_executor_t* threads) noexcept;
 
 /** Entry @p entry of a byte tape, as the view every string type converts from. */
 inline std::string_view chars_at(counted_tape_t const& tape, std::size_t entry) noexcept {
@@ -214,7 +228,7 @@ struct basic_verbs {
     /** The scalar the variant stores values in, or unknown where it stores any. */
     nk_dtype_t dtype;
 
-    /** The kind the variant's kernels fix, as the modality's C enumerator, or zero where it scores
+    /** The metric the variant fixes, as the modality's enumerator, or zero where it scores by
      *  any. */
     util::u32_t metric;
 
@@ -247,7 +261,8 @@ struct basic_verbs {
     /** Whether the variant at @p source shares the geometry of the one at @p variant. */
     bool (*matches)(void const* variant, void const* source) noexcept;
 
-    // Writes
+    /** The case folding of the variant's class, null for a modality storing no text. */
+    fold_texts_t fold_texts;
 
     /** Whether the variant takes writes, which a view refuses with @c read_only_k. */
     util::status_t (*serves_writes)(void const* variant) noexcept;
@@ -382,46 +397,50 @@ bool make_call_executor(punned_basic_index<traits_type_, residency_> const& punn
 
 #pragma region Sequence Traits
 
-/** The checkpoint token of one sequence kind, spelled as the SafeGraphs registry spells it; empty
- *  for the kinds the engine refuses. */
+/** The checkpoint token of one sequence metric, spelled as the SafeGraphs registry spells it;
+ *  empty for the metrics the engine refuses. */
 inline std::string_view token_of(usearch_sequence_metric_t metric) noexcept {
     switch (metric) {
-    case usearch_sequence_metric_levenshtein_bytes_k: return "levenshtein";
-    case usearch_sequence_metric_levenshtein_utf8_k: return "levenshtein-utf8";
-    case usearch_sequence_metric_overlap_k: return "overlap";
-    case usearch_sequence_metric_needleman_wunsch_k: return "needleman-wunsch";
+    case usearch_sequence_metric_protein_alignment_k: return "protein-alignment";
+    case usearch_sequence_metric_dna_overlap_k: return "dna-overlap";
+    case usearch_sequence_metric_utf8_containment_k: return "utf8-containment";
     default: return {};
     }
 }
 
-/** The sequence kind a checkpoint token names, or @c unknown_k. */
+/** The sequence metric a checkpoint token names, or @c unknown_k. */
 inline usearch_sequence_metric_t sequence_metric_of(std::string_view token) noexcept {
     for (usearch_sequence_metric_t metric :
-         {usearch_sequence_metric_levenshtein_bytes_k, usearch_sequence_metric_levenshtein_utf8_k,
-          usearch_sequence_metric_overlap_k, usearch_sequence_metric_needleman_wunsch_k})
+         {usearch_sequence_metric_protein_alignment_k, usearch_sequence_metric_dna_overlap_k,
+          usearch_sequence_metric_utf8_containment_k})
         if (token == token_of(metric)) return metric;
     return usearch_sequence_metric_unknown_k;
 }
 
-/** The kind, window widths, recorded costs and connectivity a sequence handle freezes, as an init
+/** The metric, recorded costs, connectivity and sketch bytes a sequence handle freezes, as an init
  *  or a checkpoint states them; every variant holds one. */
 struct sequence_geometry_t {
     usearch_sequence_metric_t metric = usearch_sequence_metric_unknown_k;
 
-    /** The window widths the overlap kind hashes, in bytes; empty for every other kind. */
-    util::growing_buffer<std::size_t, util::forkunion_allocator_t> window_widths {
-        util::forkunion_allocator_t {util::no_memory_domain_k}};
-
     /** The folded substitution costs a checkpoint recorded, one hexadecimal digit per entry row by
-     *  row, which a freeze unfolds; empty for a fresh index, whose weights a freeze folds. */
+     *  row, which a freeze unfolds; empty for a fresh index, whose costs a freeze folds. */
     util::growing_buffer<char, util::forkunion_allocator_t> substitution_costs {
         util::forkunion_allocator_t {util::no_memory_domain_k}};
 
     /** The gap cost a checkpoint recorded beside its substitution costs. */
     std::size_t gap_cost = 0;
 
+    /** The class code of every byte a checkpoint recorded beside its substitution costs, one digit
+     *  of base 32 per byte, which a freeze unfolds. */
+    util::growing_buffer<char, util::forkunion_allocator_t> byte_classes {
+        util::forkunion_allocator_t {util::no_memory_domain_k}};
+
     /** Neighbors per node the insertions select; zero until frozen, which takes the default. */
     std::size_t connectivity = 0;
+
+    /** Bytes of the sketch in front of each stored sequence; zero until frozen, which takes the
+     *  metric's default. */
+    std::size_t sketch_bytes = 0;
 };
 
 /** Whether @p sequences holds @p count byte strings; false once @p outcome records why not. */
@@ -444,8 +463,12 @@ struct sequence_variants_of {
     using type = type_list<>;
 };
 
-/** What the sequence verbs differ in: Levenshtein, overlap and Needleman-Wunsch kinds over u8
- *  strings. */
+/** The fold of the newest CPU class this machine runs, picked once on the CPU ladder for a
+ *  variant whose own class is a GPU's; defined in the dispatch unit. */
+fold_texts_t host_fold_texts() noexcept;
+
+/** What the sequence verbs differ in: protein alignment, DNA overlap and UTF-8 containment over
+ *  u8 strings. */
 struct sequence_traits_t {
     using geometry_t = sequence_geometry_t;
     using description_t = usearch_sequence_index_description_t;
@@ -461,8 +484,9 @@ struct sequence_traits_t {
     /** Where a get writes its strings. */
     using get_outputs_t = usearch_tape_view_t*;
 
-    /** What a variant adopts past its geometry: the weights an alignment kind folds, or null. */
-    using geometry_extras_t = usearch_sequence_weights_t const*;
+    /** What a variant adopts past its geometry: the costs whose similarities it folds, or null
+     *  for the metric's own. */
+    using geometry_extras_t = usearch_sequence_costs_t const*;
 
     /** The variants each class unit compiles per residency. */
     template <vendored_residency_t residency_, auto class_>
@@ -476,87 +500,102 @@ struct sequence_traits_t {
     using amd_gpu_ladder_t = amd_ladder_t;
     using apple_gpu_ladder_t = gpu_ladder<gpu_class_t::apple_metal7_k>;
 
-    /** Takes the kind, widths and connectivity an init states, keeping the widths; false once
-     *  @p outcome records why not. */
+    /** Takes the metric, the connectivity and the sketch bytes an init states. */
     template <typename arguments_type_>
-    static bool state(arguments_type_ const& arguments, geometry_t& geometry, usearch_outcome_t* outcome) noexcept {
-        if (arguments.window_widths_count && !arguments.window_widths)
-            return propagate_error(usearch_status_invalid_argument_k, outcome, "The window widths must not be null");
+    static bool state(arguments_type_ const& arguments, geometry_t& geometry, usearch_outcome_t*) noexcept {
         geometry.metric = arguments.metric;
         geometry.connectivity = arguments.connectivity;
-        if (failed(geometry.window_widths.reserve_exactly(arguments.window_widths_count)))
-            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to keep the widths");
-        for (std::size_t window = 0; window != arguments.window_widths_count; ++window)
-            geometry.window_widths.push_back_reserved(arguments.window_widths[window]);
+        geometry.sketch_bytes = arguments.sketch_bytes;
         return true;
     }
 
-    /** Reads the kind, widths, costs and connectivity @p checkpoint recorded, at a path or in a
-     *  buffer: the widths spelled as decimals between commas, the costs kept for a freeze. */
+    /**
+     *  @brief Reads the metric, costs, byte classes, connectivity and sketch bytes @p checkpoint
+     *      recorded, at a path or in a buffer, the costs and classes kept for a freeze.
+     *
+     *  @par Statuses:
+     *  - @c malformed_k A field recorded twice, costs beside a containment, or an alignment or an
+     *    overlap recording none.
+     */
     template <typename checkpoint_type_>
     static util::status_t recall(checkpoint_type_ checkpoint, geometry_t& geometry) noexcept {
         util::status_t fields_status = util::status_code_t::success_k;
         auto per_field = [&](util::safegraphs_custom_field_t field) noexcept {
+            // The first field that fails decides, and one met twice would overrun its buffer.
+            if (failed(fields_status)) return;
             if (field.key == "connectivity") geometry.connectivity = decimal_in(field.value);
+            else if (field.key == "sketch_bytes") geometry.sketch_bytes = decimal_in(field.value);
             else if (field.key == "gap_cost") geometry.gap_cost = decimal_in(field.value);
             else if (field.key == "substitution_costs") {
-                fields_status = geometry.substitution_costs.reserve_exactly(field.value.size());
+                fields_status = geometry.substitution_costs.empty()
+                                    ? geometry.substitution_costs.reserve_exactly(field.value.size())
+                                    : util::status_t {util::status_code_t::malformed_k, "Costs recorded twice"};
                 for (char const digit : field.value)
                     if (succeeded(fields_status)) geometry.substitution_costs.push_back_reserved(digit);
             }
-            else if (field.key == "window_widths") {
-                std::size_t windows = 1;
-                for (char const character : field.value) windows += character == ',';
-                fields_status = geometry.window_widths.reserve_exactly(windows);
-                for (std::string_view rest = field.value; succeeded(fields_status) && !rest.empty();) {
-                    std::size_t const comma = rest.find(',');
-                    geometry.window_widths.push_back_reserved(decimal_in(rest.substr(0, comma)));
-                    rest = comma == std::string_view::npos ? std::string_view {} : rest.substr(comma + 1);
-                }
+            else if (field.key == "byte_classes") {
+                fields_status = geometry.byte_classes.empty()
+                                    ? geometry.byte_classes.reserve_exactly(field.value.size())
+                                    : util::status_t {util::status_code_t::malformed_k, "Byte classes recorded twice"};
+                for (char const digit : field.value)
+                    if (succeeded(fields_status)) geometry.byte_classes.push_back_reserved(digit);
             }
         };
         auto const [metadata, status] = util::safegraphs_read_index_metadata(
             checkpoint, std::allocator<util::byte_t> {}, per_field);
         geometry.metric = sequence_metric_of(metadata.metric.view());
-        return failed(status) ? status : fields_status;
+        if (failed(status)) return status;
+        if (failed(fields_status)) return fields_status;
+        bool const costed = !geometry.substitution_costs.empty();
+        if (geometry.metric != usearch_sequence_metric_unknown_k &&
+            costed == (geometry.metric == usearch_sequence_metric_utf8_containment_k))
+            return {util::status_code_t::malformed_k, "Costs recorded for a containment or missing for an alignment"};
+        return util::status_code_t::success_k;
     }
 
-    /** Refuses the kinds no CPU or GPU kit serves and the parameters a kind does not take. */
+    /** Refuses the metrics no kit serves, sketch bytes off a multiple of four or for a DNA overlap,
+     *  which keeps no sketch, costs naming no similarities, and costs for a containment, which
+     *  compares folded bytes. */
     template <typename arguments_type_>
     static bool admits(geometry_t const& geometry, arguments_type_ const& arguments,
                        usearch_outcome_t* outcome) noexcept {
-        switch (geometry.metric) {
-        case usearch_sequence_metric_levenshtein_bytes_k:
-        case usearch_sequence_metric_levenshtein_utf8_k:
-        case usearch_sequence_metric_overlap_k:
-        case usearch_sequence_metric_needleman_wunsch_k: break;
-        default: return propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown sequence metric");
-        }
-        bool const aligned = geometry.metric == usearch_sequence_metric_needleman_wunsch_k;
-        if (arguments.weights && !aligned)
-            return propagate_error(usearch_status_config_mismatch_k, outcome, "Only an alignment kind takes weights");
-        if (arguments.weights && !arguments.weights->substitution_matrix)
-            return propagate_error(usearch_status_invalid_argument_k, outcome, "The substitution matrix is null");
-        // A checkpoint recalls the costs it was built with, which weights given at load replace.
-        if (aligned && !arguments.weights && geometry.substitution_costs.empty())
-            return propagate_error(usearch_status_config_mismatch_k, outcome, "An alignment kind needs weights");
-        bool const overlap = geometry.metric == usearch_sequence_metric_overlap_k;
-        if (overlap == geometry.window_widths.empty())
-            return propagate_error(usearch_status_config_mismatch_k, outcome,
-                                   "The overlap kind needs window widths, and only it takes any");
-        for (std::size_t const width : geometry.window_widths)
-            if (!width) return propagate_error(usearch_status_invalid_argument_k, outcome, "A window is empty");
+        if (token_of(geometry.metric).empty())
+            return propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown sequence metric");
+        if (geometry.sketch_bytes % 4)
+            return propagate_error(usearch_status_config_mismatch_k, outcome, "Sketch bytes come in fours");
+        if (geometry.sketch_bytes && geometry.metric == usearch_sequence_metric_dna_overlap_k)
+            return propagate_error(usearch_status_config_mismatch_k, outcome, "A DNA overlap keeps no sketch");
+        geometry_extras_t const costs = geometry_extras_of(arguments);
+        if (!costs) return true;
+        if (!costs->similarities)
+            return propagate_error(usearch_status_invalid_argument_k, outcome, "Costs need similarities");
+        if (geometry.metric == usearch_sequence_metric_utf8_containment_k)
+            return propagate_error(usearch_status_config_mismatch_k, outcome, "A containment takes no costs");
         return true;
     }
 
-    /** The weights an init, a load or a view names, which a variant folds. */
+    /** The costs an init names, whose similarities a variant folds; loads and views unfold the
+     *  checkpoint's. */
+    static geometry_extras_t geometry_extras_of(usearch_sequence_init_ram_t const& arguments) noexcept {
+        return arguments.costs;
+    }
+    static geometry_extras_t geometry_extras_of(usearch_sequence_init_vram_t const& arguments) noexcept {
+        return arguments.costs;
+    }
     template <typename arguments_type_>
-    static geometry_extras_t geometry_extras_of(arguments_type_ const& arguments) noexcept {
-        return arguments.weights;
+    static geometry_extras_t geometry_extras_of(arguments_type_ const&) noexcept {
+        return nullptr;
+    }
+
+    /** Classes the costs @p geometry recalled span, the side of their square; zero for none. */
+    static std::size_t classes_recorded(geometry_t const& geometry) noexcept {
+        std::size_t classes = 0;
+        while (classes * classes < geometry.substitution_costs.size()) ++classes;
+        return classes;
     }
 
     static usearch_sequence_metadata_t metadata_of(geometry_t const& geometry) noexcept {
-        return {geometry.metric, geometry.connectivity};
+        return {geometry.metric, geometry.connectivity, classes_recorded(geometry), geometry.sketch_bytes};
     }
 
     static bool accepts(usearch_sequence_insert_t const& arguments, usearch_outcome_t* outcome) noexcept {

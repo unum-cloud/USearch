@@ -478,23 +478,34 @@ System.out.println(Types.version() + " built for " + Types.capabilitiesCompiled(
 
 ## Sequence Indexes
 
-A sequence index searches byte strings, UTF-8 text, DNA and proteins under edit distances and alignments.
+A sequence index searches proteins, DNA, RNA and UTF-8 text, each under the metric made for it.
 Variable-length entries cross as a `Tape`, the Apache Arrow layout: elements end to end and one more offset than entries, which `Tape.ofStrings` and `Tape.ofBytes` pack and `Tape.of` wraps a native segment in place:
 
 ```java
 try (Executor pool = Executor.forRam(new int[0], null, 0);
         SequenceIndex words = SequenceIndex.initRam(
-                new SequenceOptions().metric(SequenceMetric.LEVENSHTEIN_UTF8), new int[0]);
+                new SequenceOptions().metric(SequenceMetric.UTF8_CONTAINMENT), new int[0]);
         Arena arena = new Arena(pool)) {
     Key[] keys = {Key.of(1), Key.of(2), Key.of(3)};
-    words.on(pool).insert(keys, Tape.ofStrings("kitten", "sitting", "mitten"));
-    Matches matches = words.on(pool).search(Tape.ofStrings("sitting"), 1, arena);
+    words.on(pool).insert(keys, Tape.ofStrings("Kitten", "Sitting", "Mitten"));
+    Matches matches = words.on(pool).search(Tape.ofStrings("SITTING"), 1, arena);
     SequenceKeyStats stats = words.count(Key.of(2));
     System.out.println(matches.key(0, 0) + " at " + matches.score(0, 0) + ", " + stats.totalBytes() + " bytes");
 }
 ```
 
-`NEEDLEMAN_WUNSCH` takes `SequenceWeights`, a 256 × 256 substitution matrix with a gap cost, and `OVERLAP` takes `windowWidths`; every load names the weights again, since no checkpoint records them.
+| Metric | Sequences | Score | Default costs |
+| :-- | :-- | :-- | :-- |
+| `PROTEIN_ALIGNMENT` | proteins | global alignment with linear gaps | BLOSUM62, gap 7 |
+| `DNA_OVERLAP` | DNA and RNA | shifted overlap, also as the reverse complement | transition half a transversion, gap 2 |
+| `UTF8_CONTAINMENT` | UTF-8 text | share of the query's windows the stored side lacks, case-folded | none |
+
+`SequenceOptions.costs` takes a `SequenceCosts`, 256 × 256 similarities between raw bytes with a gap cost; `null` keeps the metric's own, and a containment refuses any.
+`SequenceOptions.sketchBytes` sets the bytes of the sketch in front of each stored sequence, a multiple of four, where zero takes the metric's default of 512 for protein alignment and UTF-8 containment.
+A DNA overlap keeps no sketch and refuses any.
+Inputs are raw bytes, which the library folds into classes itself, so there is nothing to pack.
+A checkpoint records the classes and costs, so loads and views take none.
+Stored sequences read back folded: packed class codes for proteins, class bytes for DNA, and case-folded UTF-8 for text.
 `get` writes a key's sequences into an arena as a `Tape`, and `count` reports a key's total and largest byte lengths.
 `SequenceMetric.fromName` reads back the spelling `toString` gives, refusing any other with `Status.INVALID_ARGUMENT`.
 The verbs, receivers, plans and reports are the dense ones: `refine`, `reshard` and their `SequenceRefinePlan` and `SequenceReshardPlan`, cursors and `sample`, all reporting through `RefineReport` and `DenseTraversalStats`.

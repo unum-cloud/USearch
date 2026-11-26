@@ -2900,7 +2900,7 @@ struct ram_index {
         /** The phase the plan is in. */
         phase_t phase() const noexcept { return phase_; }
 
-        /** The position of the round's phase in hand among its six, from the opening health check
+        /** The position of the round's phase in hand among its seven, from the opening health check
          *  to the closing one; zero outside a round's phases. */
         std::size_t ordinal() const noexcept { return round_ordinal(phase_, swept_after_); }
 
@@ -3745,7 +3745,7 @@ struct ram_index {
         /** The phase the plan is in: a move's, then the bound target's round's. */
         phase_t phase() const noexcept { return moving() ? moves_ : rounds_.phase(); }
 
-        /** Where the round's phase sits among its six; zero in the moves. */
+        /** Where the round's phase sits among its seven; zero in the moves. */
         std::size_t ordinal() const noexcept { return moving() ? 0 : rounds_.ordinal(); }
 
         /** Units of the round's phase done and in all; none in the moves, which report nothing. */

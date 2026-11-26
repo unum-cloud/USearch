@@ -322,6 +322,14 @@ enum class vram_kernel_t : u32_t {
     /** Walks the graph for each query and ranks its matches. */
     search_k,
 
+    /** Walks the graph for each query by its sketch and writes its nearest nodes as its search's
+     *  seeds. */
+    seed_k,
+
+    /** Scores every published node for each query, a range of nodes per walker, and ranks its
+     *  matches exactly. */
+    scan_k,
+
     /** Moves nodes' neighbor IDs between ID spaces, packing the survivors. */
     rebase_links_k,
 
@@ -458,11 +466,32 @@ enum class vram_kernel_t : u32_t {
     /** Stores a load's saved values into a basic graph's tape where a kit converts them. */
     load_values_k,
 
-    /** Raises a load's span word to the widest span its stored values prepare into. */
-    size_spans_k,
+    /** Fills the sketch in front of every sequence of an insert's staged values. */
+    sketch_values_k,
 
     /** The number of kernels, sizing the tables of loaded kernels. */
     count_k,
+};
+
+/** The role @p kernel scores in: a search for the walk ranking a query's matches, a build for the
+ *  walks, merges and rounds that link the graph. */
+constexpr score_role_t vram_kernel_role(vram_kernel_t kernel) noexcept {
+    return kernel == vram_kernel_t::search_k || kernel == vram_kernel_t::scan_k ? score_role_t::search_k
+                                                                                : score_role_t::build_k;
+}
+
+/** What a sketch phase reads: value @c v of the batch spans
+ *  @b [offsets[v]+shift,offsets[v+1]+shift) of @c values, and @c tables is the kit's own. An
+ *  insert's stored values take their sketches of @c sketch_bytes in front of them; a search's bare
+ *  queries take them in rows of @c sketches, a sketch apart. */
+struct vram_sketch_t {
+    byte_t* values = nullptr;
+    u64_t const* offsets = nullptr;
+    u64_t shift = 0;
+    u32_t count = 0;
+    u32_t sketch_bytes = 0;
+    byte_t const* tables = nullptr;
+    byte_t* sketches = nullptr;
 };
 
 /** The Itanium spelling of @ref unum::usearch::utilities::vram_kernel_t, a sibling of every
@@ -608,11 +637,11 @@ struct itanium_parameter_t {
  *  @c E for the scope's own struct and as @c NS0_5basic , the name's length, the name and @c E for
  *  basic's - with @c I<T>E before the closing @c E when it reuses the kernel's template argument,
  *  @c T_ for the first and @c T<n-1>_ for the n-th. So
- *  @c sequence::cuda_kernel<vram_kernel_t::search_k, sz_cap_cuda_k, sz_levenshtein_bytes_k, 2,
- *  u32_t, 4> over @c basic::vram_arguments<u32_t> spells, broken here at its components:
- *  @c _ZN4unum7usearch8sequence11cuda_kernel @c I @c LNS0_9utilities13vram_kernel_tE3E
- *  @c Lm281474976710656E @c L23sz_levenshtein_symbol_t0E @c Lj2E @c j @c Lj4E @c EEv
- *  @c NS0_5basic14vram_argumentsIT3_EE
+ *  @c sequence::cuda_kernel<vram_kernel_t::insert_k, u8_ampere_banded_overlap_kit_t, 1, u32_t, 0,
+ *  4> over @c basic::vram_arguments<u32_t> spells, broken here at its components:
+ *  @c _ZN4unum7usearch8sequence11cuda_kernel @c I @c LNS0_9utilities13vram_kernel_tE0E
+ *  @c NS1_30u8_ampere_banded_overlap_kit_tE @c Lj1E @c j @c Lj0E @c Lj4E @c EEv
+ *  @c NS0_5basic14vram_argumentsIT2_EE
  */
 template <typename... arguments_types_>
 void vram_kernel_symbol(vram_kernel_symbol_t& symbol, char const* scope, char const* kernel,

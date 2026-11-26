@@ -35,22 +35,6 @@
 
 namespace util = unum::usearch::utilities;
 
-/** The kits one CPU class runs a dtype on, each the pick of its own ladder under the class's
- *  NumKong mask. */
-template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
-using quads_kit_of =
-    typename dense::quads_ladder<typename nk::type_for<dtype_>::type, numkong_capabilities_of(cpu_class_)>::kit_t;
-template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
-using tiles_kit_of =
-    typename dense::tiles_ladder<typename nk::type_for<dtype_>::type, numkong_capabilities_of(cpu_class_)>::kit_t;
-template <cpu_class_t cpu_class_>
-using elementwise_kit_of = typename dense::elementwise_ladder<numkong_capabilities_of(cpu_class_)>::kit_t;
-template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
-using rmscast_kit_of =
-    typename dense::rmscast_ladder<typename nk::type_for<dtype_>::type, numkong_capabilities_of(cpu_class_)>::kit_t;
-template <cpu_class_t cpu_class_>
-using visits_kit_of = typename dense::visits_hash_set_ladder<numkong_capabilities_of(cpu_class_)>::kit_t;
-
 /** One RAM variant: the CPU class alone names the rung, lowering onto the kits its NumKong mask
  *  picks, its waiter, its atomic reference and its cache hints. */
 template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
@@ -68,50 +52,21 @@ using nvme_indexes =
                         elementwise_kit_of<cpu_class_>, rmscast_kit_of<dtype_, cpu_class_>, visits_kit_of<cpu_class_>,
                         default_io_queue_t, atomic_ref_for_cpu_class<cpu_class_>::template type, waiter_of<cpu_class_>>;
 
-/** The start and end of every dtype's device code one GPU class unit embeds, in pairs in
- *  @c dense_dtypes_t order, as the table CMake writes for the class; each VRAM class unit
- *  specializes it. */
-template <gpu_class_t gpu_class_>
-std::span<util::byte_t const* const> bundle_bounds() noexcept;
-
-/** The device code of one GPU class and dtype, between the bounds of the dtype's position. */
-template <gpu_class_t gpu_class_, nk_dtype_t dtype_>
-inline static util::bytes_view_t bundled_code() noexcept {
-    std::span<util::byte_t const* const> const bounds = bundle_bounds<gpu_class_>();
-    std::size_t const position = dense_dtypes_t::index_of(dtype_);
-    return util::bytes_view_t {bounds[2 * position], bounds[2 * position + 1]};
-}
-
 #if USEARCH_ARCH_CUDA_
-
-/** One NVIDIA class's fatbin of one dtype's kernels. */
-template <gpu_class_t gpu_class_, nk_dtype_t dtype_>
-struct cuda_fatbin {
-    inline static constexpr nk_capability_t capability_k = numkong_capabilities_of(gpu_class_);
-    static util::bytes_view_t bytes() noexcept { return bundled_code<gpu_class_, dtype_>(); }
-};
 
 /** One NVIDIA variant: the class names the rung and its capability ceiling, and with the dtype the
  *  fatbin its kernels sit in. */
 template <nk_dtype_t dtype_, gpu_class_t gpu_class_>
-using vram_nvidia_indexes = dense::vram_nvidia_indexes<util::uuid128_t, dtype_, cuda_fatbin<gpu_class_, dtype_>,
+using vram_nvidia_indexes = dense::vram_nvidia_indexes<util::uuid128_t, dtype_, dense_nvidia_fatbin<gpu_class_, dtype_>,
                                                        fu::preferred_cache_hints_t, fu::standard_yield_t>;
 #endif
 
 #if USEARCH_ARCH_ROCM_
 
-/** One AMD class's code object of one dtype's kernels, an offload bundle of its listed
- *  processors. */
-template <gpu_class_t gpu_class_, nk_dtype_t dtype_>
-struct hip_code_object {
-    inline static constexpr nk_capability_t capability_k = numkong_capabilities_of(gpu_class_);
-    static util::bytes_view_t bytes() noexcept { return bundled_code<gpu_class_, dtype_>(); }
-};
-
 /** One AMD variant: the class names the rung and its capability ceiling, and with the dtype the
  *  code object its kernels sit in. */
 template <nk_dtype_t dtype_, gpu_class_t gpu_class_>
-using vram_amd_indexes = dense::vram_amd_indexes<util::uuid128_t, dtype_, hip_code_object<gpu_class_, dtype_>,
+using vram_amd_indexes = dense::vram_amd_indexes<util::uuid128_t, dtype_, dense_amd_code_object<gpu_class_, dtype_>,
                                                  fu::preferred_cache_hints_t, fu::standard_yield_t>;
 #endif
 

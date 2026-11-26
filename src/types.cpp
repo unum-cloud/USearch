@@ -254,6 +254,7 @@ USEARCH_EXPORT char const* usearch_phase_name(usearch_phase_t phase) {
     case usearch_phase_hubs_k: return "hubs";
     case usearch_phase_gather_k: return "gather";
     case usearch_phase_restitch_k: return "restitch";
+    case usearch_phase_reach_k: return "reach";
     case usearch_phase_write_k: return "write";
     case usearch_phase_done_k: return "done";
     default: return "unrecognized";
@@ -271,6 +272,7 @@ USEARCH_EXPORT usearch_status_t usearch_phase_from_name(usearch_bytes_view_t nam
     if (named(name, "hubs")) return *phase = usearch_phase_hubs_k, usearch_status_success_k;
     if (named(name, "gather")) return *phase = usearch_phase_gather_k, usearch_status_success_k;
     if (named(name, "restitch")) return *phase = usearch_phase_restitch_k, usearch_status_success_k;
+    if (named(name, "reach")) return *phase = usearch_phase_reach_k, usearch_status_success_k;
     if (named(name, "write")) return *phase = usearch_phase_write_k, usearch_status_success_k;
     if (named(name, "done")) return *phase = usearch_phase_done_k, usearch_status_success_k;
     return usearch_status_invalid_argument_k;

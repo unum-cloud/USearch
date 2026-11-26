@@ -307,9 +307,11 @@ class Phase(IntEnum):
     """A round gathering every entry into a neighborhood."""
     RESTITCH = 9
     """A round re-stitching each neighborhood."""
-    WRITE = 10
+    REACH = 10
+    """A round linking island entries by walks from the root."""
+    WRITE = 11
     """A round on NVMe rewriting each tile of links from what its restitch changed."""
-    DONE = 11
+    DONE = 12
     """The plan ended its round, and nothing more is pending."""
 
 class PredicateCost(IntEnum):
@@ -2706,6 +2708,11 @@ class DenseTraversalStats:
         """Hint keys no shard held an entry under."""
         ...
 
+    @property
+    def seeding_distances(self) -> int:
+        """Of the distances computed, the sketch distances a sequence search's seeding walk spent."""
+        ...
+
     def __iadd__(self, other: DenseTraversalStats, /) -> Self:
         """Python-only."""
         ...
@@ -3203,22 +3210,40 @@ type _Sequences = Sequence[str | Buffer] | str | Buffer
 type _Shapes = Sequence[_Tensor] | _Tensor
 
 class SequenceMetric(IntEnum):
-    """How a sequence index scores two sequences."""
+    """What the sequences are and the score ranking them.
 
-    LEVENSHTEIN = 1
-    """Single-byte insertions, deletions and substitutions, every edit costing one."""
-    LEVENSHTEIN_UTF8 = 2
-    """The same edits over decoded UTF-8 code points."""
-    NEEDLEMAN_WUNSCH = 3
-    """Global alignment under a substitution matrix and a flat gap cost."""
-    OVERLAP = 4
-    """The share of the larger window set the other side misses, over fixed window widths."""
+    Every metric stores a sequence folded, and `get` returns the stored form, never the bytes an insertion passed:
+    packed class codes for a protein alignment, one class code a byte for a DNA overlap, and case-folded UTF-8 for a
+    containment.
+    """
+
+    PROTEIN_ALIGNMENT = 1
+    """Global alignment of proteins with linear gap costs, BLOSUM62 with a gap of 7 unless the index names its own costs.
+
+    Both sequences are aligned end to end over the classes the costs fold bytes into, and every unaligned symbol is
+    charged the gap cost, so a score is quadratic in time. A stored sequence reads back as its class codes, five bits
+    apiece, little-endian behind one byte counting the slots the last bytes leave unused.
+    """
+    DNA_OVERLAP = 2
+    """Shifted overlap of DNA or RNA: the cost of aligning two sequences where one slides over the other.
+
+    Bytes fold into the classes of A, C, G and T in either case, U read as T, under costs charging a transition half a
+    transversion and a gap of 2, unless the index names its own. The shift most windows of 12 and 19 symbols vote for
+    wins, and the overlap is aligned inside a narrow band around it. The query also scores as its reverse complement,
+    and the lower distance counts. A stored sequence reads back as its class codes, one byte apiece.
+    """
+    UTF8_CONTAINMENT = 3
+    """Window containment of UTF-8 text: the share of the query's distinct windows the stored side lacks, whatever the case.
+
+    Texts are case-folded as Unicode folds them before they are stored or scored, and windows of 5 and 8 bytes are
+    compared. Asymmetric, and exact at every radius. A stored text reads back folded. Takes no costs.
+    """
 
 @final
-class SequenceMetadata(structseq[Any], tuple[SequenceMetric, int]):
+class SequenceMetadata(structseq[Any], tuple[SequenceMetric, int, int, int]):
     """The metric and geometry a checkpoint froze."""
 
-    __match_args__: Final = ("metric", "connectivity")
+    __match_args__: Final = ("metric", "connectivity", "classes", "sketch_bytes")
 
     @property
     def metric(self) -> SequenceMetric:
@@ -3228,6 +3253,16 @@ class SequenceMetadata(structseq[Any], tuple[SequenceMetric, int]):
     @property
     def connectivity(self) -> int:
         """Connections per node the graph was built with."""
+        ...
+
+    @property
+    def classes(self) -> int:
+        """Classes the recorded costs folded bytes into; 0 for a containment."""
+        ...
+
+    @property
+    def sketch_bytes(self) -> int:
+        """Bytes of the sketch in front of each stored sequence; 0 when the metric keeps none."""
         ...
 
 @final
@@ -3269,10 +3304,10 @@ class SequenceIndex:
         cls,
         metric: SequenceMetric = ...,
         *,
-        substitution_matrix: Buffer | None = None,
+        similarities: Buffer | None = None,
         gap: int | None = None,
-        window_widths: Sequence[int] | None = None,
         connectivity: int = 0,
+        sketch_bytes: int = 0,
         values_per_key: int = 0,
         memory_domains: Sequence[int] | None = None,
         cpu_class_ceiling: CPUClass | None = None,
@@ -3285,10 +3320,10 @@ class SequenceIndex:
         cls,
         metric: SequenceMetric = ...,
         *,
-        substitution_matrix: Buffer | None = None,
+        similarities: Buffer | None = None,
         gap: int | None = None,
-        window_widths: Sequence[int] | None = None,
         connectivity: int = 0,
+        sketch_bytes: int = 0,
         values_per_key: int = 0,
         devices: Sequence[int] | None = None,
         gpu_class_ceiling: GPUClass | None = None,
@@ -3305,8 +3340,6 @@ class SequenceIndex:
         memory_domains: Sequence[int] | None = None,
         executor: Executor | None = None,
         values_per_key: int = 0,
-        substitution_matrix: Buffer | None = None,
-        gap: int | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         cpu_class_ceiling: CPUClass | None = None,
@@ -3323,8 +3356,6 @@ class SequenceIndex:
         memory_domains: Sequence[int] | None = None,
         executor: Executor | None = None,
         values_per_key: int = 0,
-        substitution_matrix: Buffer | None = None,
-        gap: int | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         cpu_class_ceiling: CPUClass | None = None,
@@ -3341,8 +3372,6 @@ class SequenceIndex:
         devices: Sequence[int] | None = None,
         executor: Executor | None = None,
         values_per_key: int = 0,
-        substitution_matrix: Buffer | None = None,
-        gap: int | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         gpu_class_ceiling: GPUClass | None = None,
@@ -3359,8 +3388,6 @@ class SequenceIndex:
         devices: Sequence[int] | None = None,
         executor: Executor | None = None,
         values_per_key: int = 0,
-        substitution_matrix: Buffer | None = None,
-        gap: int | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         gpu_class_ceiling: GPUClass | None = None,
@@ -3374,8 +3401,6 @@ class SequenceIndex:
         path: _PathLike,
         /,
         *,
-        substitution_matrix: Buffer | None = None,
-        gap: int | None = None,
         cpu_class_ceiling: CPUClass | None = None,
     ) -> SequenceIndex:
         """Serves a checkpoint in place through a memory mapping, read-only."""
@@ -3389,8 +3414,6 @@ class SequenceIndex:
         *,
         paths: Sequence[_PathLike] | None = None,
         executor: Executor | None = None,
-        substitution_matrix: Buffer | None = None,
-        gap: int | None = None,
         cpu_class_ceiling: CPUClass | None = None,
     ) -> SequenceIndex:
         """Serves a checkpoint in place from NVMe drives, read-only."""

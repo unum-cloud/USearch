@@ -37,31 +37,8 @@
 #endif
 
 #include "harness.hpp"
-#include "lib.hpp" // `gpu_class_t`, `pick_gpu_class` - the class the library picks a unit by
-
-#if USEARCH_ARCH_CUDA_
-
-namespace util = unum::usearch::utilities;
-
-/** The library's fatbin of one class's shapes kits over one dtype, defined in that class's
- *  @c src/shapes/vram_variants_nvidia*.cpp unit. */
-template <gpu_class_t gpu_class_, nk_dtype_t dtype_>
-struct shapes_nvidia_fatbin {
-    static util::bytes_view_t bytes() noexcept;
-};
-
-#endif
-#if USEARCH_ARCH_ROCM_
-
-/** The library's code object of one AMD class's shapes kits over one dtype, defined in that class's
- *  @c src/shapes/vram_variants_amd.hip unit. */
-template <gpu_class_t gpu_class_, nk_dtype_t dtype_>
-struct shapes_amd_code_object {
-    inline static constexpr nk_capability_t capability_k = numkong_capabilities_of(gpu_class_);
-    static util::bytes_view_t bytes() noexcept;
-};
-
-#endif
+#include "classes.hpp"     // `gpu_class_t`, `gpu_class_compiled` - the classes the build carries kits for
+#include "shapes_kits.hpp" // `shapes_vram_kit`, `shapes_nvidia_fatbin`, `shapes_amd_code_object`
 
 namespace unum::usearch::test::shapes {
 using namespace unum::usearch::shapes;
@@ -362,26 +339,24 @@ static void test_shapes_vram_collection(u64_t seed, cell_vendor_t::executor_t& e
 #endif // USEARCH_ARCH_CUDA_ || USEARCH_ARCH_METAL_
 #if USEARCH_ARCH_CUDA_
 
-/** The NVIDIA face over packs of @p scalar_type_ under the kits of @p gpu_class_, whose
- *  capabilities are @p capabilities_. */
-template <typename scalar_type_, gpu_class_t gpu_class_, nk_capability_t capabilities_>
-using shapes_face_t = vram_nvidia_index<typename shapes_ladder<scalar_type_, capabilities_>::kit_t, u32_t,
+/** The NVIDIA face over packs of @p scalar_type_ under the kits of @p gpu_class_. */
+template <typename scalar_type_, gpu_class_t gpu_class_>
+using shapes_face_t = vram_nvidia_index<shapes_vram_kit<scalar_type_, gpu_class_>, util::u32_t,
                                         shapes_nvidia_fatbin<gpu_class_, scalar_type_::dtype()>>;
 
 #elif USEARCH_ARCH_ROCM_
 
-/** The AMD face over packs of @p scalar_type_ under the kits of @p gpu_class_, whose capabilities
- *  are @p capabilities_. */
-template <typename scalar_type_, gpu_class_t gpu_class_, nk_capability_t capabilities_>
-using shapes_face_t = vram_amd_index<typename shapes_ladder<scalar_type_, capabilities_>::kit_t, u32_t,
+/** The AMD face over packs of @p scalar_type_ under the kits of @p gpu_class_. */
+template <typename scalar_type_, gpu_class_t gpu_class_>
+using shapes_face_t = vram_amd_index<shapes_vram_kit<scalar_type_, gpu_class_>, util::u32_t,
                                      shapes_amd_code_object<gpu_class_, scalar_type_::dtype()>>;
 
 #endif
 #if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_ROCM_
 
-/** Every collection under the kits of @p gpu_class_, whose capabilities are @p capabilities_: the
- *  F16 ones, and the F32 one on the vendor-wide floor, which alone builds F32 packs. */
-template <gpu_class_t gpu_class_, nk_capability_t capabilities_>
+/** Every collection under the kits of @p gpu_class_: the F16 ones, and the F32 one on the
+ *  vendor-wide floor, which alone builds F32 packs. */
+template <gpu_class_t gpu_class_>
 static void run_shapes_vram_class_cases(cell_vendor_t::executor_t& executor, char const* gpu_class) {
     constexpr nk_kernel_kind_t chamfer_k = nk_kernel_chamfers_packed_k, hausdorff_k = nk_kernel_hausdorffs_packed_k;
     struct cell_t {
@@ -399,13 +374,13 @@ static void run_shapes_vram_class_cases(cell_vendor_t::executor_t& executor, cha
     for (cell_t const& cell : cells)
         run_test_case(
             fmt::format("test_shapes_vram_collection<nk::f16_t>({}, {})", gpu_class, cell.kind_constant).c_str(),
-            test_shapes_vram_collection<nk::f16_t, shapes_face_t<nk::f16_t, gpu_class_, capabilities_>>,
-            stream_key(seed, cell.name), executor, cell.kernel, cell.kind, cell.count);
+            test_shapes_vram_collection<nk::f16_t, shapes_face_t<nk::f16_t, gpu_class_>>, stream_key(seed, cell.name),
+            executor, cell.kernel, cell.kind, cell.count);
     if constexpr (gpu_class_ == gpu_class_t::nvidia_ampere_k || gpu_class_ == gpu_class_t::amd_cdna3_k)
         run_test_case(
             fmt::format("test_shapes_vram_collection<nk::f32_t>({}, cloud_kind_t::molecular_k)", gpu_class).c_str(),
-            test_shapes_vram_collection<nk::f32_t, shapes_face_t<nk::f32_t, gpu_class_, capabilities_>>,
-            stream_key(seed, "f32"), executor, chamfer_k, cloud_kind_t::molecular_k, std::size_t {1024});
+            test_shapes_vram_collection<nk::f32_t, shapes_face_t<nk::f32_t, gpu_class_>>, stream_key(seed, "f32"),
+            executor, chamfer_k, cloud_kind_t::molecular_k, std::size_t {1024});
 }
 
 /** Every class the device runs, as the dispatch ladder would admit it: the floor on any NVIDIA
@@ -419,26 +394,22 @@ void run_shapes_vram_cases<cell_vendor_t::executor_t>(gpu_device_t const& device
     if (!expect_true(succeeded(spawn_status), "{} device #{} opens no stream", cell_vendor_t::runtime_k, ordinal))
         return;
 #if USEARCH_ARCH_CUDA_
-    constexpr nk_capability_t ampere_k = nk_cap_cuda_k | nk_cap_ampere_k;
-    constexpr nk_capability_t blackwell_k = ampere_k | nk_cap_ada_k | nk_cap_blackwell_k;
     // A build without the Ampere floor is monoversioned, and compiles its one class's kits alone.
-    if constexpr (USEARCH_TARGET_NVIDIA_AMPERE)
-        run_shapes_vram_class_cases<gpu_class_t::nvidia_ampere_k, ampere_k>(executor, "gpu_class_t::nvidia_ampere_k");
-    else run_shapes_vram_class_cases<cuda_class_k, cuda_class_capabilities_k>(executor, "cuda_class_k");
+    if constexpr (gpu_class_compiled(gpu_class_t::nvidia_ampere_k))
+        run_shapes_vram_class_cases<gpu_class_t::nvidia_ampere_k>(executor, "gpu_class_t::nvidia_ampere_k");
+    else run_shapes_vram_class_cases<cuda_class_k>(executor, "cuda_class_k");
     // A build that keeps no Blackwell class compiles no Blackwell shapes kits to link against.
-    if constexpr (USEARCH_TARGET_NVIDIA_BLACKWELL)
-        if (pick_gpu_class(device, usearch_gpu_class_unknown_k) == gpu_class_t::nvidia_blackwell_k)
-            run_shapes_vram_class_cases<gpu_class_t::nvidia_blackwell_k, blackwell_k>(
-                executor, "gpu_class_t::nvidia_blackwell_k");
+    if constexpr (gpu_class_compiled(gpu_class_t::nvidia_blackwell_k))
+        if (listed_class(device) == usearch_gpu_class_nvidia_blackwell_k)
+            run_shapes_vram_class_cases<gpu_class_t::nvidia_blackwell_k>(executor, "gpu_class_t::nvidia_blackwell_k");
 #else
     // The AMD cells run the CDNA3 class's kits over 64-lane wavefronts, which CDNA3 and CDNA4 run.
     if (device.warp_lanes != 64)
         return run_test_case("run_shapes_vram_cases(gpu_vendor_t::amd_k)",
                              [] { return case_result_t::skipped(needs_64_lane_waves_k); });
-    constexpr nk_capability_t cdna3_k = numkong_capabilities_of(gpu_class_t::amd_cdna3_k);
     // A build that keeps no CDNA3 class compiles no CDNA3 shapes kits to link against.
-    if constexpr (USEARCH_TARGET_AMD_CDNA3)
-        run_shapes_vram_class_cases<gpu_class_t::amd_cdna3_k, cdna3_k>(executor, "gpu_class_t::amd_cdna3_k");
+    if constexpr (gpu_class_compiled(gpu_class_t::amd_cdna3_k))
+        run_shapes_vram_class_cases<gpu_class_t::amd_cdna3_k>(executor, "gpu_class_t::amd_cdna3_k");
     else
         run_test_case("run_shapes_vram_cases(gpu_vendor_t::amd_k)",
                       [] { return case_result_t::skipped(built_without_cdna3_k); });

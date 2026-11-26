@@ -17,7 +17,7 @@
 #include <cstring> // `std::memcmp`, `std::strcmp`, `std::strlen`
 
 #include <algorithm>       // `std::max`
-#include <array>           // `std::array` - the test loop's ring
+#include <array>           // `std::array` - the test loop's ring, the sequence costs
 #include <atomic>          // `std::atomic` - the run's failed checks
 #include <charconv>        // `std::from_chars` - the settings
 #include <chrono>          // `std::chrono::steady_clock` - case timings and the wait limit
@@ -626,7 +626,7 @@ struct sequence_fixture_t {
     }
     us::tape_view<std::uint8_t> batch() const { return {bytes, std::span<std::uint64_t const>(offsets, entries + 1)}; }
     static us::expected<index_t> init() {
-        return index_t::init_ram({.metric = usearch_sequence_metric_levenshtein_bytes_k});
+        return index_t::init_ram({.metric = usearch_sequence_metric_utf8_containment_k});
     }
     us::status_t insert(on_t const& on, std::span<usearch_key_t const> keys) const { return on.insert(keys, batch()); }
 };
@@ -897,14 +897,14 @@ static void test_plans_and_reshards(us::executor_t const& executor) {
 /** Every sequence searched for comes back first under its own key, at distance zero, and survives a
  *  checkpoint. */
 static void test_sequences(us::executor_t const& executor, us::arena_t& arena) {
-    auto [index, index_status] = us::sequence_index_t::init_ram({.metric = usearch_sequence_metric_levenshtein_utf8_k});
+    auto [index, index_status] = us::sequence_index_t::init_ram({.metric = usearch_sequence_metric_utf8_containment_k});
     expect_success(index_status, "creating a sequence index");
     us::sequence_index_on<usearch_completion_blocking_k> const on = index.on(executor);
     {
         auto [empty, status] = on.describe();
         expect_true(!status.failed() && empty.size == 0 && empty.gpu_class == usearch_gpu_class_unknown_k,
                     "A fresh host index is empty and on no GPU");
-        expect_true(empty.metadata.metric == usearch_sequence_metric_levenshtein_utf8_k,
+        expect_true(empty.metadata.metric == usearch_sequence_metric_utf8_containment_k,
                     "The frozen metric reads back");
     }
 
@@ -938,7 +938,7 @@ static void test_sequences(us::executor_t const& executor, us::arena_t& arena) {
     expect_success(on.save(us::bytes_view(path)), "saving sequences");
     {
         auto [metadata, status] = us::sequence_index_t::metadata_read({.path = us::bytes_view(path)});
-        expect_true(!status.failed() && metadata.metric == usearch_sequence_metric_levenshtein_utf8_k,
+        expect_true(!status.failed() && metadata.metric == usearch_sequence_metric_utf8_containment_k,
                     "A checkpoint reports its metric");
     }
     {
@@ -964,8 +964,70 @@ static void test_sequences(us::executor_t const& executor, us::arena_t& arena) {
                         "A VRAM index opens on a GPU or forwards the library's status");
         }
     }
-    check_metric_name(us::sequence_metric_name, us::sequence_metric_from_name,
-                      usearch_sequence_metric_levenshtein_utf8_k);
+    check_metric_name(us::sequence_metric_name, us::sequence_metric_from_name, usearch_sequence_metric_dna_overlap_k);
+}
+
+/** Entries joined end to end around their 64-bit @p offsets. */
+static us::tape_view<std::uint8_t> tape_of(char const* joined, std::span<std::uint64_t const> offsets) {
+    return {reinterpret_cast<std::uint8_t const*>(joined), offsets};
+}
+
+/** Each metric ranks as it says: an overlap scores the other strand, an alignment ranks by the
+ *  costs it is given, and a containment finds the text holding a query in any case. */
+static void test_sequence_metrics(us::executor_t const& executor, us::arena_t& arena) {
+    // Equal nucleotides score `matched`, `A` and `G` score `similar`, and every other pair zero.
+    auto const nucleotides = [](std::int8_t matched, std::int8_t similar) {
+        std::array<std::int8_t, 256 * 256> similarities {};
+        for (unsigned char const nucleotide : {'A', 'C', 'G', 'T'}) similarities[nucleotide * 257] = matched;
+        similarities['A' * 256 + 'G'] = similarities['G' * 256 + 'A'] = similar;
+        return similarities;
+    };
+
+    auto [reads, reads_status] = us::sequence_index_t::init_ram({.metric = usearch_sequence_metric_dna_overlap_k});
+    expect_success(reads_status, "creating a DNA overlap index");
+    usearch_key_t const keys[] = {key_of(1), key_of(2), key_of(3)};
+    std::uint64_t const read_offsets[] = {0, 30, 60, 90};
+    expect_success(reads.on(executor).insert(keys, tape_of("ACGTTGCAAGGCTTAACCGGTTACGATCGA" //
+                                                           "GGCTTAACCGGTTACGATCGATTTGCAGCA" //
+                                                           "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+                                                           read_offsets)),
+                   "inserting reads");
+    std::uint64_t const read_query_offsets[] = {0, 30};
+    {
+        auto [mirrored, status] = reads.on(executor).search(
+            tape_of("TGCTGCAAATCGATCGTAACCGGTTAAGCC", read_query_offsets), 2, arena);
+        expect_true(!status.failed() && same_key(mirrored.keys[0], keys[1]) && mirrored.scores[0] == 0,
+                    "The reverse complement of a read finds it first, at distance zero");
+    }
+
+    std::array<std::int8_t, 256 * 256> const transitions = nucleotides(4, 3);
+    usearch_sequence_costs_t const near_purines {.similarities = transitions.data(), .gap = 4};
+    auto [aligned, aligned_status] = us::sequence_index_t::init_ram(
+        {.metric = usearch_sequence_metric_protein_alignment_k, .costs = &near_purines});
+    expect_success(aligned_status, "creating an alignment index under its own costs");
+    std::uint64_t const aligned_offsets[] = {0, 12, 24};
+    expect_success(aligned.on(executor).insert({keys, 2}, tape_of("GCGTTGCAACGTCCGTTGCAACGT", aligned_offsets)),
+                   "inserting substituted sequences");
+    std::uint64_t const aligned_query_offsets[] = {0, 12};
+    {
+        auto [ranked, status] = aligned.on(executor).search(tape_of("ACGTTGCAACGT", aligned_query_offsets), 2, arena);
+        expect_true(!status.failed() && same_key(ranked.keys[0], keys[0]) && same_key(ranked.keys[1], keys[1]) &&
+                        ranked.scores[0] < ranked.scores[1],
+                    "An A to G substitution ranks above an A to C one where A and G are near");
+    }
+
+    auto [texts, texts_status] = us::sequence_index_t::init_ram({.metric = usearch_sequence_metric_utf8_containment_k});
+    expect_success(texts_status, "creating a containment index");
+    char const* const joined_texts = "the quick brown fox jumps over the lazy dog" //
+                                     "a journey of a thousand miles begins with a single step";
+    std::uint64_t const text_offsets[] = {0, 43, 98};
+    expect_success(texts.on(executor).insert({keys, 2}, tape_of(joined_texts, text_offsets)), "inserting texts");
+    std::uint64_t const text_query_offsets[] = {0, 15};
+    {
+        auto [held, status] = texts.on(executor).search(tape_of("Brown FOX Jumps", text_query_offsets), 2, arena);
+        expect_true(!status.failed() && same_key(held.keys[0], keys[0]),
+                    "A substring of a text finds that text first, whatever its case");
+    }
 }
 
 /** Shapes of different point counts share one batch, and each finds itself first. */
@@ -1398,6 +1460,7 @@ int main(int argc, char** argv) {
     auto [arena, arena_status] = us::arena_t::make({.executor = executor.handle()});
     if (!expect_success(arena_status, "making an arena")) return finish_test_run();
     run_test_case("test_sequences", test_sequences, executor, arena);
+    run_test_case("test_sequence_metrics", test_sequence_metrics, executor, arena);
     run_test_case("test_shapes", test_shapes, executor, arena);
     run_test_case("test_geospatial", test_geospatial, executor, arena);
     run_test_case("test_plans_and_reshards<sequence_fixture_t>", test_plans_and_reshards<sequence_fixture_t>, executor);

@@ -145,8 +145,8 @@ concept a_batched_metric = requires(metric_type_& metric, std::span<query_type_ 
  *  turns a stored @p value_type_ into the @c query_view_t its batched @c reset reads, as a round
  *  hands it the entries it scores as queries. */
 template <typename metric_type_, typename value_type_>
-concept a_view_batched_metric = requires(value_type_ const& value) {
-    { metric_type_::query_view(value) } noexcept -> std::same_as<typename metric_type_::query_view_t>;
+concept a_view_batched_metric = requires(metric_type_ const& metric, value_type_ const& value) {
+    { metric.query_view(value) } noexcept -> std::same_as<typename metric_type_::query_view_t>;
 } && a_batched_metric<metric_type_, typename metric_type_::query_view_t>;
 
 /** Opens a scan of many queries: a metric scoring one query at a time reopens each one per round in
@@ -212,15 +212,28 @@ concept a_fold = requires(fold_type_& fold, std::span<node_id_type_ const> node_
     { fold.absorb(node_ids, distances) } noexcept -> std::same_as<walk_demand_t>;
 };
 
+/** A codec whose loads work through scratch: it states the bytes as @c scratch_bytes, and each
+ *  load takes them, so a load plan carves one buffer a range instead of one a value. */
+template <typename codec_type_, typename value_type_>
+concept a_scratch_value_codec = requires(codec_type_ const& codec, value_type_& mutable_value, bytes_view_t input,
+                                         bytes_span_t scratch) {
+    { codec.scratch_bytes() } noexcept -> std::same_as<std::size_t>;
+    { codec.load(input, mutable_value, scratch) } noexcept -> std::same_as<status_t>;
+};
+
 /** Serializes stored values into caller-owned buffers and back - the payload half
  *  of @c save & @c load, supplied by the caller because values are arbitrary objects. */
 template <typename codec_type_, typename value_type_>
-concept a_value_codec = requires(codec_type_ const& codec, value_type_ const& immutable_value,
-                                 value_type_& mutable_value, bytes_span_t output, bytes_view_t input) {
-    { codec.storage_requirements(immutable_value) } noexcept -> std::same_as<std::size_t>;
-    { codec.save(immutable_value, output) } noexcept -> std::same_as<status_t>;
-    { codec.load(input, mutable_value) } noexcept -> std::same_as<status_t>;
-};
+concept a_value_codec =
+    requires(codec_type_ const& codec, value_type_ const& immutable_value, value_type_& mutable_value,
+             bytes_span_t output, bytes_view_t input) {
+        { codec.storage_requirements(immutable_value) } noexcept -> std::same_as<std::size_t>;
+        { codec.save(immutable_value, output) } noexcept -> std::same_as<status_t>;
+    } &&
+    (a_scratch_value_codec<codec_type_, value_type_> ||
+     requires(codec_type_ const& codec, value_type_& mutable_value, bytes_view_t input) {
+         { codec.load(input, mutable_value) } noexcept -> std::same_as<status_t>;
+     });
 
 /** One round's scoring epilogue: sizes the distances to the staging fill, drains
  *  the metric within @p radius, and counts the round into the telemetry. */
@@ -529,6 +542,32 @@ struct columns {
     }
 };
 
+/** Neighbor rows of nodes counted from zero, as a dense index exports them: fixed rows of
+ *  @c degree IDs, where an ID past the nodes is a sentinel, or ragged runs of @c ids between the
+ *  @b nodes+1 @c offsets when @c degree is zero, the first run starting at @c ids[0]. They sit
+ *  where the adopting index reads: host memory for RAM, device memory for a GPU. */
+template <typename node_id_type_>
+struct links_view {
+    std::span<node_id_type_ const> ids;
+    std::span<u64_t const> offsets;
+    std::size_t degree = 0;
+
+    /** The row of @p node, read on the host. */
+    std::span<node_id_type_ const> row(std::size_t node) const noexcept {
+        return degree ? ids.subspan(node * degree, degree)
+                      : ids.subspan(offsets[node] - offsets[0], offsets[node + 1] - offsets[node]);
+    }
+
+    /** Whether the rows are one per node of @p nodes, every ragged run inside @c ids. */
+    bool shaped_for(std::size_t nodes) const noexcept {
+        if (degree) return ids.size() == nodes * degree;
+        if (offsets.size() != nodes + 1) return false;
+        for (std::size_t node = 0; node != nodes; ++node)
+            if (offsets[node + 1] < offsets[node]) return false;
+        return offsets[nodes] - offsets[0] <= ids.size();
+    }
+};
+
 template <typename index_type_, synchronization_t synchronization_ = synchronization_t::concurrent_k,
           typename allocator_type_ = typename index_type_::allocator_t>
 struct ram_cursor;
@@ -612,6 +651,9 @@ struct ram_index {
 
     /** The read-only columns a load consumes. */
     using columns_view_t = columns<key_t const, node_id_t const, byte_t const, u64_t const>;
+
+    /** Neighbor rows another graph hands @ref adopt_links. */
+    using links_view_t = links_view<node_id_t>;
 
   private:
     template <typename cursor_index_type_, synchronization_t cursor_synchronization_, typename cursor_allocator_type_>
@@ -1143,6 +1185,43 @@ struct ram_index {
         return status;
     }
 
+    /**
+     *  @brief Replaces every row's neighbors with the row of the same node in @p links, dropping
+     *      sentinels and self-links.
+     *
+     *  Takes the shared mutex's unique side, as @c clear does, while the caller keeps readers out;
+     *  every ragged ID is vetted before the first row changes.
+     *
+     *  @par Statuses:
+     *  - @c contended_k A mutator or an open plan holds the shared mutex, or a dispensed batch has
+     *    yet to publish.
+     *  - @c config_mismatch_k The @p links hold other than one row per node.
+     *  - @c malformed_k A ragged row names an ID past the nodes.
+     *  - @c out_of_memory_k A neighbor list cannot grow to its row.
+     */
+    status_t adopt_links(links_view_t links) noexcept {
+        unique_lock_t unique_lock {shared_mutex_, std::try_to_lock};
+        if (!unique_lock) return status_code_t::contended_k;
+        auto const [visible, status] = watermark_();
+        if (failed(status)) return status;
+        std::size_t const nodes = static_cast<std::size_t>(visible);
+        if (!links.shaped_for(nodes)) return status_code_t::config_mismatch_k;
+        for (std::size_t node = 0; !links.degree && node != nodes; ++node)
+            for (node_id_t const neighbor : links.row(node))
+                if (static_cast<std::size_t>(neighbor) >= nodes) return status_code_t::malformed_k;
+        for (std::size_t node = 0; node != nodes; ++node) {
+            std::span<node_id_t const> const row = links.row(node);
+            node_t& record = nodes_[node];
+            record.neighbors.clear();
+            if (failed(record.neighbors.reserve(row.size()))) return status_code_t::out_of_memory_k;
+            for (node_id_t const neighbor : row)
+                if (static_cast<std::size_t>(neighbor) < nodes && static_cast<std::size_t>(neighbor) != node)
+                    record.neighbors.push_back_reserved(neighbor);
+            widen_(record.neighbors.size());
+        }
+        return status_code_t::success_k;
+    }
+
     /** Removals are deleted, not pending: ID immortality is what keeps every
      *  reader's stale ID valid. */
     status_t remove(std::span<key_t const>, traversal_context_t&) noexcept = delete;
@@ -1157,6 +1236,10 @@ struct ram_index {
         /** Bytes of cache each core keeps to itself, half for a neighborhood's entries and half for
          *  a draw's hubs; zero takes one storage chunk of entries as a neighborhood's capacity. */
         std::size_t cache_bytes = 0;
+
+        /** Width of the walks a round's reach takes for islands; zero derives twice the
+         *  connectivity. */
+        std::size_t expansion_factor = 0;
     };
 
     /** A reshard's knobs: its rounds', the most entries a sharded target's shard holds, zero
@@ -2105,11 +2188,12 @@ struct ram_index {
      *  inside every neighborhood over its capacity, a restitch of each neighborhood in one core's
      *  cache, every entry keeping the diverse links among its own and its nearest
      *  neighborhood-mates and no others, and the closing health check from the same root, which
-     *  decides the verdict; what it leaves unreached heals again, checked again, while that
-     *  shrinks. No phase walks the graph. Metrics need not be symmetric, so a restitch scores every
-     *  ordered pair of its entries, each entry as the query. An entry outside the root's component
-     *  keeps a link to its nearest candidate inside it, which a heal then links back, and every
-     *  list keeps a slot past the budget for that heal.
+     *  decides the verdict. The reach then walks from the entries of the islands it found, checked
+     *  again; what is left unreached heals again, checked again, while that shrinks. No other phase
+     *  walks the graph. Metrics need not be symmetric, so a restitch scores every ordered pair of
+     *  its entries, each entry as the query. An entry outside the root's component keeps a link to
+     *  its nearest candidate inside it, which a heal then links back, and every list keeps a slot
+     *  past the budget for that heal.
      *
      *  The plan holds the shared side and the claims closed from planning to its death, so batches
      *  answer @c contended_k and stop-the-world verbs refuse meanwhile, while searches run
@@ -2146,7 +2230,8 @@ struct ram_index {
               entry_neighborhoods_(std::move(other.entry_neighborhoods_)),
               neighborhood_entries_(std::move(other.neighborhood_entries_)),
               neighborhood_offsets_(std::move(other.neighborhood_offsets_)), round_seed_(other.round_seed_),
-              islands_left_(other.islands_left_) {}
+              islands_left_(other.islands_left_), reach_left_(other.reach_left_),
+              reach_expansion_(other.reach_expansion_) {}
         refine_plan_t(refine_plan_t const&) = delete;
         refine_plan_t& operator=(refine_plan_t const&) = delete;
         ~refine_plan_t() noexcept { release_(); }
@@ -2194,6 +2279,7 @@ struct ram_index {
             switch (phase_) {
             case phase_t::health_k: health.sweep(task); break;
             case phase_t::heal_k: heal_(task); break;
+            case phase_t::reach_k: reach_(task, metric, context, selector); break;
             case phase_t::gather_k: gather_neighborhoods_(task, metric, context); break;
             case phase_t::restitch_k: restitch_neighborhoods_(task, metric, context, selector); break;
             default: break;
@@ -2226,13 +2312,16 @@ struct ram_index {
         /** The budget planning reserved every neighbor list for. */
         std::size_t connectivity() const noexcept { return connectivity_; }
 
+        /** The expansion the reach's walks search with. */
+        std::size_t reach_expansion() const noexcept { return reach_expansion_; }
+
         /** Whether the plan is inside a round, whose every barrier a caller's progress hears. */
-        bool rounding() const noexcept { return phase_ >= phase_t::health_k && phase_ <= phase_t::restitch_k; }
+        bool rounding() const noexcept { return phase_ >= phase_t::health_k && phase_ <= phase_t::reach_k; }
 
         /** The phase the plan is in. */
         phase_t phase() const noexcept { return phase_; }
 
-        /** The position of the round's phase in hand among its six, from the opening health check
+        /** The position of the round's phase in hand among its seven, from the opening health check
          *  to the closing one, which a check after a closing heal is too; zero outside a round. */
         std::size_t ordinal() const noexcept { return round_ordinal(phase_, swept_after_); }
 
@@ -2250,6 +2339,7 @@ struct ram_index {
             switch (phase_) {
             case phase_t::health_k: return 2 * std::size_t {health.visible};
             case phase_t::heal_k: return health.islands();
+            case phase_t::reach_k: return phase_nodes_().size();
             case phase_t::hubs_k: return first_hubs_(health.visible);
             case phase_t::gather_k: return gathered_entries_();
             case phase_t::restitch_k: return health.visible;
@@ -2294,7 +2384,7 @@ struct ram_index {
                 failed(context.selected_neighbors.reserve(connectivity_)) ||
                 failed(context.staged_ids.reserve(widest_list_)))
                 return status_code_t::out_of_memory_k;
-            return status_code_t::success_k;
+            return ram_index::reserve_traversal(context, widest_list_, {reach_expansion_});
         }
 
         /**
@@ -2334,7 +2424,8 @@ struct ram_index {
          *  neighborhoods, or its neighborhoods; none while it draws hubs, since the barrier closing
          *  that phase draws them. */
         iota_view<node_id_t> phase_nodes_() const noexcept {
-            if (phase_ == phase_t::heal_k) return {0, static_cast<node_id_t>(health.islands())};
+            if (phase_ == phase_t::heal_k || phase_ == phase_t::reach_k)
+                return {0, static_cast<node_id_t>(health.islands())};
             if (phase_ == phase_t::gather_k) return {0, health.visible};
             if (phase_ == phase_t::restitch_k) return {0, static_cast<node_id_t>(neighborhoods_())};
             return {};
@@ -2343,9 +2434,9 @@ struct ram_index {
         /** Nodes one task of the current phase spans: every island, a neighborhood capacity of
          *  entries gathered, or one neighborhood. */
         std::size_t phase_width_() const noexcept {
+            if (phase_ == phase_t::gather_k || phase_ == phase_t::reach_k) return neighborhood_capacity_;
             // One heal task: islands sharing an owner list then link in one order.
             if (phase_ == phase_t::heal_k) return max_of<std::size_t>(health.islands(), 1);
-            if (phase_ == phase_t::gather_k) return neighborhood_capacity_;
             return 1;
         }
 
@@ -2376,11 +2467,18 @@ struct ram_index {
             }
             tally_.reachability = reachability;
             if (swept_after_ == phase_t::none_k) return open_round_(reachability);
-            // What the restitch left unreached heals with no distance, again while that shrinks.
+            // What the restitch left unreached heals with no distance while that shrinks, and what
+            // the heals leave is reached by walks, again while that shrinks.
             std::size_t const left = reachability.audited_nodes - reachability.reachable_nodes;
-            if (left && left < islands_left_ && tally_.verdict != refine_verdict_t::stopped_k) {
+            bool const going = tally_.verdict != refine_verdict_t::stopped_k;
+            if (left && left < islands_left_ && going) {
                 islands_left_ = left;
                 phase_ = phase_t::heal_k;
+                return;
+            }
+            if (left && left < reach_left_ && going) {
+                reach_left_ = left;
+                phase_ = phase_t::reach_k;
                 return;
             }
             tally_.verdict = concluded_verdict(tally_);
@@ -2393,7 +2491,7 @@ struct ram_index {
             tally_.opening = opening;
             tally_.islands_found = opening.audited_nodes - opening.reachable_nodes;
             round_seed_ = round_seed(opening);
-            islands_left_ = (std::numeric_limits<std::size_t>::max)();
+            islands_left_ = reach_left_ = (std::numeric_limits<std::size_t>::max)();
             phase_ = health.visible ? phase_t::heal_k : phase_t::done_k;
         }
 
@@ -2406,6 +2504,7 @@ struct ram_index {
                 if (swept_after_ == phase_t::none_k) phase_ = phase_t::hubs_k;
                 else open_health_(phase_t::heal_k);
                 break;
+            case phase_t::reach_k: open_health_(phase_t::reach_k); break;
             case phase_t::hubs_k:
                 draw_hubs_();
                 phase_ = phase_t::gather_k;
@@ -2431,6 +2530,7 @@ struct ram_index {
                 if (swept_after_ == phase_t::none_k) tally_.reachability = tally_.opening;
                 phase_ = phase_t::done_k;
                 break;
+            case phase_t::reach_k: phase_ = phase_t::done_k; break;
             case phase_t::hubs_k:
             case phase_t::gather_k:
             case phase_t::restitch_k: open_health_(phase_t::restitch_k); break;
@@ -2623,8 +2723,7 @@ struct ram_index {
             if constexpr (a_view_batched_metric<metric_type_, value_t>) {
                 using query_view_t = typename metric_type_::query_view_t;
                 std::array<query_view_t, extent_> views;
-                for (std::size_t lane = 0; lane != extent_; ++lane)
-                    views[lane] = metric_type_::query_view(query_at(lane));
+                for (std::size_t lane = 0; lane != extent_; ++lane) views[lane] = metric.query_view(query_at(lane));
                 std::span<query_view_t const> const queries {views};
                 open_queries(metric, queries);
                 for (std::size_t first = 0; first != count;) {
@@ -2806,32 +2905,87 @@ struct ram_index {
         }
 
         /** Links every unreached or stranded island whose first rank falls in @p task through the
-         *  root's component, with no distance: an unreached one's entry from the first of its own
-         *  links inside the component that takes it, a stranded one's entry to the entry of the
-         *  component linking to it. A component with neither waits for the restitch. */
+         *  root's component, with no distance: an unreached one's entry as @ref link_unreached_
+         *  does, a stranded one's entry to the entry of the component linking to it. A component
+         *  with neither waits for the restitch. */
         void heal_(task_t const& task) noexcept {
+            auto keeps_none = [](node_id_t) noexcept { return false; };
             std::size_t healed = 0;
             for (std::size_t rank = task.nodes.first; rank < task.nodes.bound; ++rank) {
                 if (!health.island_first(rank)) continue;
                 u8_t const roles = health.island_roles(rank);
                 node_id_t const entry = health.island_entry(rank);
-                if (roles & health_plan_t::unreached_island_k) {
-                    node_id_t owner = missing_k;
-                    for (std::size_t slot = 0; owner == missing_k; ++slot) {
-                        node_id_t const link = link_at_(entry, slot);
-                        if (link == missing_k) break;
-                        if (link < health.visible && health.in_component(link) &&
-                            add_or_swap_link_(link, entry) == taken_t::written_k)
-                            owner = link;
-                    }
-                    if (owner != missing_k) health.record_heal_link(owner, entry), ++healed;
-                }
+                if (roles & health_plan_t::unreached_island_k)
+                    if (node_id_t const owner = link_unreached_(entry); owner != missing_k)
+                        health.record_heal_link(owner, entry), ++healed;
                 node_id_t const parent = health.island_entry_parent(rank);
                 if ((roles & health_plan_t::stranded_island_k) && parent != missing_k &&
-                    add_or_swap_link_(entry, parent) == taken_t::written_k)
+                    add_or_swap_link_(entry, parent, keeps_none) == taken_t::written_k)
                     health.record_heal_link(entry, parent), ++healed;
             }
             add_(tally_.islands_reconnected, healed);
+        }
+
+        /** Links unreached island entry @p entry from the first of its own links inside the root's
+         *  component that takes it, else, as full hubs refuse every link, from a free slot of the
+         *  first list of the component its links link to; answers the owner or none. */
+        node_id_t link_unreached_(node_id_t entry) noexcept {
+            auto keeps_none = [](node_id_t) noexcept { return false; };
+            auto keeps_all = [](node_id_t) noexcept { return true; };
+            auto takes = [&](node_id_t owner, auto const& keeps) noexcept {
+                return owner < health.visible && owner != entry && health.in_component(owner) &&
+                       add_or_swap_link_(owner, entry, keeps) == taken_t::written_k;
+            };
+            for (std::size_t slot = 0;; ++slot) {
+                node_id_t const link = link_at_(entry, slot);
+                if (link == missing_k) break;
+                if (takes(link, keeps_none)) return link;
+            }
+            for (std::size_t slot = 0;; ++slot) {
+                node_id_t const hop = link_at_(entry, slot);
+                if (hop == missing_k) break;
+                if (hop >= health.visible || hop == entry) continue;
+                for (std::size_t hop_slot = 0;; ++hop_slot) {
+                    node_id_t const owner = link_at_(hop, hop_slot);
+                    if (owner == missing_k) break;
+                    if (takes(owner, keeps_all)) return owner;
+                }
+            }
+            return missing_k;
+        }
+
+        /** Walks for the entry of each island whose first rank falls in @p task . Each entry
+         *  searches the graph for its own value as an insertion does, merges its live links into
+         *  the candidates, adds the selector's picks to its list and offers itself back to each,
+         *  every write through @ref add_or_swap_link_, so reach and the reach rule hold. */
+        template <typename metric_type_, typename context_type_, typename selector_type_>
+        void reach_(task_t const& task, metric_type_& metric, context_type_& context,
+                    selector_type_ const& selector) noexcept {
+            auto keeps_none = [](node_id_t) noexcept { return false; };
+            traversal_stats_t const before = context.telemetry;
+            std::size_t walked = 0;
+            for (std::size_t position = task.nodes.first; position < task.nodes.bound; ++position) {
+                if (!health.island_first(position)) continue;
+                node_id_t const node_id = health.island_entry(position);
+                value_t const& value = index_->published_value_of(node_id);
+                reach_admission_t const others {health.visible, node_id};
+                context.results.clear();
+                context.frontier.clear();
+                context.visited.clear();
+                index_->template search_around_<synchronization_t::concurrent_k>(
+                    value, metric, others, reach_expansion_, widest_list_, context.results, context, dummy_fold_t {});
+                index_->add_neighbor_candidates_(node_id, value, metric, others, context);
+                metric.reset(value);
+                selector(*index_, metric, context);
+                for (std::size_t pick = 0; pick != context.selected_neighbors.size(); ++pick) {
+                    node_id_t const picked = context.selected_neighbors[pick].node_id;
+                    add_or_swap_link_(node_id, picked, keeps_none);
+                    add_or_swap_link_(picked, node_id, keeps_none);
+                }
+                ++walked;
+            }
+            add_(tally_.reselected_nodes, walked);
+            add_spent_(context.telemetry - before);
         }
 
         /** The link in slot @p slot of @p node_id 's list, read under its lock, or none past its
@@ -2849,11 +3003,12 @@ struct ram_index {
          *      past the budget planning reserved among them; else a slot of the root's component.
          *
          *  That slot's resident is the one linked to by the most entries, taken when it stays
-         *  linked to by more than @p member and the reach rule releases it. Adds go first, since an
-         *  add dead ends no search, while a swap may for a target outside the round's sample. The
-         *  in-link counts follow every write.
+         *  linked to by more than @p member, @p keeps does not hold it and the reach rule releases
+         *  it. Adds go first, since an add dead ends no search, while a swap may for a target
+         *  outside the round's sample. The in-link counts follow every write.
          */
-        taken_t add_or_swap_link_(node_id_t owner, node_id_t member) noexcept {
+        template <typename keeps_type_>
+        taken_t add_or_swap_link_(node_id_t owner, node_id_t member, keeps_type_ const& keeps) noexcept {
             if (owner == member || owner >= health.visible || member >= health.visible) return taken_t::refused_k;
             node_t& node = index_->nodes_[owner];
             node.lock();
@@ -2870,7 +3025,9 @@ struct ram_index {
                 unsigned richest_links = health.in_links(member);
                 for (std::size_t slot = 0; slot != neighbors.size(); ++slot) {
                     node_id_t const resident = neighbors[slot];
-                    if (resident >= health.visible || health.in_links(resident) <= richest_links + 1u) continue;
+                    if (resident >= health.visible || health.in_links(resident) <= richest_links + 1u ||
+                        keeps(resident))
+                        continue;
                     richest = slot, richest_links = health.in_links(resident);
                 }
                 if (richest != neighbors.size() && health.take_link_under_lock_if_spare(owner, neighbors[richest])) {
@@ -2959,6 +3116,13 @@ struct ram_index {
         /** Entries the last closing health check left unreached, which the next must lower for
          *  another heal. */
         std::size_t islands_left_ = 0;
+
+        /** Entries the heals left unreached as the last reach began, which the heals after it must
+         *  lower for another reach. */
+        std::size_t reach_left_ = 0;
+
+        /** Candidates each walk of the reach keeps. */
+        std::size_t reach_expansion_ = 0;
     };
 
     /**
@@ -3075,6 +3239,9 @@ struct ram_index {
         /** The budget planning reserved every neighbor list for. */
         std::size_t connectivity() const noexcept { return rounds_.connectivity(); }
 
+        /** The walk width the bound target's reach takes. */
+        std::size_t reach_expansion() const noexcept { return rounds_.reach_expansion(); }
+
         /** The audit the bound target's round reads and sweeps. */
         health_plan_t const& health() const noexcept { return rounds_.health; }
 
@@ -3088,7 +3255,7 @@ struct ram_index {
         /** The phase the plan is in: a move's, then the bound target's round's. */
         phase_t phase() const noexcept { return moving() ? moves_ : rounds_.phase(); }
 
-        /** Where the round's phase sits among its six; zero in the moves. */
+        /** Where the round's phase sits among its seven; zero in the moves. */
         std::size_t ordinal() const noexcept { return moving() ? 0 : rounds_.ordinal(); }
 
         /** Units of the round's phase done and in all; none in the moves. */
@@ -3816,6 +3983,22 @@ struct ram_index {
         return to_span(context.hinted_ids);
     }
 
+    /** Appends to @c context.hinted_ids, behind the hints @ref stage_hints_ staged, the nearest
+     *  nodes a seeding walk left in @c context.results that no hint names, until they make one
+     *  landmark batch of @ref connectivity nodes; answers every staged node, the hints first. */
+    template <typename context_type_>
+    std::span<node_id_t const> stage_seeds_(context_type_& context) const noexcept {
+        std::size_t const batch = min_of(connectivity(), context.hinted_ids.capacity());
+        std::size_t const hinted_count = context.hinted_ids.size();
+        for (scored_node_t const& seed : context.results) {
+            if (context.hinted_ids.size() >= batch) break;
+            bool hinted = false;
+            for (std::size_t hint = 0; hint != hinted_count; ++hint) hinted |= context.hinted_ids[hint] == seed.node_id;
+            if (!hinted) context.hinted_ids.push_back_reserved(seed.node_id);
+        }
+        return to_span(context.hinted_ids);
+    }
+
     /** Whether at least one published node exists under @p key, stopping at the first. */
     bool contains(key_t const& key) const noexcept { return key_map_.contains(key, static_cast<node_id_t>(size())); }
 
@@ -4195,6 +4378,10 @@ struct ram_index {
             if (node_range.bound < node_range.first || static_cast<std::size_t>(node_range.bound) > node_count)
                 return status_code_t::config_mismatch_k;
 
+            growing_buffer<byte_t, allocator_t> scratch {index_->allocator_};
+            if constexpr (a_scratch_value_codec<value_codec_type_, value_t>)
+                if (failed(scratch.resize_uninitialized(codec.scratch_bytes()))) return status_code_t::out_of_memory_k;
+
             // The plan vetted both prefix-sum columns and every ID, and reserved every neighbor
             // list, so the slices are trusted and the lists fit.
             std::size_t widest_list = 0;
@@ -4212,10 +4399,12 @@ struct ram_index {
 
                 std::size_t const bytes_first = columns.value_offsets[node];
                 std::size_t const bytes_bound = columns.value_offsets[node + 1];
-                if (status_t const decoded = codec.load(columns.values.subspan(bytes_first, bytes_bound - bytes_first),
-                                                        record.value);
-                    failed(decoded))
-                    return decoded;
+                bytes_view_t const input = columns.values.subspan(bytes_first, bytes_bound - bytes_first);
+                status_t decoded;
+                if constexpr (a_scratch_value_codec<value_codec_type_, value_t>)
+                    decoded = codec.load(input, record.value, to_writable_span(scratch));
+                else decoded = codec.load(input, record.value);
+                if (failed(decoded)) return decoded;
             }
             index_->widen_(widest_list);
             atomic_ref<std::size_t>(covered).store_add(node_range.size(), std::memory_order_release);
@@ -4538,6 +4727,7 @@ struct ram_index {
         }
         plan.connectivity_ = connectivity;
         plan.widest_list_ = this->connectivity();
+        plan.reach_expansion_ = resolved_config_({config.expansion_factor}, connectivity).expansion_factor;
         plan.size_round_(config.cache_bytes,
                          sizeof(value_t) + divide_round_up<std::size_t>(payload, max_of<std::size_t>(entries, 1)));
         if (failed(plan.reserve_round_(entries))) return status_code_t::out_of_memory_k;
@@ -4611,6 +4801,7 @@ struct ram_index {
         rounds.connectivity_ = connectivity;
         rounds.widest_list_ = max_of(connectivity + 1, this->connectivity());
         for (ram_index const* from : gathered) rounds.widest_list_ = max_of(rounds.widest_list_, from->connectivity());
+        rounds.reach_expansion_ = resolved_config_({config.refine.expansion_factor}, connectivity).expansion_factor;
         rounds.size_round_(config.refine.cache_bytes,
                            sizeof(value_t) + divide_round_up<std::size_t>(payload, max_of<std::size_t>(entries, 1)));
         if (failed(rounds.reserve_round_(capacity))) return refuse(status_code_t::out_of_memory_k);
@@ -4881,6 +5072,28 @@ struct ram_index {
         node_id_t sampling_first() const noexcept { return 0; }
 
         /** Landmarks come from the IDs below this bound, the snapshot. */
+        node_id_t sampling_bound() const noexcept { return first_invisible_id; }
+    };
+
+    /** What a round's reach walks: the IDs below the round's watermark but the walking row, so a
+     *  row never picks itself. */
+    struct reach_admission_t {
+
+        /** The round's watermark. */
+        node_id_t first_invisible_id = 0;
+
+        /** The walking row. */
+        node_id_t node_id = 0;
+
+        /** Whether the walk may locate @p candidate_id. */
+        bool admits(node_id_t candidate_id) const noexcept {
+            return candidate_id < first_invisible_id && candidate_id != node_id;
+        }
+
+        /** Landmarks come from the IDs from this one, the first. */
+        node_id_t sampling_first() const noexcept { return 0; }
+
+        /** Landmarks come from the IDs below this bound, the watermark. */
         node_id_t sampling_bound() const noexcept { return first_invisible_id; }
     };
 

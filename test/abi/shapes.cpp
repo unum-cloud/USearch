@@ -212,6 +212,23 @@ static case_result_t test_shapes_metric(sweep_cell_t const& cell, usearch_shapes
     return {};
 }
 
+/** A VRAM index's exact scan under the Chamfer distance scores as the same index reloaded on RAM
+ *  scans it, within the quantization's band. */
+static void test_shapes_device_scan(sweep_cell_t const& cell, util::u64_t seed) {
+    session_t session = open_session(settings_of(session_settings(), cell), cell.cpu_class);
+    if (!expect_true(bool(session))) return;
+    usearch_shapes_metadata_t geometry {usearch_shapes_metric_chamfer_k, usearch_scalar_f16_k, 0, 0};
+    geometry.connectivity = shapes_sizes_k.connectivity;
+    handle<shapes_verbs_t> index = open_index<shapes_verbs_t>(session, geometry, cell.shards);
+    if (!expect_true(bool(index))) return;
+    shapes_tape_t const shapes = generate_shapes(shapes_sizes_k.shapes + recall_samples_k, shapes_sizes_k, seed);
+    usearch_traversal_stats_t stats {};
+    if (!expect_success(insert_entries(index, shapes.view(), shapes_sizes_k.shapes, 0, cell_batch_k, 0, stats))) return;
+    scratch_directory_t const scratch;
+    expect_device_scan(index, shapes_verbs_t::slice(shapes.view(), shapes_sizes_k.shapes), recall_samples_k,
+                       scratch.path("scanned"), shapes_score_band(shapes, unit_roundoff_of(geometry.quantization)));
+}
+
 void run_shapes_abi_cases() {
     constexpr std::array<usearch_shapes_metric_t, 4> metrics_k {
         usearch_shapes_metric_chamfer_k, usearch_shapes_metric_hausdorff_k, usearch_shapes_metric_gromov_wasserstein_k,
@@ -234,6 +251,11 @@ void run_shapes_abi_cases() {
                               .c_str(),
                           test_shapes_metric, cell, geometry, stream_key(test_run.settings.seed, name));
         }
+        if (cell.residency != usearch_residency_vram_k || cell.cpu_class != usearch_cpu_class_unknown_k) continue;
+        std::string const scan_label = fmt::format("test_shapes_device_scan({}, {})", constant_of(cell.cpu_class),
+                                                   cell.shards);
+        run_test_case(scan_label.c_str(), test_shapes_device_scan, cell,
+                      stream_key(test_run.settings.seed, fmt::format("shapes {} device-scan", name_of(cell))));
     }
 }
 

@@ -77,6 +77,9 @@ export class DenseTraversalStats {
   restarts = 0;
   /** Hint keys no shard held an entry under; zero unless a search was handed hints. */
   missingHints = 0;
+  /** Of the distances computed, the sketch distances a sequence search's seeding walk spent;
+   *  zero for every other walk. */
+  seedingDistances = 0;
 
   /** Folds another reading into this one, which is how a sweep gathers totals. Binding-only. */
   accumulate(other: DenseTraversalStats): void {
@@ -84,6 +87,7 @@ export class DenseTraversalStats {
     this.computedDistances += other.computedDistances;
     this.restarts += other.restarts;
     this.missingHints += other.missingHints;
+    this.seedingDistances += other.seedingDistances;
   }
 }
 

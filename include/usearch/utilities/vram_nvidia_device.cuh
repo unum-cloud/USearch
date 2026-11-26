@@ -13,7 +13,7 @@
 
 #include <cuda/atomic> // `cuda::atomic_ref` - the device twin of `std::atomic_ref`
 
-#include <stringzilla/strings/ampere.cuh> // `sz_u32_lanes_sum_ampere_`
+#include <stringzilla/strings/ampere.cuh> // `sz_u32_lanes_sum_ampere`
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/vram_nvidia_device.hpp"
@@ -159,7 +159,7 @@ struct ampere_scan_t {
     template <typename value_type_>
         requires(std::is_integral_v<value_type_> && sizeof(value_type_) == 4)
     static __device__ __forceinline__ value_type_ warp_sum(value_type_ value) noexcept {
-        return static_cast<value_type_>(sz_u32_lanes_sum_ampere_(static_cast<u32_t>(value)));
+        return static_cast<value_type_>(sz_u32_lanes_sum_ampere(static_cast<u32_t>(value)));
     }
 };
 

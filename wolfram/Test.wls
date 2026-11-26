@@ -198,7 +198,8 @@ entriesUnder[family_String, index_, key_Integer] :=
     Replace[verbOf[family, "Count"][index, key], tally_Association :> tally["Entries"]]
 (* The frozen settings a checkpoint's metadata answers, as a live index describes them; a geospatial checkpoint
    freezes only its connectivity, which answers as a bare integer. *)
-metadataOf["Sequence", description_Association] := KeyTake[description, {"Metric", "Connectivity"}]
+metadataOf["Sequence", description_Association] :=
+    KeyTake[description, {"Metric", "Connectivity", "Classes", "SketchBytes"}]
 metadataOf["Shapes", description_Association] :=
     KeyTake[description, {"Metric", "Quantization", "Points", "Connectivity"}]
 metadataOf["Geospatial", description_Association] := description["Connectivity"]
@@ -267,12 +268,11 @@ checkFamily[family_String] := Module[{verb = verbOf[family, #] &, say = family <
     DeleteFile[checkpoint]]
 
 (* The basic families take their own entries, and each one searched for comes back first under its own key. *)
-$sequences = SequenceInitRam[]
+$sequences = SequenceInitRam["utf8-containment"]
 Expect["a fresh sequence index", KeyTake[SequenceDescribe[$sequences], {"Metric", "Size", "GPUClass"}],
-    <|"Metric" -> "levenshtein", "Size" -> 0, "GPUClass" -> "unknown"|>]
+    <|"Metric" -> "utf8-containment", "Size" -> 0, "GPUClass" -> "unknown"|>]
 Expect["a sequence index on a CPU class", SequenceDescribe[$sequences]["CPUClass"] =!= "unknown", True]
-Expect["the metric a sequence index froze", SequenceDescribe[SequenceInitRam["levenshtein-utf8"]]["Metric"],
-    "levenshtein-utf8"]
+Expect["the metric a sequence index froze", SequenceDescribe[SequenceInitRam["dna-overlap"]]["Metric"], "dna-overlap"]
 Expect["text, bytes and byte values in one batch", SequenceInsert[SequenceIndexOn[$sequences, $executor],
     {1, 2, 3}, {"kitten", ByteArray[ToCharacterCode["sitting"]], ToCharacterCode["mitten"]}], Null]
 Expect["the size after a sequence insertion", SequenceDescribe[$sequences]["Size"], 3]
@@ -283,6 +283,25 @@ Expect["the sequences under a key", Normal /@ SequenceGet[$sequences, 2, $local]
 Expect["the sequence tally under a key", SequenceCount[$sequences, 2],
     <|"Entries" -> 1, "TotalBytes" -> 7, "LargestBytes" -> 7|>]
 Expect["a verb takes only its own family's receivers", Head[ShapesDescribe[$sequences]], ShapesDescribe]
+(* Similarities of A, C, G and T to themselves, and of A and G to each other, at the byte values they share. *)
+nucleotides[self_Integer, near_Integer] := Normal[SparseArray[Join[Thread[({#, #} & /@ (ToCharacterCode["ACGT"] + 1)) ->
+    self], {{66, 72} -> near, {72, 66} -> near}], {256, 256}]]
+Expect["a containment refuses costs", FailureQ[SequenceInitRam["utf8-containment", "Similarities" -> nucleotides[2, 0],
+    "Gap" -> 2]], True]
+Expect["an overlap finds the read a query reverse complements", With[{index = SequenceInitRam["dna-overlap"]},
+    SequenceInsert[index, {1, 2, 3}, {"ACGTTGCAAGGCTTAACCGGTTACGATCGA", "GGCTTAACCGGTTACGATCGATTTGCAGCA",
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"}];
+    With[{found = SequenceSearch[index, {"TGCTGCAAATCGATCGTAACCGGTTAAGCC"}, 2, $local]},
+        {First[First[found["Keys"]]], First[First[found["Scores"]]] == 0}]], {2, True}]
+Expect["an alignment under costs ranks a near substitution above a far one", With[{index = SequenceInitRam[
+    "protein-alignment", "Similarities" -> nucleotides[4, 3], "Gap" -> 4]},
+    SequenceInsert[index, {1, 2}, {"GCGTTGCAACGT", "CCGTTGCAACGT"}];
+    With[{found = SequenceSearch[index, {"ACGTTGCAACGT"}, 2, $local]},
+        {First[First[found["Keys"]]], Less @@ First[found["Scores"]]}]], {1, True}]
+Expect["a containment finds the text holding a query whatever the case", With[{index = SequenceInitRam["utf8-containment"]},
+    SequenceInsert[index, {1, 2}, {"the quick brown fox jumps over the lazy dog",
+        "a journey of a thousand miles begins with a single step"}];
+    First[First[SequenceSearch[index, {"BROWN FOX jumps"}, 2, $local]["Keys"]]]], 1]
 
 SeedRandom[42];
 $points = RandomReal[1, {#, 3}] & /@ {5, 9, 13};
@@ -331,7 +350,7 @@ Expect["a cut empties its source into its targets", {AssociationQ[DenseReshard[D
     {$cut}, {$left, $right}, "Seed" -> 7]], DenseDescribe[$cut]["Size"],
     DenseDescribe[$left]["Size"] + DenseDescribe[$right]["Size"]}, {True, 0, 2}]
 
-ClearAll[$sequences, $shapes, $geospatial, $nearby, $found, $points, $stops, $plan, $loaded, $viewed, $nvme,
-    $source, $gathered, $cut, $left, $right, $arena, $local, $scanned, $index, $executor, $gpu]
+ClearAll[nucleotides, $sequences, $shapes, $geospatial, $nearby, $found, $points, $stops, $plan, $loaded, $viewed,
+    $nvme, $source, $gathered, $cut, $left, $right, $arena, $local, $scanned, $index, $executor, $gpu]
 DeleteFile[$checkpoint]
 Print["Handles Released"]

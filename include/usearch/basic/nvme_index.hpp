@@ -133,6 +133,9 @@ class nvme_parts_catalog {
         /** Walks a scratch or staging refusal ended early, their rankings short. */
         std::size_t saturated_walks = 0;
 
+        /** Of @c computed_distances, those the seeding walks drained by their seeding metric. */
+        std::size_t computed_distances_in_seeding = 0;
+
         /** Neighbors rows read to expand frontiers. */
         nvme_reads_t neighbor_reads;
 
@@ -228,12 +231,17 @@ class nvme_parts_catalog {
                       dummy_predicate_t {}, executor);
     }
 
+    /** @ref search, every walk first walking by the metric @p make_seeding builds, as
+     *  @p make_metric does, unfiltered and from the sketch its @c sketch_of writes for the query,
+     *  then by the query's own metric from the nearest nodes it found, one landmark batch;
+     *  @c unseeded_factory_t walks once. */
     template <typename make_metric_type_, typename query_of_type_, typename score_type_, typename predicate_type_,
-              typename relation_type_>
+              typename relation_type_, typename make_seeding_type_ = unseeded_factory_t>
     expected<search_result_t> search(std::size_t count, make_metric_type_&& make_metric, query_of_type_&& query_of,
                                      std::span<key_t> keys, std::span<score_type_> distances,
                                      std::span<std::size_t> counts, search_config_t config, predicate_type_&& predicate,
-                                     relation_type_&& relation, executor_t& executor) noexcept {
+                                     relation_type_&& relation, executor_t& executor,
+                                     make_seeding_type_&& make_seeding = {}) noexcept {
         static_assert(!an_aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, walk_payload_t> ||
                           a_per_thread_predicate_family<std::remove_cvref_t<predicate_type_>>,
                       "A queue driving its own threads takes an aggregating predicate per thread");
@@ -241,12 +249,13 @@ class nvme_parts_catalog {
         if (counts.size() != count || keys.size() != distances.size() || (count && keys.size() % count))
             return {{}, status_code_t::config_mismatch_k};
         if (!count) return {{}, status_code_t::success_k};
-        using query_t = search_query<std::remove_reference_t<make_metric_type_>,
-                                     std::remove_reference_t<query_of_type_>, std::remove_reference_t<predicate_type_>,
-                                     std::remove_reference_t<relation_type_>, score_type_>;
+        using query_t =
+            search_query<std::remove_reference_t<make_metric_type_>, std::remove_reference_t<query_of_type_>,
+                         std::remove_reference_t<predicate_type_>, std::remove_reference_t<relation_type_>, score_type_,
+                         std::remove_reference_t<make_seeding_type_>>;
         std::size_t const wanted = keys.size() / count, expansion_factor = non_zero_expansion_factor(config);
         typename query_t::inputs_t const inputs {&make_metric, &query_of, &predicate, &relation, wanted,
-                                                 wanted,       keys,      distances,  counts};
+                                                 wanted,       keys,      distances,  counts,    &make_seeding};
         return walk_queries_<query_t>(to_span(media_), media_list_key_, to_span(parts_), executor, count,
                                       expansion_factor, inputs, counts);
     }
@@ -822,6 +831,8 @@ class nvme_parts_catalog {
      *  @param[in,out] executor The threads, their queues and their scratch; held for the call.
      *  @param[in] coordinates_of Writes a stored value's fixed coordinates from its view into
      *      three floats, or is @c no_fixed_coordinates_t, so they are solved from distances.
+     *  @param[in] make_seeding Builds the metric whose sketches every greedy walk follows first,
+     *      as @ref search takes it, before the call's metric walks on from where it stopped.
      *
      *  @par Statuses:
      *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
@@ -831,23 +842,31 @@ class nvme_parts_catalog {
      *  - @c config_mismatch_k A medium the queues cannot read.
      *  - @c io_k A read came back short; the draws written stand, their later reads unscored.
      */
-    template <typename make_metric_type_, typename query_of_type_, typename coordinates_type_ = no_fixed_coordinates_t>
+    template <typename make_metric_type_, typename query_of_type_, typename coordinates_type_ = no_fixed_coordinates_t,
+              typename make_seeding_type_ = unseeded_factory_t>
         requires std::same_as<node_id_type_, u32_t>
     expected<sample_result_t> sample(sample_inputs<key_t> inputs, sample_outputs<key_t> outputs, sample_config_t config,
                                      make_metric_type_&& make_metric, query_of_type_&& query_of, executor_t& executor,
-                                     coordinates_type_ const& coordinates_of = {}) const noexcept {
+                                     coordinates_type_ const& coordinates_of = {},
+                                     make_seeding_type_&& make_seeding = {}) const noexcept {
         using metric_t =
             typename std::invoke_result_t<make_metric_type_&, scratch_allocator_t const&, std::size_t>::value_t;
-        using source_t = nvme_sample_source<metric_t, std::remove_reference_t<query_of_type_>, coordinates_type_>;
+        using seeding_metric_t =
+            typename std::invoke_result_t<make_seeding_type_&, scratch_allocator_t const&, std::size_t>::value_t;
+        using source_t =
+            nvme_sample_source<metric_t, std::remove_reference_t<query_of_type_>, coordinates_type_, seeding_metric_t>;
         using rows_t = typename source_t::rows_t;
         std::size_t const width = connectivity();
         auto draw = [&](rows_t const& rows) noexcept -> expected<sample_result_t> {
             scratch_allocator_t const scratch {executor.arena(0)};
             auto [metric, metric_status] = make_metric(scratch, width);
             if (failed(metric_status)) return {{}, metric_status};
+            auto [seeding_metric, seeding_status] = make_seeding(scratch, width);
+            if (failed(seeding_status)) return {{}, seeding_status};
             growing_buffer<distance_t, scratch_allocator_t> drained {scratch};
             if (failed(drained.resize_uninitialized(width))) return {{}, status_code_t::out_of_memory_k};
-            source_t const source {*this, executor, metric, query_of, coordinates_of, rows, to_writable_span(drained)};
+            source_t const source {
+                *this, executor, metric, query_of, coordinates_of, rows, to_writable_span(drained), &seeding_metric};
             return nvme_draw_sample(source, inputs, outputs, config, executor, *rows.failure);
         };
         return nvme_sample<key_t, node_id_t>(
@@ -1043,6 +1062,14 @@ class nvme_parts_catalog {
         /** Draws this walk's landmarks. */
         splitmix64_t random_generator;
 
+        /** One landmark slot per seed it may take, carved with the walk: as many as it draws
+         *  landmarks. */
+        std::span<nvme_seed<node_id_t>> seed_slots;
+
+        /** The seeds still to take ahead of its draws, front first: the nearest nodes its seeding
+         *  walk found. */
+        std::span<nvme_seed<node_id_t>> seeds;
+
         /** The shard walked, positional among the call's shards. */
         u32_t shard = 0;
 
@@ -1051,6 +1078,10 @@ class nvme_parts_catalog {
 
         /** Where the walk stands. */
         nvme_walk_stage_t stage = nvme_walk_stage_t::finished_k;
+
+        /** What the walk scores by: the seeding metric first, where its query has one, and then
+         *  the query's own metric from the seeds. */
+        score_role_t role = score_role_t::search_k;
 
         explicit walk_t(scratch_allocator_t allocator) noexcept
             : results(candidates_allocator_t(allocator)), admitted(candidates_allocator_t(allocator)),
@@ -1190,10 +1221,18 @@ class nvme_parts_catalog {
     }
 
     /** Opens the round of a primed @p query on its prepared query, which every walk of it then
-     *  reuses. */
+     *  reuses, and its seeding round on the sketch of it. */
     template <typename query_type_>
     static void prime_scoring_(walk_shape_t const&, query_type_& query) noexcept {
-        if (succeeded(query.status)) query.metric.reset(query.prepared);
+        if (failed(query.status)) return;
+        query.metric.reset(query.prepared);
+        if constexpr (query_type_::seeded_k) query.seeding.reset(query.seeding.sketch_of(query.prepared));
+    }
+
+    /** Starts every walk of a seeded @p query by its seeding metric. */
+    template <typename query_type_>
+    static void prime_walk_(query_type_ const&, walk_t& walk) noexcept {
+        walk.role = query_type_::seeded_k ? score_role_t::build_k : score_role_t::search_k;
     }
 
     /** The codec's view of the value fetched for the score @p flight of @p walker. */
@@ -1207,9 +1246,27 @@ class nvme_parts_catalog {
     /** Hands the staged flights of @p walk to its query's metric as the codec's views of their
      *  fetched values, drains them within the stopping candidates' radius, at a refusal and once
      *  all are staged, lets an admitting query test them, releases them and ranks them through
-     *  @p walker; a metric refusing a lone value saturates the walk. */
+     *  @p walker; a metric refusing a lone value saturates the walk. A seeding walk scores by the
+     *  query's seeding metric and admits nothing. */
     template <typename walker_type_>
     [[gnu::always_inline]] static void score_staged_(walker_type_& walker, walk_t& walk) noexcept {
+        using query_t = typename walker_type_::query_t;
+        query_t& query = walker.queries_[walk.query_slot];
+        if constexpr (query_t::seeded_k)
+            if (walk.role == score_role_t::build_k) {
+                std::size_t const scored_before = walker.telemetry_.computed_distances;
+                score_staged_by_(walker, walk, query.seeding, std::false_type {});
+                walker.telemetry_.computed_distances_in_seeding += walker.telemetry_.computed_distances - scored_before;
+                return;
+            }
+        score_staged_by_(walker, walk, query.metric, std::bool_constant<query_t::admitting_k> {});
+    }
+
+    /** The body of @ref score_staged_ under @p metric, admitting through an admitting query where
+     *  @p admitting_type_ holds. */
+    template <typename walker_type_, typename metric_type_, typename admitting_type_>
+    [[gnu::always_inline]] static void score_staged_by_(walker_type_& walker, walk_t& walk, metric_type_& metric,
+                                                        admitting_type_) noexcept {
         using query_t = typename walker_type_::query_t;
         query_t& query = walker.queries_[walk.query_slot];
         // Full stopping candidates only take what beats their furthest member, so that member's
@@ -1220,13 +1277,13 @@ class nvme_parts_catalog {
         quad<distance_t> distances;
         std::size_t staged = 0, drained = 0;
         auto drain = [&]() noexcept {
-            query.metric.drain(std::span<distance_t>(distances).subspan(drained, staged - drained), radius);
+            metric.drain(std::span<distance_t>(distances).subspan(drained, staged - drained), radius);
             drained = staged;
         };
         for (u32_t const flight : walk.staged) {
-            if (query.metric.push(fetched_value_(walker, flight)) == metric_staging_t::refused_k) {
+            if (metric.push(fetched_value_(walker, flight)) == metric_staging_t::refused_k) {
                 drain();
-                if (query.metric.push(fetched_value_(walker, flight)) == metric_staging_t::refused_k) break;
+                if (metric.push(fetched_value_(walker, flight)) == metric_staging_t::refused_k) break;
             }
             ++staged;
         }
@@ -1235,7 +1292,7 @@ class nvme_parts_catalog {
         quad<scored_node_t> scored_batch;
         for (std::size_t lane = 0; lane != staged; ++lane)
             scored_batch[lane] = scored_node_t {walker.flights_[walk.staged[lane]].node, distances[lane]};
-        if constexpr (query_t::admitting_k) walker.admit_scored_(walk, std::span(scored_batch).first(staged));
+        if constexpr (admitting_type_::value) walker.admit_scored_(walk, std::span(scored_batch).first(staged));
         bool const refused = staged != walk.staged.size();
         for (u32_t const flight : walk.staged) walker.release_flight_(flight);
         walk.staged.clear();
@@ -1276,11 +1333,14 @@ class nvme_parts_catalog {
      *  ranked locators resolve into keys once every walk finished. Each slot keeps one metric from
      *  the caller's factory and the prepared query of its current batch query. */
     template <typename make_metric_type_, typename query_of_type_, typename predicate_type_, typename relation_type_,
-              typename score_type_>
+              typename score_type_, typename make_seeding_type_ = unseeded_factory_t>
     struct search_query {
         using key_t = key_type_;
         using metric_t =
             typename std::invoke_result_t<make_metric_type_&, scratch_allocator_t const&, std::size_t>::value_t;
+        using seeding_metric_t =
+            typename std::invoke_result_t<make_seeding_type_&, scratch_allocator_t const&, std::size_t>::value_t;
+        inline static constexpr bool seeded_k = !std::is_same_v<seeding_metric_t, unseeded_t>;
         using query_t =
             typename std::invoke_result_t<query_of_type_&, std::size_t, scratch_allocator_t const&>::value_t;
         inline static constexpr bool related_k = !std::is_same_v<std::remove_cv_t<relation_type_>, dummy_predicate_t>;
@@ -1306,11 +1366,13 @@ class nvme_parts_catalog {
             std::span<key_t> keys;
             std::span<score_type_> distances;
             std::span<std::size_t> counts;
+            make_seeding_type_* make_seeding = nullptr;
         };
 
         inputs_t const& inputs;
         scratch_allocator_t allocator;
         metric_t metric;
+        seeding_metric_t seeding;
         query_t prepared {};
         status_t status = status_code_t::success_k;
         growing_buffer<shard_node_t, scratch_allocator_t> locators;
@@ -1320,7 +1382,8 @@ class nvme_parts_catalog {
         std::size_t found = 0;
 
         search_query(inputs_t const& inputs, scratch_allocator_t allocator) noexcept
-            : search_query(inputs, allocator, (*inputs.make_metric)(allocator, staging_k)) {}
+            : search_query(inputs, allocator, (*inputs.make_metric)(allocator, staging_k),
+                           (*inputs.make_seeding)(allocator, staging_k)) {}
 
         /** Bytes one slot stages beyond the query itself: its ranking, distances and resolved
          *  keys. */
@@ -1350,11 +1413,11 @@ class nvme_parts_catalog {
         results_array_t const& stopping_candidates(walk_t const& walk) const noexcept { return walk.results; }
 
         /** An admitting walk stops on what its query admitted, so the admitted set fills before it
-         *  stops. */
+         *  stops; a seeding walk admits nothing and stops on its candidates. */
         results_array_t const& stopping_candidates(walk_t const& walk) const noexcept
             requires admitting_k
         {
-            return walk.admitted;
+            return walk.role == score_role_t::build_k ? walk.results : walk.admitted;
         }
         void finish_walk(walk_t const& walk) noexcept {
             found = merge_search_results(to_span(stopping_candidates(walk)),
@@ -1378,8 +1441,10 @@ class nvme_parts_catalog {
         }
 
       private:
-        search_query(inputs_t const& inputs, scratch_allocator_t allocator, expected<metric_t>&& made) noexcept
-            : inputs(inputs), allocator(allocator), metric(std::move(made.value)), status(made.status),
+        search_query(inputs_t const& inputs, scratch_allocator_t allocator, expected<metric_t>&& made,
+                     expected<seeding_metric_t>&& seeding_made) noexcept
+            : inputs(inputs), allocator(allocator), metric(std::move(made.value)),
+              seeding(std::move(seeding_made.value)), status(failed(made.status) ? made.status : seeding_made.status),
               locators(allocator), ranked_distances(allocator), resolved(allocator) {}
     };
 
@@ -1663,9 +1728,23 @@ class nvme_parts_catalog {
 
 #pragma region Sampling
 
-    /** Every part as SAMPLE reads it, each verb a blocking read on thread zero's queue; see
-     *  @c a_sample_source. A failed read lands in @c rows.failure, and its verb answers nothing. */
-    template <typename metric_type_, typename query_of_type_, typename coordinates_type_>
+    /** The query a seeding walk scores with: the sketch @c metric writes of a stored sequence as it
+     *  lands. */
+    template <typename seeding_metric_type_>
+    struct sketch_query_of {
+        seeding_metric_type_& metric;
+
+        expected<typename seeding_metric_type_::query_view_t> operator()(value_view_t stored,
+                                                                         scratch_allocator_t const&) const noexcept {
+            return {metric.sketch_of(stored), status_code_t::success_k};
+        }
+    };
+
+    /** Every part as SAMPLE reads it, each verb a blocking read on thread zero's queue, walked
+     *  first by the sketches of @c seeding_metric where a call brings one, as @c a_sample_source
+     *  has it. A failed read lands in @c rows.failure, and its verb answers nothing. */
+    template <typename metric_type_, typename query_of_type_, typename coordinates_type_,
+              typename seeding_metric_type_ = unseeded_t>
     struct nvme_sample_source {
         using key_t = key_type_;
         using node_id_t = node_id_type_;
@@ -1679,6 +1758,7 @@ class nvme_parts_catalog {
         coordinates_type_ const& fixed_coordinates_of;
         rows_t rows;
         std::span<distance_t> drained;
+        seeding_metric_type_* seeding_metric;
 
         std::span<node_id_t const> watermarks() const noexcept { return rows.watermarks_snapshot; }
 
@@ -1737,8 +1817,19 @@ class nvme_parts_catalog {
             }
         }
 
+        /** A greedy walk by the seeding metric, where the call brings one, then on by the exact
+         *  metric from where it stopped, as a seeded search walks twice. */
         std::size_t walk(shard_node_t from, shard_node_t toward, std::span<shard_node_t> chain) const noexcept {
-            return sample_greedy_walk(*this, from, toward, chain);
+            std::size_t seeded = 0;
+            if constexpr (!std::is_same_v<seeding_metric_type_, unseeded_t>) {
+                sketch_query_of<seeding_metric_type_> sketch_of {*seeding_metric};
+                nvme_sample_source<seeding_metric_type_, sketch_query_of<seeding_metric_type_>, coordinates_type_> const
+                    sketches {catalog, executor, *seeding_metric, sketch_of, fixed_coordinates_of,
+                              rows,    drained,  nullptr};
+                seeded = sample_greedy_walk(sketches, from, toward, chain);
+                if (seeded) from = chain[seeded - 1];
+            }
+            return seeded + sample_greedy_walk(*this, from, toward, chain.subspan(seeded));
         }
 
         void coordinates_of(shard_node_t node, std::span<f32_t, 3> xyz) const noexcept

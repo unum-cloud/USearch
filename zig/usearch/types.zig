@@ -795,10 +795,12 @@ pub const Phase = enum(c_int) {
     gather = 8,
     /// A round re-stitching each neighborhood.
     restitch = 9,
+    /// A round linking island entries by walks from the root.
+    reach = 10,
     /// A round on NVMe rewriting each tile of links from what its restitch changed.
-    write = 10,
+    write = 11,
     /// The plan ended its round, and nothing more is pending.
-    done = 11,
+    done = 12,
     _,
 
     /// The canonical spelling, as `.restitch` spells "restitch". Calls `usearch_phase_name`.

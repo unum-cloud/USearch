@@ -146,6 +146,7 @@ from .basic import Tape, TapeEntries, TapeLayout, TapeView
 
 # sequence
 from .sequence import (
+    SequenceCosts,
     SequenceCursor,
     SequenceIndex,
     SequenceIndexDeferredOn,
@@ -160,7 +161,6 @@ from .sequence import (
     SequenceReshardConfig,
     SequenceReshardPlan,
     SequenceVerbs,
-    SequenceWeights,
     sequence_metadata_read,
     sequence_metadata_read_buffer,
     sequence_reshard,

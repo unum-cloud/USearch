@@ -873,6 +873,7 @@ struct GeospatialLoadRamArguments(ImplicitlyCopyable):
     var completion: Completion
     var source: BytesView[ImmUntrackedOrigin]
     var ram: RamOptions[ImmUntrackedOrigin]
+    var connectivity: c_size_t
     var values_per_key: c_size_t
     var terrain: GeospatialTerrainArguments
     var progress: ProgressArguments
@@ -888,6 +889,7 @@ struct GeospatialLoadVramArguments(ImplicitlyCopyable):
     var completion: Completion
     var source: BytesView[ImmUntrackedOrigin]
     var vram: VramOptions[ImmUntrackedOrigin]
+    var connectivity: c_size_t
     var values_per_key: c_size_t
     var terrain: GeospatialTerrainArguments
     var progress: ProgressArguments
@@ -1925,6 +1927,7 @@ struct GeospatialIndex(GeospatialVerbs, Movable):
                 Completion.BLOCKING,
                 source,
                 ram,
+                c_size_t(0),
                 c_size_t(values_per_key),
                 terrain,
                 ProgressArguments(),
@@ -2038,6 +2041,7 @@ struct GeospatialIndex(GeospatialVerbs, Movable):
                 Completion.BLOCKING,
                 source,
                 vram,
+                c_size_t(0),
                 c_size_t(values_per_key),
                 terrain,
                 ProgressArguments(),

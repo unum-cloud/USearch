@@ -237,6 +237,10 @@ static_assert(default_alignment_k >= 8 && (default_alignment_k & (default_alignm
  *  how many records any one collection can ever place. */
 inline constexpr std::size_t address_bits_k = 48;
 
+/** Who scores a pair: a search ranking results, or a builder linking nodes. A score alike for both
+ *  serves either; a sequence kit builds by its sketches and searches by its canonical score. */
+enum class score_role_t : bool { search_k, build_k };
+
 /** How one step of a walk - a batch of landmarks or one expansion round - left it, in every tier. */
 enum class walk_step_t : u32_t {
 
@@ -271,6 +275,16 @@ struct dummy_fold_t {
     constexpr walk_demand_t absorb(batch_types_ const&...) const noexcept {
         return walk_demand_t::continue_k;
     }
+};
+
+/** No seeding walk: a search walks once, by its canonical score. */
+struct unseeded_t {};
+
+/** A seeding walk's query and the metric scoring it, both held for one search. */
+template <typename query_type_, typename metric_type_>
+struct seeding_walk {
+    query_type_ query;
+    metric_type_& metric;
 };
 
 /**
@@ -503,6 +517,15 @@ struct [[nodiscard]] expected<value_type_&, status_type_> {
 
     value_type_& value() const noexcept { return *address; }
     explicit operator bool() const noexcept { return status == status_code_t::success_k; }
+};
+
+/** The factory of no seeding metric, over any allocator, for a search that walks once by its
+ *  canonical score. */
+struct unseeded_factory_t {
+    template <typename allocator_type_>
+    expected<unseeded_t> operator()(allocator_type_ const&, std::size_t) const noexcept {
+        return {{}, status_code_t::success_k};
+    }
 };
 
 /** A half-open interval of integer identifiers, iterable like the standard views -
@@ -1007,6 +1030,10 @@ struct traversal_stats_t {
     /** Hint keys no shard held an entry under. */
     std::size_t missing_hints = 0;
 
+    /** Subset of @c computed_distances a search's seeding walk spent on sketches, ahead of its walk
+     *  by the canonical score. */
+    std::size_t computed_distances_in_seeding = 0;
+
     traversal_stats_t operator-(traversal_stats_t const& before) const noexcept {
         return {computed_distances - before.computed_distances,
                 visited_members - before.visited_members,
@@ -1014,7 +1041,8 @@ struct traversal_stats_t {
                 saturated_walks - before.saturated_walks,
                 computed_distances_in_refines - before.computed_distances_in_refines,
                 computed_distances_in_reverse_refines - before.computed_distances_in_reverse_refines,
-                missing_hints - before.missing_hints};
+                missing_hints - before.missing_hints,
+                computed_distances_in_seeding - before.computed_distances_in_seeding};
     }
 
     /** Folds another walk's or thread's counters in, every one a spend that adds. */
@@ -1026,8 +1054,15 @@ struct traversal_stats_t {
         computed_distances_in_refines += other.computed_distances_in_refines;
         computed_distances_in_reverse_refines += other.computed_distances_in_reverse_refines;
         missing_hints += other.missing_hints;
+        computed_distances_in_seeding += other.computed_distances_in_seeding;
         return *this;
     }
+};
+
+/** Whether @p telemetry_type_ counts the distances a search's seeding walk spent on sketches. */
+template <typename telemetry_type_>
+concept a_seeding_telemetry_holder = requires(telemetry_type_ const& telemetry) {
+    telemetry.computed_distances_in_seeding;
 };
 
 /** What one refinement round concluded, valued as the C verdicts are. */
@@ -1082,6 +1117,9 @@ enum class phase_t : u8_t {
 
     /** Every neighborhood re-stitched in one core's cache. */
     restitch_k,
+
+    /** Island entries linked by walks from the root. */
+    reach_k,
 
     /** What the moves or rounds produced, filed where it lands: a split's keys, or NVMe parts. */
     write_k,
@@ -1210,13 +1248,15 @@ constexpr refine_verdict_t concluded_verdict(refine_report_t const& report) noex
     return report.changed_nodes ? refine_verdict_t::improved_k : refine_verdict_t::converged_k;
 }
 
-/** The position of a round's @p phase among its six, from the opening health check to the closing
- *  one: a health check following no phase opens the round, one following any other closes it; zero
- *  outside a round's phases. */
+/** The position of a round's @p phase among its seven, from the opening health check through the
+ *  closing one to the reach and heals past it: a health check following no phase opens the round,
+ *  one following any other closes it; zero outside a round's phases. */
 constexpr std::size_t round_ordinal(phase_t phase, phase_t swept_after) noexcept {
     std::size_t const health = static_cast<std::size_t>(phase_t::health_k);
-    if (phase == phase_t::health_k)
-        return swept_after == phase_t::none_k ? 1 : static_cast<std::size_t>(phase_t::restitch_k) - health + 2;
+    std::size_t const closing = static_cast<std::size_t>(phase_t::restitch_k) - health + 2;
+    bool const opening = swept_after == phase_t::none_k;
+    if (phase == phase_t::health_k) return opening ? 1 : closing;
+    if (phase == phase_t::reach_k || (!opening && phase == phase_t::heal_k)) return closing + 1;
     if (phase < phase_t::heal_k || phase > phase_t::restitch_k) return 0;
     return static_cast<std::size_t>(phase) - health + 1;
 }
@@ -2181,6 +2221,9 @@ struct vram_telemetry_block_t {
 
     /** Re-selected nodes whose neighbor set gained a member it lacked; order never counts. */
     u64_t changed_nodes;
+
+    /** Distances a search's seeding walks scored by sketch, apart from @c scored. */
+    u64_t sketched;
 };
 
 /**

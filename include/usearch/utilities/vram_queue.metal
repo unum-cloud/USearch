@@ -212,6 +212,9 @@ struct metal_sorted_candidates {
     }
     uint radius() { return metal_distance_bits(metal_warp_t::shuffle(entries[slots_ - 1], metal_warp_t::width_k - 1)); }
     bool full() { return metal_warp_t::shuffle(entries[slots_ - 1], metal_warp_t::width_k - 1) != metal_sentinel_k; }
+
+    /** The nearest kept rank, expanded or not; the sentinel while the candidates are empty. */
+    ulong nearest() { return metal_warp_t::shuffle(entries[0], 0); }
     ulong rank_entry(uint rank) {
         ulong result = metal_sentinel_k;
         for (uint slot = 0; slot < slots_; ++slot)
@@ -437,6 +440,9 @@ struct metal_arena_frontier {
     }
     bool exhausted() { return expansions >= expansion_target; }
     bool beyond_radius(ulong) { return false; }
+
+    /** The front's nearest entry, expanded or not; the sentinel while the frontier is empty. */
+    ulong nearest() { return front.nearest(); }
 
     /** Drops the tail entries that cannot rank among the nearest @p count, as the CUDA arena
      *  frontier's @c keep_nearest does: a radix select of the count-th smallest distance key, eight
@@ -783,9 +789,16 @@ inline void metal_expand_round(thread walk_type_& walk, thread frontier_& fronti
     }
 }
 
+/** Which walks a telemetry flush folds: seeding ones count their scores as sketched, the rest as
+ *  scored, as @c vram_traversal_t splits them. */
+enum metal_traversal_t : uint {
+    metal_searching_k = 0,
+    metal_seeding_k = 1,
+};
+
 /** Folds @p walk 's telemetry into the device counters, from its leader; a tally carries into its
  *  high word, since one batch's scored nodes outgrow 32 bits. */
-template <typename walk_type_>
+template <metal_traversal_t traversal_ = metal_searching_k, typename walk_type_>
 inline void metal_flush(thread walk_type_& walk) {
     if (walk.lane != 0) return;
     auto const add = [&](uint counter, uint value) {
@@ -794,7 +807,7 @@ inline void metal_flush(thread walk_type_& walk) {
         if (low + value < low) atomic_fetch_add_explicit(walk.counters + counter + 1, 1u, memory_order_relaxed);
     };
     add(metal_hops_k, walk.hops);
-    add(metal_scored_k, walk.scored_count);
+    add(traversal_ == metal_seeding_k ? metal_sketched_k : metal_scored_k, walk.scored_count);
     add(metal_restarts_k, walk.restarts);
     add(metal_lock_attempts_k, walk.lock_attempts);
     add(metal_lock_skips_k, walk.lock_skips);

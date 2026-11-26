@@ -348,7 +348,7 @@ Every docstring names the C symbol it calls, or says the method is Python-only.
 
 ## Sequence Indexes
 
-`SequenceIndex` searches byte strings, UTF-8 text, DNA, RNA and proteins under edit distances and alignments.
+`SequenceIndex` searches proteins, DNA, RNA and UTF-8 text, each under the metric made for it.
 Its verbs and receivers are the dense ones, and a batch is a list of `str` or bytes-like objects, each `str` read as UTF-8.
 
 ```python
@@ -356,15 +356,27 @@ import numpy as np
 from usearch import SequenceIndex, SequenceMetric
 from usearch.keys import keys_to_integers
 
-words = SequenceIndex.init_ram(SequenceMetric.LEVENSHTEIN_UTF8)
-words.insert([1, 2, 3], ["kitten", b"sitting", bytearray(b"mitten")])
-matches = words.search(["sitting"], 1)
-assert keys_to_integers(np.asarray(matches.keys)[0]).tolist() == [2]
+reads = SequenceIndex.init_ram(SequenceMetric.DNA_OVERLAP)
+reads.insert([1, 2, 3], [b"ACGTTGCAAGGCTTAACCGGTTACGATCGA", b"GGCTTAACCGGTTACGATCGATTTGCAGCA", b"T" * 30])
+matches = reads.search([b"TGCTGCAAATCGATCGTAACCGGTTAAGCC"], 2)
+assert keys_to_integers(np.asarray(matches.keys)[0]).tolist()[0] == 2
 assert np.asarray(matches.distances)[0, 0] == 0
 ```
 
-`SequenceMetric.NEEDLEMAN_WUNSCH` takes a `substitution_matrix`, any buffer of 256 × 256 signed bytes, and a `gap` cost; `SequenceMetric.OVERLAP` takes `window_widths` in bytes.
-A checkpoint records no substitution matrix, so every `load_*` and `view_*` takes it again.
+The query is the reverse complement of the second read, so it comes back first at distance zero.
+
+| Metric | Sequences | Score | Default costs |
+| :-- | :-- | :-- | :-- |
+| `PROTEIN_ALIGNMENT` | proteins | global alignment with linear gaps | BLOSUM62, gap 7 |
+| `DNA_OVERLAP` | DNA and RNA | shifted overlap, also as the reverse complement | transition half a transversion, gap 2 |
+| `UTF8_CONTAINMENT` | UTF-8 text | share of the query's windows the stored side lacks, case-folded | none |
+
+Costs come from `similarities`, any buffer of 256 × 256 signed bytes scoring raw bytes against each other, and a `gap` cost beside them; leaving both out keeps the metric's own, and a containment takes none.
+`sketch_bytes` sets the bytes of the sketch in front of each stored sequence, a multiple of four, where zero takes the metric's default of 512 for protein alignment and UTF-8 containment.
+A DNA overlap keeps no sketch and refuses any.
+Inputs are raw bytes, which the library folds into classes itself, so there is nothing to pack.
+`get` answers the stored form: packed class codes for proteins, class bytes for DNA, and case-folded UTF-8 for text.
+A checkpoint records the classes and costs, so `load_*` and `view_*` take none.
 `count` answers the entries under a key, and `get` answers them as an Apache Arrow tape in the arena, offsets beside the bytes end to end.
 
 ## Shape Indexes

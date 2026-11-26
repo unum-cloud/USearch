@@ -33,25 +33,26 @@ struct vram_amd_kits {
     /** The ceiling the kits compile under, which names the class's shared graph kernels too. */
     inline static constexpr nk_capability_t capability_k = kernels_type_::capability_k;
 
-    /** Rungs of the kits' kernels: one, serving every cloud. */
-    inline static constexpr std::size_t rungs_k = 1;
+    /** Rungs of the kit's canonical kernels: one, serving every cloud, which its builders
+     *  compile on too. */
+    inline static constexpr std::size_t canonical_rungs_count_k = 1;
+    inline static constexpr std::size_t build_rungs_count_k = canonical_rungs_count_k;
 
   private:
     template <typename, typename, typename, typename>
     friend struct basic::vram_amd_ragged_graph;
 
-    /** The rung serving shapes of @p longest bytes, or @c rungs_k when none does. Defined in
-     *  @c vram_amd_metric.hip, as are the members below reading the kit. */
-    static std::size_t rung_serving_(std::size_t longest) noexcept;
+    /** The rung serving the shapes of @p longest bytes for either role, or
+     *  @c canonical_rungs_count_k when none does. Defined in @c vram_amd_metric.hip, as are the
+     *  members below reading the kit. */
+    static std::size_t rung_serving_(score_role_t role, std::size_t longest) noexcept;
 
-    /** Lanes the kit scores a shape with on @p rung. */
-    static u32_t lanes_per_entry_(std::size_t rung) noexcept;
+    /** Lanes the kit scores a shape with for either role on @p rung. */
+    static u32_t lanes_per_entry_(score_role_t role, std::size_t rung) noexcept;
 
-    /** Bytes the @p bytes long pack at @p data takes once prepared, a multiple of 16. */
-    static std::size_t span_bytes_(byte_t const* data, std::size_t bytes) noexcept;
-
-    /** Bytes any loaded pack of up to @p longest bytes takes once prepared. */
-    static std::size_t span_bytes_(std::size_t longest) noexcept { return span_bytes_(nullptr, longest); }
+    /** Bytes the @p bytes long pack at @p data takes once prepared for either role, a multiple of
+     *  16, from its length alone. */
+    static std::size_t span_bytes_(score_role_t role, byte_t const* data, std::size_t bytes) noexcept;
 
     /** Bytes the @p stored pack saves into: its cloud unpacked, @b [points,3] scalars, as the RAM
      *  codec saves a cloud. */

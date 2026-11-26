@@ -167,14 +167,34 @@ static void test_geospatial_behaviors(sweep_cell_t const& cell, util::u64_t seed
     expect_cleared(index, points.data());
 }
 
+/** A VRAM index's exact scan judges the same matches as the index reloaded on RAM scans, a
+ *  centimetre apart at most, the resolution the entries keep. */
+static void test_geospatial_device_scan(sweep_cell_t const& cell, util::u64_t seed) {
+    session_t session = open_session(settings_of(session_settings(), cell), cell.cpu_class);
+    if (!expect_true(bool(session))) return;
+    handle<geospatial_verbs_t> index = open_index<geospatial_verbs_t>(session, geospatial_geometry_t {}, cell.shards);
+    if (!expect_true(bool(index))) return;
+    std::vector<usearch_geospatial_observation_t> const points = generate_points(
+        geospatial_entries_k + recall_samples_k, seed);
+    geospatial_queries_t const queries {points.data() + geospatial_entries_k, usearch_geospatial_relation_near_k, {}};
+    usearch_traversal_stats_t stats {};
+    if (!expect_success(insert_entries(index, points.data(), geospatial_entries_k, 0, cell_batch_k, 0, stats))) return;
+    scratch_directory_t const scratch;
+    expect_device_scan(index, queries, recall_samples_k, scratch.path("scanned"), 0.01);
+}
+
 void run_geospatial_abi_cases() {
     // Each stream keeps the name its cell had before the label spelled the constants.
     for (sweep_cell_t const& cell : diagonal_sweep(usearch_scalar_unknown_k)) {
         std::string const name = fmt::format("geospatial {} near", name_of(cell));
-        run_test_case(fmt::format("test_geospatial_behaviors({}, {}, {})", constant_of(cell.residency),
-                                  constant_of(cell.cpu_class), cell.shards)
-                          .c_str(),
-                      test_geospatial_behaviors, cell, stream_key(test_run.settings.seed, name));
+        std::string const label = fmt::format("test_geospatial_behaviors({}, {}, {})", constant_of(cell.residency),
+                                              constant_of(cell.cpu_class), cell.shards);
+        run_test_case(label.c_str(), test_geospatial_behaviors, cell, stream_key(test_run.settings.seed, name));
+        if (cell.residency != usearch_residency_vram_k || cell.cpu_class != usearch_cpu_class_unknown_k) continue;
+        std::string const scan_label = fmt::format("test_geospatial_device_scan({}, {})", constant_of(cell.cpu_class),
+                                                   cell.shards);
+        run_test_case(scan_label.c_str(), test_geospatial_device_scan, cell,
+                      stream_key(test_run.settings.seed, fmt::format("geospatial {} device-scan", name_of(cell))));
     }
 }
 

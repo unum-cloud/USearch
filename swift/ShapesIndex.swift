@@ -265,6 +265,7 @@ public final class ShapesIndex: @unchecked Sendable {
                     completion: callState.completion,
                     path: path,
                     ram: ramOptions(domains, config.memoryDomains.count, config.cpuClassCeiling),
+                    connectivity: 0,
                     values_per_key: config.valuesPerKey,
                     progress: progress
                 )
@@ -291,6 +292,7 @@ public final class ShapesIndex: @unchecked Sendable {
                     completion: callState.completion,
                     path: path,
                     vram: vramOptions(devices, config.devices.count, config.gpuClassCeiling),
+                    connectivity: 0,
                     values_per_key: config.valuesPerKey,
                     progress: progress
                 )
@@ -317,6 +319,7 @@ public final class ShapesIndex: @unchecked Sendable {
                     completion: callState.completion,
                     buffer: usearch_bytes_view_t(bytes),
                     ram: ramOptions(domains, config.memoryDomains.count, config.cpuClassCeiling),
+                    connectivity: 0,
                     values_per_key: config.valuesPerKey,
                     progress: progress
                 )
@@ -344,6 +347,7 @@ public final class ShapesIndex: @unchecked Sendable {
                     completion: callState.completion,
                     buffer: usearch_bytes_view_t(bytes),
                     vram: vramOptions(devices, config.devices.count, config.gpuClassCeiling),
+                    connectivity: 0,
                     values_per_key: config.valuesPerKey,
                     progress: progress
                 )

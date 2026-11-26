@@ -45,8 +45,8 @@ import cloud.unum.usearch.Types.USearchException;
 import cloud.unum.usearch.Types.Verb;
 
 /**
- * A Similarity Search Index over variable-length sequences - text, DNA, RNA and proteins - under
- * Levenshtein, window overlap and Needleman-Wunsch scoring, with the modality's own options, metric
+ * A Similarity Search Index over variable-length sequences - proteins, DNA, RNA and UTF-8 text -
+ * under alignment, overlap and containment metrics, with the modality's own options, metric
  * and per-call settings as nested types.
  *
  * <p>
@@ -60,27 +60,50 @@ import cloud.unum.usearch.Types.Verb;
  * try (Executor pool = Executor.forRam(new int[0], null, 0);
  *         Arena arena = new Arena(pool);
  *         SequenceIndex index = SequenceIndex.initRam(new SequenceOptions(), new int[0])) {
- *     index.on(pool).insert(new Key[] {Key.of(1), Key.of(2)}, Tape.ofStrings("kitten", "sitting"));
- *     Matches matches = index.on(pool).search(Tape.ofStrings("sitten"), 1, arena);
+ *     index.on(pool).insert(new Key[] {Key.of(1), Key.of(2)}, Tape.ofStrings("MKTAYIAKQR", "MKSAYIAKQR"));
+ *     Matches matches = index.on(pool).search(Tape.ofStrings("MKSAYIAKQR"), 1, arena);
  *     System.out.println(matches.key(0, 0));
  * }
  * }</pre>
  */
 public final class SequenceIndex implements AutoCloseable {
 
-    /** The sequence scoring kinds supported out of the box. */
+    /**
+     * The sequence metrics supported out of the box: each names what the sequences are, the form
+     * they are stored in, and the score ranking them. Every metric stores a sequence folded, and a
+     * get returns the stored form, never the bytes an insertion passed: packed class codes for a
+     * protein alignment, one class code a byte for a DNA overlap, and case-folded UTF-8 for a
+     * containment.
+     */
     public enum SequenceMetric {
 
-        /** A kind the library could not name. */
+        /** A metric the library could not name. */
         UNKNOWN(0),
-        /** Levenshtein edit distance over raw bytes. */
-        LEVENSHTEIN_BYTES(1),
-        /** Levenshtein edit distance over UTF-8 code points. */
-        LEVENSHTEIN_UTF8(2),
-        /** Global alignment with a substitution matrix and a linear gap cost. */
-        NEEDLEMAN_WUNSCH(3),
-        /** The share of the larger set of fixed-width windows the other side misses. */
-        OVERLAP(4);
+        /**
+         * Global alignment of proteins with linear gap costs: BLOSUM62 with a gap of 7 over the 20
+         * amino acids unless the index names its own {@link SequenceCosts}. Both sequences are aligned
+         * end to end over the classes the costs fold bytes into, and every unaligned symbol is charged
+         * the gap cost, so a score is quadratic in time. A stored sequence reads back as its class
+         * codes, five bits apiece, little-endian behind one byte counting the slots the last bytes
+         * leave unused.
+         */
+        PROTEIN_ALIGNMENT(1),
+        /**
+         * Shifted overlap of DNA or RNA: the cost of aligning the two sequences where one slides over
+         * the other, at the shift most windows vote for, on either strand. Bytes fold into the four
+         * classes of A, C, G and T in either case, U read as T, under costs that charge a transition
+         * half a transversion and a gap of 2, unless the index names its own. The query also scores
+         * as its reverse complement, and the lower distance counts. A stored sequence reads back as
+         * its class codes, one byte apiece.
+         */
+        DNA_OVERLAP(2),
+        /**
+         * Window containment of UTF-8 text: the share of the query's distinct windows the stored side
+         * lacks, whatever the case. A text is case-folded as Unicode folds it before it is stored or
+         * scored, which may lengthen it up to three times. Asymmetric, and exact at every radius. A
+         * stored text reads back folded. Takes no costs.
+         */
+        UTF8_CONTAINMENT(3);
 
         private final int code;
 
@@ -121,77 +144,81 @@ public final class SequenceIndex implements AutoCloseable {
     }
 
     /**
-     * The substitution matrix and gap cost Needleman-Wunsch scores with; the Levenshtein kinds take
-     * none. No checkpoint records them, so every load and view of such an index names them again.
-     * Mirrors {@code usearch_sequence_weights_t}.
+     * How alike two bytes are and the cost of leaving one unaligned, where an index scores by other
+     * costs than its metric's own. A checkpoint records the classes and costs, so loads and views
+     * take none. A DNA overlap needs costs folding bytes into exactly the four classes of A, C, G and
+     * T. Mirrors {@code usearch_sequence_costs_t}.
      *
-     * @param substitutionMatrix row-major 256x256 signed scores over byte alphabets.
+     * @param similarities row-major 256x256 signed similarities between raw bytes.
      * @param gap the cost of one unaligned symbol.
      */
-    public record SequenceWeights(byte[] substitutionMatrix, byte gap) {
+    public record SequenceCosts(byte[] similarities, byte gap) {
 
         /**
-         * Checks the matrix holds every pair, which C reads whole.
+         * Checks the table holds every byte, which C reads whole.
          *
-         * @throws USearchException SHAPE_MISMATCH unless the matrix holds 256x256 scores.
+         * @throws USearchException SHAPE_MISMATCH unless the similarities hold 256x256 scores.
          */
-        public SequenceWeights {
-            if (substitutionMatrix.length != 256 * 256) {
-                throw new USearchException(Status.SHAPE_MISMATCH, "a substitution matrix holds 256x256 scores");
+        public SequenceCosts {
+            if (similarities.length != 256 * 256) {
+                throw new USearchException(Status.SHAPE_MISMATCH, "similarities hold 256x256 scores");
             }
         }
 
-        /** Copies the weights into the call's memory, answering the pointer C reads, or null for none. */
-        static MemorySegment pass(Call call, @Nullable SequenceWeights weights) {
-            if (weights == null) {
+        /** Copies the costs into the call's memory, answering the pointer C reads, or null for the metric's own. */
+        static MemorySegment pass(Call call, @Nullable SequenceCosts costs) {
+            if (costs == null) {
                 return MemorySegment.NULL;
             }
-            MemorySegment struct = call.memory.allocate(WEIGHTS);
-            WEIGHTS_MATRIX.set(struct, 0L, call.input(MemorySegment.ofArray(weights.substitutionMatrix)));
-            WEIGHTS_GAP.set(struct, 0L, weights.gap);
+            MemorySegment struct = call.memory.allocate(COSTS);
+            COSTS_SIMILARITIES.set(struct, 0L, call.input(MemorySegment.ofArray(costs.similarities)));
+            COSTS_GAP.set(struct, 0L, costs.gap);
             return struct;
         }
     }
 
     /**
-     * The kind an empty index freezes, with its weights or window widths - the fields
+     * The metric an empty index freezes, with its costs - the fields
      * {@code usearch_sequence_init_ram_t} and {@code usearch_sequence_init_vram_t} share. Every setter
      * returns this instance.
      */
     public static final class SequenceOptions {
 
-        private SequenceMetric metric = SequenceMetric.LEVENSHTEIN_BYTES;
-        private @Nullable SequenceWeights weights = null;
-        private long[] windowWidths = new long[0];
+        private SequenceMetric metric = SequenceMetric.PROTEIN_ALIGNMENT;
+        private @Nullable SequenceCosts costs = null;
         private long connectivity = 0;
+        private long sketchBytes = 0;
         private long valuesPerKey = 0;
         private @Nullable CPUClass cpuClassCeiling = null;
         private @Nullable GPUClass gpuClassCeiling = null;
 
-        /** A byte Levenshtein index, with every optional field derived. */
+        /** A protein alignment index, with every optional field derived. */
         public SequenceOptions() {}
 
-        /** The scoring kind. */
+        /** What the sequences are and the score ranking them. */
         public SequenceOptions metric(SequenceMetric metric) {
             this.metric = metric;
             return this;
         }
 
-        /** The weights Needleman-Wunsch needs, and every other kind refuses with CONFIG_MISMATCH. */
-        public SequenceOptions weights(SequenceWeights weights) {
-            this.weights = weights;
-            return this;
-        }
-
-        /** Window widths in bytes, which the overlap kind needs and every other kind refuses. */
-        public SequenceOptions windowWidths(long... windowWidths) {
-            this.windowWidths = windowWidths;
+        /** The costs to score by; {@code null} for the metric's own, refused for a containment. */
+        public SequenceOptions costs(@Nullable SequenceCosts costs) {
+            this.costs = costs;
             return this;
         }
 
         /** The connections-per-node bound of the graph; zero derives. */
         public SequenceOptions connectivity(long connectivity) {
             this.connectivity = connectivity;
+            return this;
+        }
+
+        /**
+         * The bytes of the sketch in front of each stored sequence, a multiple of four; zero takes the metric's
+         * default, and a DNA overlap keeps none and refuses any.
+         */
+        public SequenceOptions sketchBytes(long sketchBytes) {
+            this.sketchBytes = sketchBytes;
             return this;
         }
 
@@ -216,34 +243,36 @@ public final class SequenceIndex implements AutoCloseable {
         /** Fills the fields both init structures share, at the same offsets in each. */
         void fill(Call call) {
             call.enumeration(INIT_METRIC, metric.code());
-            call.pointer(INIT_WEIGHTS, SequenceWeights.pass(call, weights));
-            if (windowWidths.length != 0) {
-                call.pointer(INIT_WINDOW_WIDTHS, call.memory.allocateFrom(ValueLayout.JAVA_LONG, windowWidths));
-                call.size(INIT_WINDOW_WIDTHS_COUNT, windowWidths.length);
-            }
+            call.pointer(INIT_COSTS, SequenceCosts.pass(call, costs));
             call.size(INIT_CONNECTIVITY, connectivity);
+            call.size(INIT_SKETCH_BYTES, sketchBytes);
             call.size(INIT_VALUES_PER_KEY, valuesPerKey);
         }
     }
 
     /**
-     * The kind and connectivity a checkpoint froze. Mirrors {@code usearch_sequence_metadata_t}.
+     * The metric and geometry a checkpoint froze. Mirrors {@code usearch_sequence_metadata_t}.
      *
-     * @param metric the scoring kind the checkpoint was built under.
+     * @param metric the metric the checkpoint was built under.
      * @param connectivity the connections per node the graph was built with.
+     * @param classes the classes the recorded costs folded bytes into; zero for a containment.
+     * @param sketchBytes the bytes of the sketch in front of each stored sequence; zero when the metric keeps none.
      */
-    public record SequenceMetadata(SequenceMetric metric, long connectivity) {
+    public record SequenceMetadata(SequenceMetric metric, long connectivity, long classes, long sketchBytes) {
 
         static SequenceMetadata lift(MemorySegment struct, long at) {
-            return new SequenceMetadata(SequenceMetric.of((int) METADATA_METRIC.get(struct, at)), (long)
-                    METADATA_CONNECTIVITY.get(struct, at));
+            return new SequenceMetadata(
+                    SequenceMetric.of((int) METADATA_METRIC.get(struct, at)),
+                    (long) METADATA_CONNECTIVITY.get(struct, at),
+                    (long) METADATA_CLASSES.get(struct, at),
+                    (long) METADATA_SKETCH_BYTES.get(struct, at));
         }
     }
 
     /**
      * A live index's state, each counter read once. Mirrors {@code usearch_sequence_index_description_t}.
      *
-     * @param metadata the frozen kind and connectivity.
+     * @param metadata the frozen kind and geometry.
      * @param size the stored entries.
      * @param capacity the entries hosted without growing again.
      * @param memoryUsage the bytes the handle holds, payload storage included.
@@ -900,8 +929,8 @@ public final class SequenceIndex implements AutoCloseable {
      * Creates an empty, mutable index in host memory. Calls {@code usearch_sequence_init_ram}.
      *
      * @param memoryDomains NUMA node ids to place shards on; an empty list derives every node.
-     * @throws USearchException UNKNOWN_KIND on an unknown kind, and CONFIG_MISMATCH on weights or
-     *     window widths the kind does not take.
+     * @throws USearchException UNKNOWN_KIND on an unknown metric, and CONFIG_MISMATCH on costs
+     *     the library refuses.
      */
     public static SequenceIndex initRam(SequenceOptions options, int[] memoryDomains) {
         return create(INIT_RAM, null, call -> {
@@ -925,7 +954,6 @@ public final class SequenceIndex implements AutoCloseable {
     /**
      * Copies a checkpoint into a new, mutable index in host memory. Calls {@code usearch_sequence_load_ram}.
      *
-     * @param weights the weights an alignment checkpoint was built with, {@code null} for the others.
      * @throws USearchException MALFORMED on a checkpoint that ends early, and IO when it cannot be read.
      */
     public static SequenceIndex loadRam(
@@ -933,12 +961,11 @@ public final class SequenceIndex implements AutoCloseable {
             @Nullable Executor executor,
             int[] memoryDomains,
             long valuesPerKey,
-            @Nullable SequenceWeights weights,
             @Nullable Progress progress) {
         return create(
                 LOAD_RAM,
                 executor,
-                call -> loading(call, true, memoryDomains, valuesPerKey, weights, progress)
+                call -> loading(call, true, memoryDomains, valuesPerKey, progress)
                         .path(LOAD_SOURCE, path));
     }
 
@@ -948,28 +975,21 @@ public final class SequenceIndex implements AutoCloseable {
             @Nullable Executor executor,
             int[] memoryDomains,
             long valuesPerKey,
-            @Nullable SequenceWeights weights,
             @Nullable Progress progress) {
         return create(
                 LOAD_RAM_BUFFER,
                 executor,
-                call -> loading(call, true, memoryDomains, valuesPerKey, weights, progress)
+                call -> loading(call, true, memoryDomains, valuesPerKey, progress)
                         .bytes(LOAD_SOURCE, buffer));
     }
 
     /** Copies a checkpoint into a new index in device memory. Calls {@code usearch_sequence_load_vram}. */
     public static SequenceIndex loadVram(
-            String path,
-            @Nullable Executor executor,
-            int[] devices,
-            long valuesPerKey,
-            @Nullable SequenceWeights weights,
-            @Nullable Progress progress) {
+            String path, @Nullable Executor executor, int[] devices, long valuesPerKey, @Nullable Progress progress) {
         return create(
                 LOAD_VRAM,
                 executor,
-                call -> loading(call, false, devices, valuesPerKey, weights, progress)
-                        .path(LOAD_SOURCE, path));
+                call -> loading(call, false, devices, valuesPerKey, progress).path(LOAD_SOURCE, path));
     }
 
     /** Copies a monolith from a buffer into a new index in device memory. Calls {@code usearch_sequence_load_vram_buffer}. */
@@ -978,13 +998,11 @@ public final class SequenceIndex implements AutoCloseable {
             @Nullable Executor executor,
             int[] devices,
             long valuesPerKey,
-            @Nullable SequenceWeights weights,
             @Nullable Progress progress) {
         return create(
                 LOAD_VRAM_BUFFER,
                 executor,
-                call -> loading(call, false, devices, valuesPerKey, weights, progress)
-                        .bytes(LOAD_SOURCE, buffer));
+                call -> loading(call, false, devices, valuesPerKey, progress).bytes(LOAD_SOURCE, buffer));
     }
 
     /**
@@ -993,11 +1011,8 @@ public final class SequenceIndex implements AutoCloseable {
      *
      * @throws USearchException UNSUPPORTED where the engine maps no sequence checkpoint.
      */
-    public static SequenceIndex viewRam(String path, @Nullable SequenceWeights weights) {
-        return create(VIEW_RAM, null, call -> {
-            call.path(VIEW_RAM.at("path"), path);
-            call.pointer(VIEW_RAM_WEIGHTS, SequenceWeights.pass(call, weights));
-        });
+    public static SequenceIndex viewRam(String path) {
+        return create(VIEW_RAM, null, call -> call.path(VIEW_RAM.at("path"), path));
     }
 
     /**
@@ -1008,19 +1023,14 @@ public final class SequenceIndex implements AutoCloseable {
      *     manifest points.
      */
     public static SequenceIndex viewNvme(
-            String path,
-            @Nullable Executor executor,
-            String[] paths,
-            @Nullable CPUClass cpuClassCeiling,
-            @Nullable SequenceWeights weights) {
+            String path, @Nullable Executor executor, String[] paths, @Nullable CPUClass cpuClassCeiling) {
         return create(VIEW_NVME, executor, call -> {
             call.path(VIEW_NVME.at("path"), path);
             call.nvme(call.arguments, VIEW_NVME.at("nvme"), paths, cpuClassCeiling);
-            call.pointer(VIEW_NVME_WEIGHTS, SequenceWeights.pass(call, weights));
         });
     }
 
-    /** Reads a checkpoint's kind and connectivity without loading it. Calls {@code usearch_sequence_metadata_read}. */
+    /** Reads a checkpoint's kind and geometry without loading it. Calls {@code usearch_sequence_metadata_read}. */
     public static SequenceMetadata metadataRead(String path, @Nullable Executor executor) {
         return BasicCalls.metadata(
                 FAMILY.metadataRead(),
@@ -1030,7 +1040,7 @@ public final class SequenceIndex implements AutoCloseable {
                 metadata -> SequenceMetadata.lift(metadata, 0));
     }
 
-    /** Reads a monolith's kind and connectivity without loading it. Calls {@code usearch_sequence_metadata_read_buffer}. */
+    /** Reads a monolith's kind and geometry without loading it. Calls {@code usearch_sequence_metadata_read_buffer}. */
     public static SequenceMetadata metadataReadBuffer(MemorySegment buffer, @Nullable Executor executor) {
         return BasicCalls.metadata(
                 FAMILY.metadataReadBuffer(),
@@ -1128,21 +1138,15 @@ public final class SequenceIndex implements AutoCloseable {
         return BasicCalls.resharding(FAMILY, from, into, config.seed, config.rounds());
     }
 
-    /** Fills the placement, bound, weights and handler every load shares, answering the call for its source. */
+    /** Fills the placement, bound and handler every load shares, answering the call for its source. */
     private static Call loading(
-            Call call,
-            boolean ram,
-            int[] placement,
-            long valuesPerKey,
-            @Nullable SequenceWeights weights,
-            @Nullable Progress progress) {
+            Call call, boolean ram, int[] placement, long valuesPerKey, @Nullable Progress progress) {
         if (ram) {
             call.ram(call.arguments, LOAD_RAM.at("ram"), placement, null);
         } else {
             call.vram(call.arguments, LOAD_VRAM.at("vram"), placement, null);
         }
         call.size(ram ? LOAD_RAM_VALUES_PER_KEY : LOAD_VRAM_VALUES_PER_KEY, valuesPerKey);
-        call.pointer(ram ? LOAD_RAM_WEIGHTS : LOAD_VRAM_WEIGHTS, SequenceWeights.pass(call, weights));
         call.progress(ram ? LOAD_RAM.at("progress") : LOAD_VRAM.at("progress"), progress);
         return call;
     }
@@ -1158,20 +1162,27 @@ public final class SequenceIndex implements AutoCloseable {
 
     static final Family FAMILY = Family.of("sequence");
 
-    private static final StructLayout WEIGHTS = MemoryLayout.structLayout(
-            Library.POINTER.withName("substitution_matrix"),
+    /** {@code usearch_sequence_costs_t}. */
+    private static final StructLayout COSTS = MemoryLayout.structLayout(
+            Library.POINTER.withName("similarities"),
             ValueLayout.JAVA_BYTE.withName("gap"),
             MemoryLayout.paddingLayout(7));
 
-    private static final VarHandle WEIGHTS_MATRIX = Library.field(WEIGHTS, "substitution_matrix");
-    private static final VarHandle WEIGHTS_GAP = Library.field(WEIGHTS, "gap");
+    private static final VarHandle COSTS_SIMILARITIES = Library.field(COSTS, "similarities");
+    private static final VarHandle COSTS_GAP = Library.field(COSTS, "gap");
 
     /** {@code usearch_sequence_metadata_t}. */
     private static final StructLayout METADATA = MemoryLayout.structLayout(
-            Library.ENUM.withName("metric"), Library.padding(), Library.SIZE.withName("connectivity"));
+            Library.ENUM.withName("metric"),
+            Library.padding(),
+            Library.SIZE.withName("connectivity"),
+            Library.SIZE.withName("classes"),
+            Library.SIZE.withName("sketch_bytes"));
 
     private static final VarHandle METADATA_METRIC = Library.field(METADATA, "metric");
     private static final VarHandle METADATA_CONNECTIVITY = Library.field(METADATA, "connectivity");
+    private static final VarHandle METADATA_CLASSES = Library.field(METADATA, "classes");
+    private static final VarHandle METADATA_SKETCH_BYTES = Library.field(METADATA, "sketch_bytes");
 
     /** {@code usearch_sequence_index_description_t}. */
     private static final StructLayout DESCRIPTION = MemoryLayout.structLayout(
@@ -1208,10 +1219,9 @@ public final class SequenceIndex implements AutoCloseable {
             Library.POINTER.withName("outcome"),
             Library.ENUM.withName("metric"),
             Library.padding(),
-            Library.POINTER.withName("weights"),
-            Library.POINTER.withName("window_widths"),
-            Library.SIZE.withName("window_widths_count"),
+            Library.POINTER.withName("costs"),
             Library.SIZE.withName("connectivity"),
+            Library.SIZE.withName("sketch_bytes"),
             Library.SIZE.withName("values_per_key"));
 
     /** {@code usearch_sequence_init_ram_t} or its VRAM twin, whose placement field is named {@code placement}. */
@@ -1222,10 +1232,9 @@ public final class SequenceIndex implements AutoCloseable {
     private static final Verb INIT_RAM = new Verb("usearch_sequence_init_ram", initializing("ram"));
     private static final Verb INIT_VRAM = new Verb("usearch_sequence_init_vram", initializing("vram"));
     private static final VarHandle INIT_METRIC = Library.field(INIT_SHARED, "metric");
-    private static final VarHandle INIT_WEIGHTS = Library.field(INIT_SHARED, "weights");
-    private static final VarHandle INIT_WINDOW_WIDTHS = Library.field(INIT_SHARED, "window_widths");
-    private static final VarHandle INIT_WINDOW_WIDTHS_COUNT = Library.field(INIT_SHARED, "window_widths_count");
+    private static final VarHandle INIT_COSTS = Library.field(INIT_SHARED, "costs");
     private static final VarHandle INIT_CONNECTIVITY = Library.field(INIT_SHARED, "connectivity");
+    private static final VarHandle INIT_SKETCH_BYTES = Library.field(INIT_SHARED, "sketch_bytes");
     private static final VarHandle INIT_VALUES_PER_KEY = Library.field(INIT_SHARED, "values_per_key");
 
     /** {@code usearch_sequence_load_ram_t}, its VRAM twin, and their buffer twins, reading {@code source}. */
@@ -1234,8 +1243,9 @@ public final class SequenceIndex implements AutoCloseable {
                 Library.padding(),
                 Library.BYTES_VIEW.withName("source"),
                 Library.placement(placement),
+                Library.SIZE.withName("connectivity"),
+                Library.SIZE.withName("sketch_bytes"),
                 Library.SIZE.withName("values_per_key"),
-                Library.POINTER.withName("weights"),
                 Library.PROGRESS);
     }
 
@@ -1245,9 +1255,7 @@ public final class SequenceIndex implements AutoCloseable {
     private static final Verb LOAD_VRAM_BUFFER = new Verb("usearch_sequence_load_vram_buffer", loadingLayout("vram"));
     private static final long LOAD_SOURCE = LOAD_RAM.at("source");
     private static final VarHandle LOAD_RAM_VALUES_PER_KEY = LOAD_RAM.field("values_per_key");
-    private static final VarHandle LOAD_RAM_WEIGHTS = LOAD_RAM.field("weights");
     private static final VarHandle LOAD_VRAM_VALUES_PER_KEY = LOAD_VRAM.field("values_per_key");
-    private static final VarHandle LOAD_VRAM_WEIGHTS = LOAD_VRAM.field("weights");
 
     private static final Verb VIEW_RAM = new Verb(
             "usearch_sequence_view_ram",
@@ -1255,10 +1263,7 @@ public final class SequenceIndex implements AutoCloseable {
                     Library.POINTER.withName("index"),
                     Library.POINTER.withName("outcome"),
                     Library.BYTES_VIEW.withName("path"),
-                    Library.POINTER.withName("weights"),
                     Library.placement("ram")));
-
-    private static final VarHandle VIEW_RAM_WEIGHTS = VIEW_RAM.field("weights");
 
     private static final Verb VIEW_NVME = new Verb(
             "usearch_sequence_view_nvme",
@@ -1266,9 +1271,7 @@ public final class SequenceIndex implements AutoCloseable {
                     Library.padding(),
                     Library.BYTES_VIEW.withName("path"),
                     Library.placement("nvme"),
-                    Library.POINTER.withName("weights")));
-
-    private static final VarHandle VIEW_NVME_WEIGHTS = VIEW_NVME.field("weights");
+                    Library.SIZE.withName("sketch_bytes")));
 
     private static final Verb RESERVE = new Verb(
             "usearch_sequence_reserve",
@@ -1303,6 +1306,7 @@ public final class SequenceIndex implements AutoCloseable {
                     Library.ENUM.withName("traversal"),
                     Library.padding(),
                     Library.PREDICATE,
+                    Library.POINTER.withName("hints"),
                     Library.PROGRESS,
                     Library.POINTER.withName("stats")));
 

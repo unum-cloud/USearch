@@ -41,7 +41,8 @@ endif ()
 # the `DEFINITIONS` the vendor's kits read. The vendor's `ENTRY` registers with the runner, which names none of them.
 # NVIDIA and AMD units compile host-only through Clang's CUDA or HIP mode, as the vendor's entry does. NVIDIA's cells
 # run the library's class fatbins; AMD's `DEVICE` entry compiles once more device-only into the suite's own code object
-# of the `CODES`. Apple's kernels compile from embedded source at first use, so its entry is a plain C++ unit.
+# of the `CODES`. Apple's kernels compile from embedded source at first use, so its entry is a plain C++ unit, and its
+# `DEVICE` entry is MSL a unit embeds, which the target lists uncompiled.
 function (usearch_test_vram_shards vendor_ architecture_macro_)
     cmake_parse_arguments(PARSE_ARGV 2 arg "" "ENTRY;DEVICE" "SOURCES;DEFINITIONS;CODES")
     set(target_ usearch_test_vram_shards_${vendor_})
@@ -67,6 +68,10 @@ function (usearch_test_vram_shards vendor_ architecture_macro_)
         endif ()
         usearch_gpu_bundle(${target_} ${vendor_} test_vram_${vendor_} ${entry_} ${arg_CODES} ${device_})
         usearch_gpu_host_only(${target_} ${entry_})
+    elseif (arg_DEVICE)
+        set(device_ ${CMAKE_CURRENT_SOURCE_DIR}/${arg_DEVICE})
+        set_source_files_properties(${device_} PROPERTIES HEADER_FILE_ONLY ON)
+        target_sources(${target_} PRIVATE ${device_})
     endif ()
     set(usearch_test_vram_shards_
         ${usearch_test_vram_shards_} ${target_}
@@ -76,15 +81,20 @@ endfunction ()
 
 # One row per vendor: NVIDIA's cells run the newest class the build keeps, on the devices the library picks it for, and
 # AMD compiles for the listed processors of the CDNA3 class, which CDNA3 and CDNA4 run, its sequence and shapes cells
-# running that class's library code objects. Neither defines a NumKong or StringZilla kernel, as the library's class
-# units define none.
+# running that class's library code objects. NVIDIA's `DEVICE` entry holds only the kernels pitting one device scorer
+# against another, compiled for every code the build resolves, AMD's holds them beside its dense cells' kernels, and
+# Apple's holds them as MSL the sequence cells splice behind their kit's sources.
+# None defines a NumKong or StringZilla kernel, as the library's class units define none.
 set(usearch_test_vram_shards_)
 if (USEARCH_CUDA_ARCH)
+    usearch_cuda_codes(usearch_test_cuda_codes_ "${usearch_cuda_architectures_}")
     usearch_test_vram_shards(
         nvidia USEARCH_ARCH_CUDA_
         ENTRY dense/vram_nvidia.cpp
+        DEVICE sequence/vram_kernels_nvidia.cu
         SOURCES sequence/vram_index.cpp shapes/vram_index.cpp geospatial/vram_index.cpp
         DEFINITIONS ${usearch_gpu_gates_} "NUMKONG_TARGET_CUDA=0" "STRINGZILLA_TARGET_CUDA=0"
+        CODES ${usearch_test_cuda_codes_}
     )
 endif ()
 if (USEARCH_ROCM_ARCH)
@@ -102,6 +112,7 @@ if (USEARCH_METAL_ARCH)
     usearch_test_vram_shards(
         apple USEARCH_ARCH_METAL_
         ENTRY dense/vram_apple.cpp
+        DEVICE sequence/vram_kernels_apple.metal
         SOURCES sequence/vram_index.cpp shapes/vram_index.cpp geospatial/vram_index.cpp
         DEFINITIONS ${usearch_gpu_gates_} "STRINGZILLA_ARCH_METAL_=1" "NUMKONG_ARCH_METAL_=1"
     )

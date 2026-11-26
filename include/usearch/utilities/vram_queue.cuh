@@ -867,9 +867,9 @@ struct vram_neighbors_ref {
     }
 };
 
-/** Which traversals a telemetry flush folds: inserting ones also own the lock and reselection
- *  counters. */
-enum class vram_traversal_t : bool { searching_k, inserting_k };
+/** Which traversals a telemetry flush folds: seeding ones count their scores as sketched, and
+ *  inserting ones also own the lock and reselection counters. */
+enum class vram_traversal_t : u8_t { searching_k, seeding_k, inserting_k };
 
 /** Per-warp register telemetry, folded into the device counters once per node; 32-bit in registers,
  *  since every counter is bounded by hops times connectivity, widened at the flush. */
@@ -889,7 +889,7 @@ struct vram_telemetry_t {
             warp_type_::fetch_add_relaxed(counter, static_cast<u64_t>(value));
         };
         add(counters->hops, hops);
-        add(counters->scored, scored);
+        add(traversal_ == vram_traversal_t::seeding_k ? counters->sketched : counters->scored, scored);
         add(counters->restarts, restarts);
         add(counters->locked_drops, locked_drops);
         if (changed_nodes) add(counters->changed_nodes, changed_nodes);
@@ -1001,7 +1001,7 @@ __device__ __forceinline__ walk_demand_t vram_expand_round( //
     u32_t row = 0, slot_base = 0;
     bool more = true;
     while (more) {
-        node_id_type_ neighbor_ids[window_k], owner_ids[window_k];
+        node_id_type_ neighbor_ids[window_k];
         u32_t loads = 0;
 #pragma unroll
         for (u32_t load = 0; load != window_k; ++load) {
@@ -1009,11 +1009,12 @@ __device__ __forceinline__ walk_demand_t vram_expand_round( //
             node_id_type_ const owner = warp_t::shuffle(row_entry.id(), row);
             node_id_type_ const word = warp_t::shuffle(row_value, row);
             u32_t const slot = slot_base + lane;
-            neighbor_ids[load] = slot == 0 ? word
-                                 : slot < connectivity
-                                     ? row_t {storage.neighbors_for(owner), connectivity}.load_slot(slot)
-                                     : unknown_k;
-            owner_ids[load] = owner;
+            node_id_type_ const neighbor_id = slot == 0 ? word
+                                              : slot < connectivity
+                                                  ? row_t {storage.neighbors_for(owner), connectivity}.load_slot(slot)
+                                                  : unknown_k;
+            // A self-loop, the row published empty, links nowhere: the window holds the sentinel.
+            neighbor_ids[load] = neighbor_id == owner ? unknown_k : neighbor_id;
             ++loads;
             slot_base += warp_t::width_k;
             if (slot_base < connectivity) continue;
@@ -1027,7 +1028,7 @@ __device__ __forceinline__ walk_demand_t vram_expand_round( //
             if (load == loads) break;
             node_id_type_ const neighbor_id = neighbor_ids[load];
             // The bound never exceeds the ID space, so it rejects the sentinel too.
-            bool const usable = neighbor_id < first_invisible_id && neighbor_id != owner_ids[load];
+            bool const usable = neighbor_id < first_invisible_id;
             bool const claimed = visited.test_and_set(usable ? neighbor_id : unknown_k, lane);
             // Past a saturation a claim re-scores, so an ID the frontier or this staging already
             // holds stages no second copy; every lane takes part in the frontier's collective scan.
@@ -1181,16 +1182,20 @@ struct vram_warp_slice_t {
     u64_t* visited_slots;
 };
 
-/** Carves the calling warp's slice out of @p view and the block's @p dynamic_scratch; the arena
- *  base is allocation-aligned and every slice a multiple of 16 bytes, so each visited span takes
- *  paired 16-byte probes. */
-template <typename warp_type_, typename node_id_type_, typename view_>
+/** Carves the calling warp's slice out of @p view and the block's @p dynamic_scratch, one for each
+ *  of the block's @p walkers_per_block_ walkers, which share its warps evenly; the arena base is
+ *  allocation-aligned and every slice a multiple of 16 bytes, so each visited span takes paired
+ *  16-byte probes of its words. */
+template <typename warp_type_, typename node_id_type_, u32_t walkers_per_block_ = vram_warps_per_block_k,
+          typename view_>
 __device__ __forceinline__ vram_warp_slice_t vram_carve_slice(view_ const& view, byte_t* dynamic_scratch) noexcept {
+    static_assert(vram_warps_per_block_k % walkers_per_block_ == 0, "A block's walkers share its warps evenly");
     u32_t const warp = threadIdx.x / warp_type_::width_k, lane = threadIdx.x % warp_type_::width_k;
-    u32_t const warp_index = blockIdx.x * vram_warps_per_block_k + warp;
+    u32_t const walker = warp / (vram_warps_per_block_k / walkers_per_block_);
+    u32_t const warp_index = blockIdx.x * walkers_per_block_ + walker;
     byte_t* const scratch = view.arena_shape.scratch_bytes
                                 ? view.arena_shape.template scratch_span<node_id_type_>(view.arena, warp_index)
-                                : dynamic_scratch + warp * view.scratch_bytes_per_warp;
+                                : dynamic_scratch + walker * view.scratch_bytes_per_warp;
     return {lane, warp, warp_index, scratch,
             view.arena_shape.template visited_span<node_id_type_>(view.arena, warp_index)};
 }

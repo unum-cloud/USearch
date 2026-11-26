@@ -17,8 +17,7 @@
 
 #if __HIP_DEVICE_COMPILE__
 
-template void us::geospatial::amd_instantiate<
-    us::geospatial::geospatial_ladder<geospatial_amd_capabilities<hip_class_k>>::kit_t, util::u32_t>();
+template void us::geospatial::amd_instantiate<geospatial_vram_kit<hip_class_k>, util::u32_t>();
 
 #else
 
@@ -40,12 +39,10 @@ util::bytes_view_t geospatial_amd_code_object<hip_class_k>::bytes() noexcept {
     return {bounds[0], bounds[1]};
 }
 
-template struct us::geospatial::vram_amd_index<
-    typename us::geospatial::geospatial_ladder<geospatial_amd_capabilities<hip_class_k>>::kit_t, util::u32_t,
-    geospatial_amd_code_object<hip_class_k>>;
-template struct us::geospatial::vram_amd_kits<
-    typename us::geospatial::geospatial_ladder<geospatial_amd_capabilities<hip_class_k>>::kit_t, util::u32_t,
-    geospatial_amd_code_object<hip_class_k>>;
+template struct us::geospatial::vram_amd_index<geospatial_vram_kit<hip_class_k>, util::u32_t,
+                                               geospatial_amd_code_object<hip_class_k>>;
+template struct us::geospatial::vram_amd_kits<geospatial_vram_kit<hip_class_k>, util::u32_t,
+                                              geospatial_amd_code_object<hip_class_k>>;
 
 template struct basic_class_tables<geospatial_traits_t, vendored_residency_t::vram_amd_k, hip_class_k>;
 

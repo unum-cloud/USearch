@@ -46,8 +46,8 @@
 #include "usearch/types.h" // `USEARCH_VERSION_MAJOR`
 #include "usearch/dense/ram_metric.hpp"
 
-#include "harness.hpp" // `bench_settings_t`, `stream_key`, `split_mix_generator_t`
-#include "lib.hpp"     // `dense_dtypes_t` - the storage dtypes the library compiles, in ladder order
+#include "harness.hpp"    // `bench_settings_t`, `stream_key`, `split_mix_generator_t`
+#include "dense_kits.hpp" // `dense_dtypes_t` - the storage dtypes the library compiles, in ladder order
 
 namespace unum::usearch::bench {
 using namespace unum::usearch::dense;

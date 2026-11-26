@@ -33,6 +33,19 @@ struct usearch_sequence_reshard_plan_handle_t {
     basic_held_plan<plan_operation_t::reshard_k, usearch_sequence_index_handle_t> held;
 };
 
+fold_texts_t host_fold_texts() noexcept {
+    static fold_texts_t const picked = []() noexcept -> fold_texts_t {
+        auto const [ceiling, pick_status] = pick_cpu_ceiling(usearch_cpu_class_unknown_k);
+        if (failed(pick_status)) return nullptr;
+        sequence_geometry_t geometry;
+        geometry.metric = usearch_sequence_metric_utf8_containment_k;
+        basic_verbs<sequence_traits_t, vendored_residency_t::ram_k> const* const verbs =
+            pick_basic_cpu_variant<sequence_traits_t, vendored_residency_t::ram_k>(cpu_ladder_t {}, geometry, ceiling);
+        return verbs ? verbs->fold_texts : nullptr;
+    }();
+    return picked;
+}
+
 extern "C" {
 
 USEARCH_EXPORT char const* usearch_sequence_metric_name(usearch_sequence_metric_t metric) {

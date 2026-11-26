@@ -27,6 +27,7 @@ import cloud.unum.usearch.GeospatialIndex.GeospatialReshardConfig;
 import cloud.unum.usearch.GeospatialIndex.GeospatialReshardPlan;
 import cloud.unum.usearch.GeospatialIndex.Observation;
 import cloud.unum.usearch.GeospatialIndex.Tolerance;
+import cloud.unum.usearch.SequenceIndex.SequenceCosts;
 import cloud.unum.usearch.SequenceIndex.SequenceCursor;
 import cloud.unum.usearch.SequenceIndex.SequenceIndexDescription;
 import cloud.unum.usearch.SequenceIndex.SequenceKeyStats;
@@ -313,9 +314,9 @@ public class ModalitiesTest {
                 Arena arena = new Arena(POOL)) {
             index.on(POOL).save(path);
             Monolith monolith = index.on(POOL).saveBuffer(arena);
-            try (SequenceIndex fromPath = SequenceIndex.loadRam(path, POOL, new int[0], 0, null, null);
+            try (SequenceIndex fromPath = SequenceIndex.loadRam(path, POOL, new int[0], 0, null);
                     SequenceIndex fromBuffer =
-                            SequenceIndex.loadRamBuffer(monolith.segment(), POOL, new int[0], 0, null, null)) {
+                            SequenceIndex.loadRamBuffer(monolith.segment(), POOL, new int[0], 0, null)) {
                 assertEquals(16, fromPath.describe().size());
                 assertEquals(16, fromBuffer.describe().size());
                 assertTrue(fromBuffer.contains(Key.of(9)));
@@ -718,11 +719,11 @@ public class ModalitiesTest {
     public void readmeSequenceSnippet() {
         Executor pool = POOL;
         try (SequenceIndex words = SequenceIndex.initRam(
-                        new SequenceOptions().metric(SequenceMetric.LEVENSHTEIN_UTF8), new int[0]);
+                        new SequenceOptions().metric(SequenceMetric.UTF8_CONTAINMENT), new int[0]);
                 Arena arena = new Arena(pool)) {
             Key[] keys = {Key.of(1), Key.of(2), Key.of(3)};
-            words.on(pool).insert(keys, Tape.ofStrings("kitten", "sitting", "mitten"));
-            Matches matches = words.on(pool).search(Tape.ofStrings("sitting"), 1, arena);
+            words.on(pool).insert(keys, Tape.ofStrings("Kitten", "Sitting", "Mitten"));
+            Matches matches = words.on(pool).search(Tape.ofStrings("SITTING"), 1, arena);
             SequenceKeyStats stats = words.count(Key.of(2));
             System.out.println(matches.key(0, 0) + " at " + matches.score(0, 0) + ", " + stats.totalBytes() + " bytes");
             assertEquals(Key.of(2), matches.key(0, 0));
@@ -769,10 +770,11 @@ public class ModalitiesTest {
     @Test
     public void sequenceInitRamStartsEmptyAndKeepsTheMetric() {
         try (SequenceIndex index =
-                SequenceIndex.initRam(new SequenceOptions().metric(SequenceMetric.LEVENSHTEIN_UTF8), new int[0])) {
+                SequenceIndex.initRam(new SequenceOptions().metric(SequenceMetric.DNA_OVERLAP), new int[0])) {
             SequenceIndexDescription described = index.describe();
             assertEquals(0, described.size());
-            assertEquals(SequenceMetric.LEVENSHTEIN_UTF8, described.metadata().metric());
+            assertEquals(SequenceMetric.DNA_OVERLAP, described.metadata().metric());
+            assertEquals(4, described.metadata().classes());
             assertNotEquals("unknown", described.cpuClass());
             assertEquals("unknown", described.gpuClass());
         }
@@ -780,11 +782,12 @@ public class ModalitiesTest {
 
     @Test
     public void sequenceSearchGetAndCountReadTheInsertedEntries() {
-        try (SequenceIndex index = SequenceIndex.initRam(new SequenceOptions(), new int[0]);
+        try (SequenceIndex index = SequenceIndex.initRam(
+                        new SequenceOptions().metric(SequenceMetric.UTF8_CONTAINMENT), new int[0]);
                 Arena arena = new Arena(POOL)) {
             index.on(POOL).insert(keys(1, 3), Tape.ofStrings("kitten", "sitting", "mitten"));
             assertEquals(3, index.describe().size());
-            Matches matches = index.on(POOL).search(Tape.ofStrings("sitting"), 1, arena);
+            Matches matches = index.on(POOL).search(Tape.ofStrings("SITTING"), 1, arena);
             assertEquals(Key.of(2), matches.key(0, 0));
             assertEquals(0, matches.score(0, 0));
             Tape stored = index.on(POOL).get(Key.of(2), arena);
@@ -796,16 +799,75 @@ public class ModalitiesTest {
     }
 
     @Test
-    public void sequenceKindsRefuseWeightsAndWidthsTheyDoNotTake() {
+    public void sequenceCostsRefuseWhatNoMetricReads() {
+        SequenceCosts costs = new SequenceCosts(nucleotideSimilarities((byte) 2, (byte) 0), (byte) 2);
         refuses(
                 Status.CONFIG_MISMATCH,
-                () -> SequenceIndex.initRam(new SequenceOptions().metric(SequenceMetric.NEEDLEMAN_WUNSCH), new int[0]));
-        refuses(Status.CONFIG_MISMATCH, () -> SequenceIndex.initRam(new SequenceOptions().windowWidths(3), new int[0]));
-        refuses(Status.SHAPE_MISMATCH, () -> new SequenceIndex.SequenceWeights(new byte[16], (byte) 1));
+                () -> SequenceIndex.initRam(
+                        new SequenceOptions()
+                                .metric(SequenceMetric.UTF8_CONTAINMENT)
+                                .costs(costs),
+                        new int[0]));
+        refuses(Status.SHAPE_MISMATCH, () -> new SequenceCosts(new byte[16], (byte) 1));
+    }
+
+    /** Scores each of A, C, G and T against itself at {@code self}, A and G against each other at {@code near}. */
+    private static byte[] nucleotideSimilarities(byte self, byte near) {
+        byte[] similarities = new byte[256 * 256];
+        for (char nucleotide : "ACGT".toCharArray()) {
+            similarities[nucleotide * 256 + nucleotide] = self;
+        }
+        similarities['A' * 256 + 'G'] = near;
+        similarities['G' * 256 + 'A'] = near;
+        return similarities;
+    }
+
+    @Test
+    public void sequenceOverlapFindsTheReverseComplementedRead() {
+        try (SequenceIndex index =
+                        SequenceIndex.initRam(new SequenceOptions().metric(SequenceMetric.DNA_OVERLAP), new int[0]);
+                Arena arena = new Arena(POOL)) {
+            index.on(POOL)
+                    .insert(
+                            keys(1, 3),
+                            Tape.ofStrings(
+                                    "ACGTTGCAAGGCTTAACCGGTTACGATCGA",
+                                    "GGCTTAACCGGTTACGATCGATTTGCAGCA",
+                                    "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"));
+            Matches matches = index.on(POOL).search(Tape.ofStrings("TGCTGCAAATCGATCGTAACCGGTTAAGCC"), 2, arena);
+            assertEquals(Key.of(2), matches.key(0, 0));
+            assertEquals(0, matches.score(0, 0));
+        }
+    }
+
+    @Test
+    public void sequenceAlignmentRanksBySimilarities() {
+        SequenceCosts near = new SequenceCosts(nucleotideSimilarities((byte) 4, (byte) 3), (byte) 4);
+        try (SequenceIndex index = SequenceIndex.initRam(new SequenceOptions().costs(near), new int[0]);
+                Arena arena = new Arena(POOL)) {
+            index.on(POOL).insert(keys(1, 2), Tape.ofStrings("GCGTTGCAACGT", "CCGTTGCAACGT"));
+            Matches matches = index.on(POOL).search(Tape.ofStrings("ACGTTGCAACGT"), 2, arena);
+            assertEquals(Key.of(1), matches.key(0, 0));
+            assertTrue(matches.score(0, 0) < matches.score(0, 1));
+        }
+    }
+
+    @Test
+    public void sequenceContainmentFindsTheHoldingText() {
         try (SequenceIndex index = SequenceIndex.initRam(
-                new SequenceOptions().metric(SequenceMetric.OVERLAP).windowWidths(2, 3), new int[0])) {
-            assertEquals(SequenceMetric.OVERLAP, index.describe().metadata().metric());
-            assertEquals("overlap", SequenceMetric.OVERLAP.toString());
+                        new SequenceOptions().metric(SequenceMetric.UTF8_CONTAINMENT), new int[0]);
+                Arena arena = new Arena(POOL)) {
+            index.on(POOL)
+                    .insert(
+                            keys(1, 2),
+                            Tape.ofStrings(
+                                    "The Quick Brown Fox jumps over the lazy dog",
+                                    "a journey of a thousand miles begins with a single step"));
+            Matches matches = index.on(POOL).search(Tape.ofStrings("BROWN FOX JUMPS"), 2, arena);
+            assertEquals(Key.of(1), matches.key(0, 0));
+            assertEquals(
+                    SequenceMetric.UTF8_CONTAINMENT, index.describe().metadata().metric());
+            assertEquals("utf8-containment", SequenceMetric.UTF8_CONTAINMENT.toString());
         }
     }
 

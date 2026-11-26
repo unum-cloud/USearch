@@ -622,6 +622,14 @@ class query_walker {
     using scored_node_t = typename results_array_t::value_type;
     using walk_payload_t = typename tier_t::walk_payload_t;
 
+    /** Whether the tier primes every walk of a query before the walk's first hop. */
+    static constexpr bool tier_primes_walks_k = requires(query_type_& query, walk_t& walk) {
+        tier_t::prime_walk_(query, walk);
+    };
+
+    /** Whether a walk carries the role it scores by, so a seeding walk hands over to its search. */
+    static constexpr bool walks_carry_roles_k = requires(walk_t& walk) { walk.role; };
+
   public:
     using query_t = query_type_;
     using key_t = typename query_t::key_t;
@@ -792,6 +800,8 @@ class query_walker {
             add(merged.computed_distances, telemetry.computed_distances);
             add(merged.restarts, telemetry.restarts);
             add(merged.saturated_walks, telemetry.saturated_walks);
+            if constexpr (a_seeding_telemetry_holder<search_result_t>)
+                add(merged.computed_distances_in_seeding, telemetry.computed_distances_in_seeding);
             add_reads(merged.neighbor_reads, telemetry.neighbor_reads);
             add_reads(merged.value_reads, telemetry.value_reads);
             add_reads(merged.key_reads, telemetry.key_reads);
@@ -937,6 +947,7 @@ class query_walker {
                 std::span<u32_t> const hop_flights = hop_flights_of_(walk_index);
                 std::memset(hop_flights.data(), 0, hop_flights.size_bytes());
                 if constexpr (requires { walk.seeds; }) walk.seeds = {};
+                if constexpr (tier_primes_walks_k) tier_t::prime_walk_(primed, walk);
                 if constexpr (requires { primed.find_hinted(shard, walk.seed_slots); }) {
                     walk.seeds = walk.seed_slots.first(
                         primed.find_hinted(shard, walk.seed_slots.first(nvme_landmarks(parts_[shard].connectivity))));
@@ -1221,7 +1232,8 @@ class query_walker {
         // stopping candidates fill re-seeds.
         if (walk.frontier.empty() && stopping.size() < expansion_factor) {
             walk.stage = nvme_walk_stage_t::seeding_k;
-            if (seed_landmarks_(walk_index, 4)) return void(++telemetry_.restarts);
+            if (seed_landmarks_(walk_index, nvme_landmarks(parts_[walk.shard].connectivity)))
+                return void(++telemetry_.restarts);
         }
         finish_walk_(walk_index);
     }
@@ -1253,10 +1265,31 @@ class query_walker {
         release_flight_(flight_index);
     }
 
+    /** Restarts the seeding walk @p walk_index as the walk by its query's own metric, seeded by the
+     *  nearest nodes it found, one landmark batch; answers whether any landmark went out. */
+    bool hand_over_seeds_(u32_t walk_index) noexcept {
+        walk_t& walk = walks_[walk_index];
+        std::size_t const landmarks = nvme_landmarks(parts_[walk.shard].connectivity);
+        std::size_t const seeds = min_of(min_of(landmarks, walk.seed_slots.size()), walk.results.size());
+        scored_node_t const* const nearest = walk.results.begin();
+        for (std::size_t seed = 0; seed != seeds; ++seed) walk.seed_slots[seed] = {nearest[seed].node_id, 0};
+        walk.seeds = walk.seed_slots.first(seeds);
+        walk.results.clear();
+        walk.admitted.clear();
+        walk.frontier.clear();
+        walk.visited.clear();
+        walk.staged.clear();
+        walk.role = score_role_t::search_k;
+        walk.stage = nvme_walk_stage_t::seeding_k;
+        return seed_landmarks_(walk_index, landmarks) != 0;
+    }
+
     /** Merges @p walk_index into its query, and once every walk of the query finished, starts the
-     *  query's resolution. */
+     *  query's resolution; a seeding walk hands its nearest nodes to the walk it seeds instead. */
     void finish_walk_(u32_t walk_index) noexcept {
         walk_t& walk = walks_[walk_index];
+        if constexpr (walks_carry_roles_k)
+            if (walk.role == score_role_t::build_k && hand_over_seeds_(walk_index)) return;
         walk.stage = nvme_walk_stage_t::finished_k;
         u32_t const slot_index = walk.query_slot;
         nvme_query_slot_t& slot = slots_[slot_index];

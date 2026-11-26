@@ -11,47 +11,21 @@
  */
 #pragma once
 
-#include <span> // `std::span` - the library's fatbin bounds
-
 #include "usearch/dense/vram_nvidia_indexes.hpp"
 
 #include "dense.cuh"
-#include "lib.hpp" // `gpu_class_t`, `pick_gpu_class` - the class the library picks a unit by
-
-namespace util = unum::usearch::utilities;
-
-/** The bounds of every dtype's fatbin of one NVIDIA class, in pairs in the library's dtype ladder,
- *  defined in that class's @c src/dense/vram_variants_nvidia_<class>.cpp unit; an unnamed class's
- *  bundles are empty. */
-template <gpu_class_t gpu_class_>
-std::span<util::byte_t const* const> bundle_bounds() noexcept;
+#include "classes.hpp"    // `cuda_class_k` - the class the rung cells run
+#include "dense_kits.hpp" // `dense_nvidia_fatbin` - the library's fatbin of that class
 
 namespace unum::usearch::test::dense {
 
-/** The newest NVIDIA class the build keeps, the one its class gates name; the cells run only on a
- *  device the library picks that class for. */
-inline constexpr gpu_class_t dense_nvidia_class_k = cuda_class_k;
+/** Why the rung cells skip on a device the library lists under another class. */
+inline constexpr char needs_dense_nvidia_class_k[] = "needs cuda_class_k";
 
-/** Why the rung cells skip on a device the library would pick another class's unit for. */
-inline constexpr char needs_dense_nvidia_class_k[] = "needs dense_nvidia_class_k";
-
-/** Whether @p device runs the cells of @ref dense_nvidia_class_k, as the library would pick its
- *  unit. */
+/** Whether @p device runs the cells of @c cuda_class_k , as the library lists its class. */
 inline bool dense_nvidia_runs(gpu_device_t const& device) noexcept {
-    return pick_gpu_class(device, usearch_gpu_class_unknown_k) == dense_nvidia_class_k;
+    return listed_class(device) == static_cast<usearch_gpu_class_t>(cuda_class_k);
 }
-
-/** The library's fatbin of @p dtype_ 's kernels for @ref dense_nvidia_class_k, under the ceiling
- *  the library compiles that class with. */
-template <nk_dtype_t dtype_>
-struct dense_nvidia_fatbin {
-    static_assert(dtype_ == nk_bf16_k, "the rung cells run bf16, which leads the library's dtype ladder");
-    inline static constexpr nk_capability_t capability_k = cuda_class_capabilities_k;
-    static bytes_view_t bytes() noexcept {
-        std::span<byte_t const* const> const bounds = bundle_bounds<dense_nvidia_class_k>();
-        return bytes_view_t {bounds[0], bounds[1]};
-    }
-};
 
 /** The ledgered virtual-memory flat-matrix backend every CUDA fixture places its index through. */
 using counting_cuda_allocator_t = counting_device_allocator<cuda_virtual_memory_allocator<byte_t>>;
@@ -62,9 +36,10 @@ static_assert(a_cuda_reservable_allocator<counting_cuda_allocator_t>);
  *  collection, built over the stream of the executor the CUDA entry opened. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 struct vram_cell<gpu_vendor_t::nvidia_k, dtype_, kernel_> {
-    using index_t = vram_nvidia_index<dtype_, dense_nvidia_fatbin<dtype_>, fu::standard_yield_t, dummy_cache_hints_t,
-                                      counting_cuda_allocator_t, counting_cuda_allocator_t, cuda_device_allocator_t>;
-    using indexes_t = vram_nvidia_indexes<uuid128_t, dtype_, dense_nvidia_fatbin<dtype_>>;
+    using index_t =
+        vram_nvidia_index<dtype_, dense_nvidia_fatbin<cuda_class_k, dtype_>, fu::standard_yield_t, dummy_cache_hints_t,
+                          counting_cuda_allocator_t, counting_cuda_allocator_t, cuda_device_allocator_t>;
+    using indexes_t = vram_nvidia_indexes<util::uuid128_t, dtype_, dense_nvidia_fatbin<cuda_class_k, dtype_>>;
     inline static constexpr char const* vendor_prefix_k = "cuda";
 
     /** The stream the cell's contexts and checkpoints ride, on the device its indexes sit on. */

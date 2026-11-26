@@ -321,19 +321,29 @@ Outputs & carry are copied before the Arena is reused.
 
 ## Sequence Indexes
 
-A `SequenceIndex` searches byte strings, UTF-8 text, DNA, RNA and proteins under edit distances and alignments.
+A `SequenceIndex` searches proteins under alignment, DNA and RNA under shifted overlap, and UTF-8 text under window containment.
 Each sequence is a string, read as its UTF-8 bytes, a `ByteArray` or a list of byte values, and a batch crosses as one tape, the Apache Arrow `Binary` layout of bytes end to end beside one more offset than entries:
 
 ```wolfram
-index = SequenceInitRam["levenshtein-utf8"];
-SequenceInsert[index, {1, 2, 3}, {"kitten", "sitting", "mitten"}];
-matches = SequenceSearch[index, {"sittin"}, 1, ArenaInit[]];
-matches["Keys"]      (* {{2}} *)
-matches["Scores"]    (* {{1.}}, one edit away *)
+index = SequenceInitRam["utf8-containment"];
+SequenceInsert[index, {1, 2, 3}, {"The quick brown fox", "A lazy dog", "Pack my box"}];
+matches = SequenceSearch[index, {"BROWN FOX"}, 1, ArenaInit[]];
+matches["Keys"]      (* {{1}} *)
+matches["Scores"]    (* {{0.0000225306}}, under 2^-15: every query window held, whatever the case *)
 ```
 
-Metrics are `levenshtein`, the default, `levenshtein-utf8`, `needleman-wunsch` and `overlap`.
-`needleman-wunsch` scores with a `"SubstitutionMatrix"`, a 256 × 256 integer matrix, beside its `"Gap"` cost, and `overlap` with `"WindowWidths"`; every load and view names the weights again, since no checkpoint records them.
+Metrics are `protein-alignment`, the default, `dna-overlap` and `utf8-containment`.
+Each stores a sequence folded, so `SequenceGet` returns the stored form rather than the inserted bytes: packed class codes for a protein, one class code a byte for DNA, and case-folded UTF-8 for text.
+`"Similarities"` is a 256 × 256 integer matrix of scores between raw bytes, beside its `"Gap"` cost, replacing the metric's own costs, which the library folds into classes of bytes sharing their rows and columns, and a containment refuses them:
+
+```wolfram
+dna = Normal[SparseArray[Thread[({#, #} & /@ (ToCharacterCode["ACGT"] + 1)) -> 2], {256, 256}]];
+reads = SequenceInitRam["dna-overlap", "Similarities" -> dna, "Gap" -> 2];
+```
+
+A checkpoint records the costs, so loads and views take none, and `SequenceDescribe` answers the `"Classes"` they folded bytes into.
+`"SketchBytes"` sets the bytes of the sketch in front of each stored sequence, a multiple of four, where 0 takes the metric's default of 512 for protein alignment and UTF-8 containment.
+A DNA overlap keeps no sketch and refuses any.
 `SequenceReserve[receiver, entries, payloadBytes]` reserves the entries and the bytes they hold in all.
 `SequenceGet[receiver, key, arena]` answers a key's sequences as `ByteArray`s, and `SequenceCount[receiver, key]` its `"Entries"` with their `"TotalBytes"` and `"LargestBytes"`.
 The receivers, reports and plans work as the dense ones do: `SequenceRefine`, `SequenceReshard` and their `PlanFinish` verbs answer as `DenseRefine` does.

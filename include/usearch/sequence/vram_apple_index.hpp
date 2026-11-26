@@ -3,36 +3,41 @@
  *  @author Ash Vardanian
  *  @date November 16, 2026
  *  @brief Similarity Search over byte sequences on Apple GPUs: the basic Apple graph under
- *      one sequence kit of @c vram_apple_metric.metal, Levenshtein over bytes or UTF-8 runes,
- *      window overlap or Needleman-Wunsch over packed codes.
+ *      one sequence kit of @c vram_apple_metric.metal, alignment over packed codes, banded
+ *      overlap or window containment over folded UTF-8.
+ *
+ *  Every node's value is one run of the tape: the kit's sketch of the bytes its face set, none for
+ *  a kit building canonically, the sequence, and padding to a word that closes with its own count.
+ *  Inserts and refinements score the sketches of a sketching kit and the sequences of any other,
+ *  searches score the sequences canonically from the seeds a walk over the sketches found, and a
+ *  checkpoint holds the sequences alone, so a load derives every sketch on the device.
  *
  *  Plain C++ for a unit building with Metal, as every Apple face: the kits are MSL the graph
  *  compiles at its first @c reserve, from StringZilla's Metal sources and the pieces each kit
  *  names here, so the host members reading a kit, which pick a launch's rung and size its spans,
  *  live beside its description. Memory is unified, so the kit parameters are one shared buffer the
- *  kernels read in place, and every load stores its sequences as saved and counts their prepared
- *  spans on the host.
+ *  kernels read in place, and the tables its sketches derive from are another.
  */
 #pragma once
 
 #include <cstddef> // `std::size_t`
-#include <cstring> // `std::memcpy` - the folded costs into the parameters
+#include <cstring> // `std::memcpy` - the parameters and the sketch tables into their buffers
 
-#include <bit>         // `std::popcount` - a byte query's distinct bytes
 #include <limits>      // `std::numeric_limits` - a length no `u32_t` states
-#include <span>        // `std::span` - the overlap kind's window widths
-#include <type_traits> // `std::is_empty_v` - a kit taking no parameters
-#include <variant>     // `std::monostate` - Levenshtein takes no parameters
+#include <span>        // `std::span` - a reshard's sources and targets
+#include <type_traits> // `std::is_empty_v`, `std::conditional_t` - a kit taking no parameters
+#include <variant>     // `std::monostate` - a kit reading no sketch tables
 
-#include <stringzilla/overlap.h>           // `sz_overlap_query_span_bytes` - an overlap query's span
-#include <stringzilla/levenshtein/metal.h> // `sz_metal_prelude_source_`, `sz_levenshtein_source_metal_`
-#include <stringzilla/overlap/metal.h>     // `sz_overlap_source_metal_` - the kernels the kits call
+#include <stringzilla/ngrams.h>       // `sz_ngrams_query_span_bytes`, `sz_ngrams_count` - a query's span
+#include <stringzilla/metal.h>        // `sz_metal_prelude_source` - the prelude every StringZilla Metal source requires
+#include <stringzilla/ngrams/metal.h> // `sz_ngrams_source_metal` - the n-gram helpers the kits call
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the widths the host members read
-#include "usearch/sequence/ram_metric.hpp"   // `needleman_wunsch_costs_t`, `packed_codes_count`
+#include "usearch/sequence/ram_metric.hpp"   // `alignment_costs_t`, `window_parameters_t`, `spectrum_view_t`
+#include "usearch/sequence/ram_index.hpp"    // `vram_stored_bytes`, `vram_stored_sequence` - a tape value's layout
 #include "usearch/utilities/vram_apple_shared.hpp"
-#include "usearch/sequence/vram_apple_metric.metal" // the kits' rungs and Needleman-Wunsch stripes alone, on a host
+#include "usearch/sequence/vram_apple_metric.metal" // the kits' rungs and alignment stripes alone, on a host
 #include "usearch/basic/vram_apple_index.hpp"
 
 namespace unum::usearch::sequence {
@@ -54,230 +59,226 @@ inline constexpr char metal_sequence_metric_source_k[] = {
 
 #pragma region Kits
 
-/** Needleman-Wunsch over packed codes: a simdgroup to a sequence, an anti-diagonal wavefront down
+/** Alignment over packed codes: a simdgroup to a sequence, an anti-diagonal wavefront down
  *  stripes of the query, the folded costs uploaded as the parameters. */
-struct apple_needleman_wunsch_kit_t {
+struct apple_packed_alignment_kit_t {
 
     /** The folded costs a face scores with, set once before the first insert. */
-    using parameters_t = needleman_wunsch_costs_t;
+    using canonical_parameters_t = alignment_costs_t;
 
-    static_assert(sizeof(needleman_wunsch_costs_t) == metal_needleman_wunsch_costs_bytes_k &&
-                      offsetof(needleman_wunsch_costs_t, substitutions) == 3,
+    static_assert(sizeof(alignment_costs_t) == metal_alignment_costs_bytes_k &&
+                      offsetof(alignment_costs_t, classes) == 0 && offsetof(alignment_costs_t, gap) == 1 &&
+                      offsetof(alignment_costs_t, complements) == 2 &&
+                      offsetof(alignment_costs_t, substitutions) == 3 &&
+                      alignment_classes_k == metal_alignment_classes_k &&
+                      packed_code_bits_k == metal_packed_code_bits_k,
                   "the MSL kit reads the costs as they are laid out");
 
-    inline static constexpr std::size_t rungs_k = metal_needleman_wunsch_rungs_k;
-    inline static constexpr char metal_kit_name_k[] = "sequence::metal_needleman_wunsch_kit_t";
-    inline static constexpr char const* metal_sources_k[] = {sz_metal_prelude_source_, sz_levenshtein_source_metal_,
-                                                             sz_overlap_source_metal_, metal_sequence_metric_source_k};
+    /** Builders score smooth sketches, which seed every search too. */
+    inline static constexpr std::size_t canonical_rungs_count_k = metal_alignment_canonical_rungs_count_k;
+    inline static constexpr bool sketching_k = true;
+    inline static constexpr char metal_kit_name_k[] = "sequence::metal_alignment_kit_t";
+    inline static constexpr char const* metal_sources_k[] = {sz_metal_prelude_source, sz_ngrams_source_metal,
+                                                             metal_sequence_metric_source_k};
 
     /** Every rung scores a sequence with the whole simdgroup. */
-    static constexpr u32_t lanes_per_row(std::size_t) noexcept { return metal_simdgroup_width_k; }
-
-    /** Codes a pack of @p bytes holds at most past its one-byte header. */
-    static constexpr std::size_t codes_bound(std::size_t bytes, parameters_t const& costs) noexcept {
-        return bytes ? (bytes - 1) * 8 / costs.code_bits : 0;
-    }
+    static constexpr u32_t canonical_lanes_per_entry(std::size_t) noexcept { return metal_simdgroup_width_k; }
 
     /** The first rung holding whole the stripe of the most codes a @p longest -byte pack holds, the
      *  widest one any number of its stripes, or past every rung before any costs. */
-    static std::size_t rung_serving(std::size_t longest, parameters_t const& costs) noexcept {
-        if (!costs.code_bits) return rungs_k;
-        std::size_t const codes = codes_bound(longest, costs), widest = rungs_k - 1;
+    static std::size_t canonical_rung_serving(std::size_t longest, canonical_parameters_t const& costs) noexcept {
+        if (!costs.classes) return canonical_rungs_count_k;
+        // A pack of these bytes holds at most this many codes past its one-byte header.
+        std::size_t const codes = longest ? (longest - 1) * 8 / packed_code_bits_k : 0;
+        std::size_t const widest = canonical_rungs_count_k - 1;
         std::size_t rung = 0;
-        while (rung != rungs_k &&
-               codes > (rung == widest ? std::size_t {metal_needleman_wunsch_widest_codes_k}
-                                       : std::size_t {metal_needleman_wunsch_rows(static_cast<u32_t>(rung))} *
-                                             metal_simdgroup_width_k))
+        while (rung != canonical_rungs_count_k &&
+               codes > (rung == widest
+                            ? std::size_t {metal_alignment_widest_codes_k}
+                            : std::size_t {metal_alignment_rows(static_cast<u32_t>(rung))} * metal_simdgroup_width_k))
             ++rung;
         return rung;
     }
 
-    /** Bytes the packed @p bytes long sequence at @p data takes once prepared, and the bound for
-     *  any pack of up to @p longest bytes. */
-    static std::size_t span_bytes(byte_t const* data, std::size_t bytes, parameters_t const& costs) noexcept {
-        return metal_needleman_wunsch_span_bytes(static_cast<u32_t>(packed_codes_count(data, bytes, costs.code_bits)));
-    }
-    static std::size_t span_bytes(std::size_t longest, parameters_t const& costs) noexcept {
-        std::size_t const codes = min_of<std::size_t>(codes_bound(longest, costs),
-                                                      metal_needleman_wunsch_widest_codes_k);
-        return metal_needleman_wunsch_span_bytes(static_cast<u32_t>(codes));
+    /** Bytes the packed @p bytes long sequence at @p data takes once prepared: its profile stripes,
+     *  and one set of boundary rows when it takes more than one stripe. */
+    static std::size_t canonical_span_bytes(byte_t const* data, std::size_t bytes,
+                                            canonical_parameters_t const&) noexcept {
+        return metal_alignment_span_bytes(static_cast<u32_t>(packed_codes_count(data, bytes)));
     }
 
     /** Lays the costs out as the kit reads them. */
-    static std::size_t parameters_bytes(parameters_t const&) noexcept { return sizeof(parameters_t); }
-    static void lay_out(parameters_t const& costs, byte_t* laid) noexcept { std::memcpy(laid, &costs, sizeof(costs)); }
+    static std::size_t canonical_parameters_bytes(canonical_parameters_t const&) noexcept {
+        return sizeof(canonical_parameters_t);
+    }
+    static void canonical_parameters_lay_out(canonical_parameters_t const& costs, byte_t* laid) noexcept {
+        std::memcpy(laid, &costs, sizeof(costs));
+    }
+
+    /** What the producer reads, uploaded once beside the kit's parameters as the buffer the view
+     *  borrows. */
+    using sketch_tables_t = spectrum_view_t;
+    static_assert(spectrum_width_max_k == metal_spectrum_width_max_k &&
+                      spectrum_cosines_k == metal_spectrum_cosines_k &&
+                      offsetof(spectrum_head_t, classes) == metal_spectrum_cosines_k &&
+                      offsetof(spectrum_head_t, columns) == metal_spectrum_cosines_k + 4 * sizeof(u32_t) &&
+                      spectrum_steps_offset_k == metal_spectrum_steps_offset_k &&
+                      spectrum_phases_offset(4) == metal_spectrum_phases_offset(4) &&
+                      spectrum_phases_offset(100) == metal_spectrum_phases_offset(100),
+                  "the MSL kit reads the tables as they are laid out");
+
+    /** A smooth sketch sums in registers, so it carves no scratch. */
+    static constexpr std::size_t sketch_scratch_bytes(std::size_t) noexcept { return 0; }
 };
 
-/** Window overlap: a simdgroup lays the query's window hashes at every width out as a tree in its
- *  span, and a group of a rung's lanes counts each candidate's windows the tree holds. The widths
- *  are the parameters, their count first. */
-struct apple_overlap_kit_t {
+/** Bytes the window table of a @p bytes long sequence takes at the widths of @p windows, a
+ *  multiple of 16, as the Metal prepare lays it out. */
+inline std::size_t metal_window_table_bytes(std::size_t bytes, window_parameters_t const& windows) noexcept {
+    return round_up_to_multiple<std::size_t>(sz_ngrams_query_span_bytes(bytes, windows.widths, windows.widths_count),
+                                             16);
+}
+
+/** Window containment over folded UTF-8: a simdgroup files the query's distinct windows at every
+ *  width into a table in its span, and a group of a rung's lanes counts the query windows each
+ *  candidate holds. The widths are the parameters, behind the folded costs it leaves unread. */
+struct apple_utf8_containment_kit_t {
 
     /** The window widths a face hashes with, set once before the first insert. */
-    using parameters_t = std::span<u32_t const>;
+    using canonical_parameters_t = window_parameters_t;
 
-    inline static constexpr std::size_t rungs_k = metal_overlap_rungs_k;
-    inline static constexpr char metal_kit_name_k[] = "sequence::metal_overlap_kit_t";
-    inline static constexpr char const* metal_sources_k[] = {sz_metal_prelude_source_, sz_levenshtein_source_metal_,
-                                                             sz_overlap_source_metal_, metal_sequence_metric_source_k};
+    static_assert(std::size(containment_window_widths_k) == 2 &&
+                      containment_window_widths_k[0] == metal_containment_narrow_window_k &&
+                      containment_window_widths_k[1] == metal_containment_wide_window_k,
+                  "the MSL kit samples the windows the score counts");
+
+    /** Builders score hash sketches, which seed every search too. */
+    inline static constexpr std::size_t canonical_rungs_count_k = metal_containment_canonical_rungs_count_k;
+    inline static constexpr bool sketching_k = true;
+    inline static constexpr char metal_kit_name_k[] = "sequence::metal_containment_kit_t";
+    inline static constexpr char const* metal_sources_k[] = {sz_metal_prelude_source, sz_ngrams_source_metal,
+                                                             metal_sequence_metric_source_k};
+
+    /** The lane groups of the narrowest rung, each with its own hit words. */
+    inline static constexpr u32_t canonical_groups_k = metal_simdgroup_width_k / metal_containment_lanes(0);
 
     /** A rung is its lanes per sequence. */
-    static constexpr u32_t lanes_per_row(std::size_t rung) noexcept {
-        return metal_overlap_lanes(static_cast<u32_t>(rung));
+    static constexpr u32_t canonical_lanes_per_entry(std::size_t rung) noexcept {
+        return metal_containment_lanes(static_cast<u32_t>(rung));
     }
 
     /** The widest rung whose lanes still roll a widest window of a @p longest -byte sequence, or
-     *  past every rung for a length no byte count states. */
-    static std::size_t rung_serving(std::size_t longest, parameters_t widths) noexcept {
-        if (longest > (std::numeric_limits<u32_t>::max)()) return rungs_k;
-        u32_t widest = 0;
-        for (u32_t const width : widths) widest = max_of(widest, width);
+     *  past every rung for one longer than a window table places its windows in. */
+    static std::size_t canonical_rung_serving(std::size_t longest, canonical_parameters_t const& windows) noexcept {
+        if (longest > sz_ngrams_query_bytes_max_k) return canonical_rungs_count_k;
+        sz_size_t widest = 0;
+        for (sz_size_t width = 0; width != windows.widths_count; ++width)
+            widest = max_of(widest, windows.widths[width]);
         std::size_t rung = 0;
-        while (rung + 1 < rungs_k && std::size_t {lanes_per_row(rung + 1)} * widest <= longest) ++rung;
+        while (rung + 1 < canonical_rungs_count_k && canonical_lanes_per_entry(rung + 1) * widest <= longest) ++rung;
         return rung;
     }
 
-    /** Bytes a sequence of @p bytes takes once prepared, from its length alone. */
-    static std::size_t span_bytes(byte_t const*, std::size_t bytes, parameters_t widths) noexcept {
-        return span_bytes(bytes, widths);
-    }
-    static std::size_t span_bytes(std::size_t bytes, parameters_t widths) noexcept {
-        return round_up_to_multiple<std::size_t>(sz_overlap_query_span_bytes(bytes, widths.data(), widths.size()), 16);
+    /** Bytes a sequence of @p bytes takes once prepared, from its length alone: its table and
+     *  every lane group's hit words. */
+    static std::size_t canonical_span_bytes(byte_t const*, std::size_t bytes,
+                                            canonical_parameters_t const& windows) noexcept {
+        std::size_t const counted = sz_ngrams_count(bytes, windows.widths, windows.widths_count);
+        return metal_window_table_bytes(bytes, windows) +
+               round_up_to_multiple<std::size_t>(
+                   canonical_groups_k * divide_round_up<std::size_t>(counted, 32) * sizeof(u32_t), 16);
     }
 
-    /** Lays the widths out after their count, as the kit reads them. */
-    static std::size_t parameters_bytes(parameters_t widths) noexcept { return (widths.size() + 1) * sizeof(u32_t); }
-    static void lay_out(parameters_t widths, byte_t* laid) noexcept {
-        u32_t const count = static_cast<u32_t>(widths.size());
-        std::memcpy(laid, &count, sizeof(count));
-        if (count) std::memcpy(laid + sizeof(count), widths.data(), widths.size_bytes());
+    /** Lays the costs and the widths out as the kit reads them. */
+    static std::size_t canonical_parameters_bytes(canonical_parameters_t const&) noexcept {
+        return sizeof(canonical_parameters_t);
+    }
+    static void canonical_parameters_lay_out(canonical_parameters_t const& windows, byte_t* laid) noexcept {
+        std::memcpy(laid, &windows, sizeof(windows));
+    }
+
+    /** A hash sketch reads no tables, and takes a byte per slot in front of every stored
+     *  sequence. */
+    using sketch_tables_t = std::monostate;
+
+    /** Each simdgroup's slot ranks, four bytes a slot, in threadgroup memory while it sketches. */
+    static constexpr std::size_t sketch_scratch_bytes(std::size_t sketch_bytes) noexcept {
+        return sketch_bytes * sizeof(u32_t);
     }
 };
 
-/**
- *  @brief Levenshtein over bytes or, under @c sz_levenshtein_runes_k, over UTF-8 runes: a lane or,
- *      past StringZilla Metal's threaded ceiling, a simdgroup to a sequence, the query's classes
- *      and masks prepared in its span by @c metal_levenshtein_kit.
- *
- *  A rung is the Myers words of the longest query its kernels score, so a sequence of @c b bytes
- *  takes the first rung of at least @c b bits, as on NVIDIA. The host counts each sequence's span
- *  itself, as its prepare lays it out.
- */
-template <sz_levenshtein_symbol_t symbol_>
-struct apple_levenshtein_kit {
+/** Banded overlap: a simdgroup files the query's distinct windows into a table in its span, as a
+ *  containment does, and a lane alone votes a shift with it against a candidate, then aligns the
+ *  symbols the shift lays over each other inside a band under the costs. The widths and the costs
+ *  with the complement are the parameters. */
+struct apple_u8_banded_overlap_kit_t {
 
-    /** A Levenshtein distance takes no parameters. */
-    using parameters_t = std::monostate;
+    /** The window widths a face hashes with and the costs and complement it scores under, set once
+     *  before the first insert. */
+    using canonical_parameters_t = window_parameters_t;
 
-    inline static constexpr std::size_t rungs_k = metal_levenshtein_rungs_k;
-    inline static constexpr char const* metal_kit_name_k = symbol_ == sz_levenshtein_runes_k
-                                                               ? "sequence::metal_levenshtein_utf8_kit_t"
-                                                               : "sequence::metal_levenshtein_bytes_kit_t";
-    inline static constexpr char const* metal_sources_k[] = {sz_metal_prelude_source_, sz_levenshtein_source_metal_,
-                                                             sz_overlap_source_metal_, metal_sequence_metric_source_k};
+    /** One rung: a lane to a sequence, which builders score canonically on too. */
+    inline static constexpr std::size_t canonical_rungs_count_k = 1;
+    inline static constexpr bool sketching_k = false;
+    inline static constexpr char metal_kit_name_k[] = "sequence::metal_banded_overlap_kit_t";
+    inline static constexpr char const* metal_sources_k[] = {sz_metal_prelude_source, sz_ngrams_source_metal,
+                                                             metal_sequence_metric_source_k};
 
-    /** A lane scores a sequence alone up to the threaded ceiling, a simdgroup past it. */
-    static constexpr u32_t lanes_per_row(std::size_t rung) noexcept {
-        return metal_levenshtein_words(static_cast<u32_t>(rung)) > metal_levenshtein_thread_words_max_k
-                   ? metal_simdgroup_width_k
-                   : 1;
+    static constexpr u32_t canonical_lanes_per_entry(std::size_t) noexcept { return 1; }
+
+    /** The one rung, or past it for a sequence longer than a window table places its windows in. */
+    static std::size_t canonical_rung_serving(std::size_t longest, canonical_parameters_t const&) noexcept {
+        return longest > sz_ngrams_query_bytes_max_k ? canonical_rungs_count_k : 0;
     }
 
-    /** The first rung whose words cover a @p longest -byte sequence, a bit of a 64-bit word per
-     *  byte, or past the widest; a sequence of @c b bytes holds at most @c b runes, so its bytes
-     *  bound rune sequences too. */
-    static std::size_t rung_serving(std::size_t longest, parameters_t) noexcept {
-        std::size_t rung = 0;
-        while (rung != rungs_k && longest > std::size_t {metal_levenshtein_words(static_cast<u32_t>(rung))} * 64)
-            ++rung;
-        return rung;
+    /** Bytes a sequence of @p bytes takes once prepared, from its length alone: its table, where
+     *  the costs complement the complement image's bytes and table, then every lane's vote
+     *  counters, one per shift, and the cells of its band. */
+    static std::size_t canonical_span_bytes(byte_t const*, std::size_t bytes,
+                                            canonical_parameters_t const& windows) noexcept {
+        std::size_t const table_bytes = metal_window_table_bytes(bytes, windows);
+        std::size_t const complement_bytes = windows.costs.complements
+                                                 ? round_up_to_multiple<std::size_t>(bytes, 16) + table_bytes
+                                                 : 0;
+        std::size_t const cells = 2 * std::size_t {banded_overlap_band(bytes)} + 1;
+        return table_bytes + complement_bytes +
+               round_up_to_multiple<std::size_t>(metal_simdgroup_width_k * bytes * sizeof(u32_t), 16) +
+               round_up_to_multiple<std::size_t>(metal_simdgroup_width_k * cells * sizeof(u32_t), 16);
     }
 
-    /** Bytes the @p bytes long sequence at @p data takes once prepared, as the Metal prepare lays
-     *  it out: a class map over every byte value, or a page table with a class row per page its
-     *  runes touch, then a mask row per class at the walk stride of the sequence's own words, one
-     *  class per distinct symbol, one more, and a row past them a two-word lane may read. None
-     *  from a length alone, as a load counts its sequences' spans. */
-    static std::size_t span_bytes(byte_t const* data, std::size_t bytes, parameters_t) noexcept {
-        if constexpr (symbol_ == sz_levenshtein_runes_k) {
-            // Distinct pages in a bitset over every page, distinct runes in an open table twice the
-            // widest rung's runes wide, cleared only as wide as this sequence needs.
-            constexpr std::size_t table_slots_k = 2 * 64 * metal_levenshtein_words(metal_levenshtein_rungs_k - 1);
-            u64_t pages[sz_levenshtein_utf8_pages_k / 64] = {};
-            u32_t table[table_slots_k];
-            std::size_t slots = 1;
-            while (slots < 2 * bytes + 2 && slots < table_slots_k) slots *= 2;
-            for (std::size_t slot = 0; slot != slots; ++slot) table[slot] = ~0u;
-            sz_size_t runes = 0, rows = 1, classes = 1;
-            for (sz_size_t position = 0; position < bytes; ++runes) {
-                sz_rune_t const rune = sz_utf8_next_rune_(reinterpret_cast<sz_cptr_t>(data), bytes, &position);
-                // A sequence past the widest rung is refused before it prepares, so needs no count.
-                if (bytes * 2 > table_slots_k) {
-                    ++classes;
-                    continue;
-                }
-                rows += !(pages[rune >> 14] >> ((rune >> 8) & 63u) & 1u);
-                pages[rune >> 14] |= u64_t {1} << ((rune >> 8) & 63u);
-                std::size_t slot = (rune * 2654435761u) & (slots - 1);
-                while (table[slot] != ~0u && table[slot] != rune) slot = (slot + 1) & (slots - 1);
-                classes += table[slot] == ~0u;
-                table[slot] = rune;
-            }
-            return round_up_to_multiple<std::size_t>(
-                sz_levenshtein_utf8_span_header_k + sz_levenshtein_utf8_pages_k * sizeof(u16_t) +
-                    rows * 256 * sizeof(u32_t) +
-                    (classes + 1) * sz_levenshtein_walk_stride(sz_levenshtein_query_words(runes)) * sizeof(u64_t),
-                16);
-        }
-        else {
-            u64_t present[4] = {};
-            for (std::size_t position = 0; position != bytes; ++position) {
-                u8_t const value = static_cast<u8_t>(data[position]);
-                present[value >> 6] |= u64_t {1} << (value & 63u);
-            }
-            std::size_t distinct = 0;
-            for (u64_t const word : present) distinct += static_cast<std::size_t>(std::popcount(word));
-            std::size_t const classes = min_of<std::size_t>(distinct + 1, sz_levenshtein_byte_classes_k);
-            return round_up_to_multiple<std::size_t>(
-                sz_levenshtein_byte_classes_k +
-                    (classes + 1) * sz_levenshtein_walk_stride(sz_levenshtein_query_words(bytes)) * sizeof(u64_t),
-                16);
-        }
+    /** Lays the costs and the widths out as the kit reads them. */
+    static std::size_t canonical_parameters_bytes(canonical_parameters_t const&) noexcept {
+        return sizeof(canonical_parameters_t);
     }
-    static std::size_t span_bytes(std::size_t, parameters_t) noexcept { return 0; }
+    static void canonical_parameters_lay_out(canonical_parameters_t const& windows, byte_t* laid) noexcept {
+        std::memcpy(laid, &windows, sizeof(windows));
+    }
 
-    /** Nothing to lay out. */
-    static std::size_t parameters_bytes(parameters_t) noexcept { return 0; }
-    static void lay_out(parameters_t, byte_t*) noexcept {}
+    /** No sketch: builders score canonically, and a stored value is its class bytes closed to a
+     *  word. */
+    using sketch_tables_t = std::monostate;
+
+    /** No sketch, so no scratch beside one. */
+    static constexpr std::size_t sketch_scratch_bytes(std::size_t) noexcept { return 0; }
 };
-
-using apple_levenshtein_bytes_kit_t = apple_levenshtein_kit<sz_levenshtein_bytes_k>;
-using apple_levenshtein_utf8_kit_t = apple_levenshtein_kit<sz_levenshtein_runes_k>;
 
 /** The Apple kits on the ladders the faces and tests pick a kind's kit from, at Metal's
  *  capability. */
 template <sz_capability_t caps_>
     requires((caps_ & sz_cap_metal_k) != 0)
-struct levenshtein_ladder<sz_levenshtein_bytes_k, caps_> {
-    using kit_t = apple_levenshtein_bytes_kit_t;
+struct containment_ladder<caps_> {
+    using kit_t = apple_utf8_containment_kit_t;
 };
 
 template <sz_capability_t caps_>
     requires((caps_ & sz_cap_metal_k) != 0)
-struct levenshtein_ladder<sz_levenshtein_runes_k, caps_> {
-    using kit_t = apple_levenshtein_utf8_kit_t;
+struct banded_overlap_ladder<caps_> {
+    using kit_t = apple_u8_banded_overlap_kit_t;
 };
 
 template <sz_capability_t caps_>
     requires((caps_ & sz_cap_metal_k) != 0)
-struct overlap_ladder<caps_> {
-    using kit_t = apple_overlap_kit_t;
-};
-
-template <sz_capability_t caps_>
-    requires((caps_ & sz_cap_metal_k) != 0)
-struct needleman_wunsch_ladder<caps_> {
-    using kit_t = apple_needleman_wunsch_kit_t;
+struct alignment_ladder<caps_> {
+    using kit_t = apple_packed_alignment_kit_t;
 };
 
 #pragma endregion Kits
@@ -288,9 +289,13 @@ struct needleman_wunsch_ladder<caps_> {
  *  rungs, over node IDs of @p node_id_type_, with the parameters it scores with. */
 template <typename kit_type_, typename node_id_type_>
 struct vram_apple_kits {
-    using parameters_t = typename kit_type_::parameters_t;
+    using canonical_parameters_t = typename kit_type_::canonical_parameters_t;
+    using sketch_tables_t = typename kit_type_::sketch_tables_t;
 
-    inline static constexpr std::size_t rungs_k = kit_type_::rungs_k;
+    /** Rungs of the kit's canonical kernels, and the first of them its builders compile on: one
+     *  under a sketching kit, as no length sizes a sketch, and every one otherwise. */
+    inline static constexpr std::size_t canonical_rungs_count_k = kit_type_::canonical_rungs_count_k;
+    inline static constexpr std::size_t build_rungs_count_k = kit_type_::sketching_k ? 1 : canonical_rungs_count_k;
     inline static constexpr auto const& metal_sources_k = kit_type_::metal_sources_k;
     inline static constexpr auto const& metal_kit_name_k = kit_type_::metal_kit_name_k;
 
@@ -300,105 +305,175 @@ struct vram_apple_kits {
      *  @par Statuses:
      *  - @c out_of_memory_k The host copy found no memory.
      */
-    status_t parameters(parameters_t parameters) noexcept {
-        std::size_t const bytes = kit_type_::parameters_bytes(parameters);
-        if (status_t const sized = host_parameters_.resize(divide_round_up(bytes, sizeof(u32_t))); failed(sized))
+    status_t canonical_parameters(canonical_parameters_t parameters) noexcept {
+        std::size_t const bytes = kit_type_::canonical_parameters_bytes(parameters);
+        if (status_t const sized = host_canonical_parameters_.resize(divide_round_up(bytes, sizeof(u32_t)));
+            failed(sized))
             return sized;
-        kit_type_::lay_out(parameters, bytes_of(host_parameters_.data(), host_parameters_.size()).data());
-        if constexpr (std::is_same_v<parameters_t, std::span<u32_t const>>)
-            kept_parameters_ = to_span(host_parameters_).subspan(1);
-        else kept_parameters_ = parameters;
+        kit_type_::canonical_parameters_lay_out(
+            parameters, bytes_of(host_canonical_parameters_.data(), host_canonical_parameters_.size()).data());
+        kept_canonical_parameters_ = parameters;
         return status_code_t::success_k;
     }
+
+    /**
+     *  @brief Keeps the kit's sketch tables, which the first @c reserve uploads to the device,
+     *      nothing for a kit reading none, and the @p sketch_bytes of every stored sketch.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The bytes are not a positive multiple of four for a sketching kit, or
+     *    the tables hold fewer columns; or they are not zero for a kit writing no sketch.
+     *  - @c out_of_memory_k The host copy found no memory.
+     */
+    status_t sketch_tables(sketch_tables_t const& tables, std::size_t sketch_bytes) noexcept {
+        // A sketch lands on whole words, and a kit writing none stores none.
+        if (kit_type_::sketching_k ? !sketch_bytes || sketch_bytes % sizeof(u32_t) : sketch_bytes != 0)
+            return {status_code_t::config_mismatch_k, "Sketch bytes not words, or given to a sketchless kit"};
+        sketch_bytes_ = static_cast<u32_t>(sketch_bytes);
+        // A kit reading no tables keeps none, and none is uploaded.
+        if constexpr (std::is_empty_v<sketch_tables_t>) return status_code_t::success_k;
+        else {
+            if (tables.head->columns < sketch_bytes)
+                return {status_code_t::config_mismatch_k, "Sketch tables narrower than the sketch"};
+            bytes_view_t const laid = spectrum_bytes_of(tables);
+            if (status_t const sized = host_sketch_tables_.resize_uninitialized(laid.size()); failed(sized))
+                return sized;
+            std::memcpy(host_sketch_tables_.data(), laid.data(), laid.size());
+            return status_code_t::success_k;
+        }
+    }
+
+    /** Bytes of the sketch in front of every stored sequence and of a query's; zero for a kit
+     *  writing none. */
+    std::size_t sketch_bytes() const noexcept { return sketch_bytes_; }
 
   private:
     template <typename, typename, typename, typename>
     friend struct basic::vram_apple_graph;
 
-    /** The kit's rung serving sequences of @p longest bytes, or @c rungs_k past every one. */
-    std::size_t rung_serving_(std::size_t longest) const noexcept {
-        return kit_type_::rung_serving(longest, kept_parameters_);
+    /** The kit's rung serving @p role over values of @p longest bytes under the kept parameters, or
+     *  @c canonical_rungs_count_k past every one: by the value scored, but a sketch builder on the
+     *  first, whatever the stored values' lengths. */
+    std::size_t rung_serving_(score_role_t role, std::size_t longest) const noexcept {
+        if (role == score_role_t::build_k && kit_type_::sketching_k) return 0;
+        return kit_type_::canonical_rung_serving(longest, kept_canonical_parameters_);
     }
 
-    /** Lanes the kit scores a sequence with on @p rung. */
-    static u32_t lanes_per_entry_(std::size_t rung) noexcept { return kit_type_::lanes_per_row(rung); }
-
-    /** Bytes the @p bytes long sequence at @p data takes once prepared, and the bound any loaded
-     *  sequence of up to @p longest bytes takes. */
-    std::size_t span_bytes_(byte_t const* data, std::size_t bytes) const noexcept {
-        return round_up_to_multiple<std::size_t>(kit_type_::span_bytes(data, bytes, kept_parameters_), 16);
-    }
-    std::size_t span_bytes_(std::size_t longest) const noexcept {
-        return round_up_to_multiple<std::size_t>(kit_type_::span_bytes(longest, kept_parameters_), 16);
+    /** Lanes the kit scores a value with for @p role on @p rung : one for a builder's sketch. */
+    static u32_t lanes_per_entry_(score_role_t role, std::size_t rung) noexcept {
+        return role == score_role_t::build_k && kit_type_::sketching_k ? 1 : kit_type_::canonical_lanes_per_entry(rung);
     }
 
-    /** A sequence saves as its bytes, as a RAM string. */
-    static expected<std::size_t> saved_bytes_(bytes_view_t stored) noexcept {
-        return {stored.size(), status_code_t::success_k};
+    /** Bytes the @p bytes long query at @p data takes once prepared for @p role, a multiple of 16:
+     *  none for a sketch builder, which reads the stored sketches in place. */
+    std::size_t span_bytes_(score_role_t role, byte_t const* data, std::size_t bytes) const noexcept {
+        if (role == score_role_t::build_k && kit_type_::sketching_k) return 0;
+        return round_up_to_multiple<std::size_t>(
+            kit_type_::canonical_span_bytes(data, bytes, kept_canonical_parameters_), 16);
+    }
+
+    /** Bytes the @p stored value saves into: its sequence's, as a RAM index saves it. */
+    expected<std::size_t> saved_bytes_(bytes_view_t stored) const noexcept {
+        return {vram_stored_sequence(stored, sketch_bytes_).size(), status_code_t::success_k};
     }
 
     /**
-     *  @brief Saves the @p stored sequence into @p saved as it is.
+     *  @brief Saves the sequence of the @p stored value into @p saved as it is.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k The two differ in size.
      */
-    static status_t save_value_(bytes_view_t stored, bytes_span_t saved) noexcept { return copy_bytes(saved, stored); }
+    status_t save_value_(bytes_view_t stored, bytes_span_t saved) const noexcept {
+        return copy_bytes(saved, vram_stored_sequence(stored, sketch_bytes_));
+    }
 
-    /** Bytes a sequence of @p saved bytes stores into: its own. */
-    static expected<std::size_t> stored_bytes_(std::size_t saved) noexcept { return {saved, status_code_t::success_k}; }
+    /** Bytes a sequence of @p saved bytes stores into: behind its sketch, closed to a word. */
+    expected<std::size_t> stored_bytes_(std::size_t saved) const noexcept {
+        return {vram_stored_bytes(saved, sketch_bytes_), status_code_t::success_k};
+    }
 
-    /** A load stores sequences as saved, on the host over unified memory, then raises the widest
-     *  span to the widest its sequences prepare into. */
-    status_t queue_load_values_(basic::metal_load_step<node_id_type_> const& step) const noexcept {
-        if (status_t const copied = step.copy_values(); failed(copied)) return copied;
-        std::size_t widest = 0;
-        for (std::size_t node = 0; node != step.arguments.count; ++node) {
-            std::size_t const first = step.stored_offsets[node], bytes = step.stored_offsets[node + 1] - first;
-            widest = max_of(widest, span_bytes_(step.stored + (first - step.stored_offsets[0]), bytes));
-        }
-        *step.span_bytes = max_of(*step.span_bytes, widest);
-        return status_code_t::success_k;
+    /** Shared bytes each warp of a load or sketch launch carves for the kept sketch bytes, which
+     *  the graph's first @c reserve holds against the device's widest block grant. */
+    std::size_t warp_scratch_bytes_() const noexcept { return kit_type_::sketch_scratch_bytes(sketch_bytes_); }
+
+    /** A load scatters each saved sequence behind its sketch, which the same kernel derives from
+     *  the tables uploaded with the parameters, where the kit has either; the graph's launch
+     *  scalars carry the bytes. */
+    status_t queue_load_values_(basic::metal_load_step<node_id_type_> step) const noexcept {
+        if (device_sketch_tables_) step.tables = &device_sketch_tables_;
+        step.warp_scratch_bytes = static_cast<u32_t>(warp_scratch_bytes_());
+        return step.launch_kits(vram_kernel_t::load_values_k);
+    }
+
+    /** Queues the sketches of an insert's values or a search's queries, from the tables uploaded
+     *  with the parameters, where the kit has any; the graph's launch scalars carry the bytes. */
+    status_t queue_sketches_(basic::metal_sketch_step<node_id_type_> step) const noexcept
+        requires kit_type_::sketching_k
+    {
+        if (device_sketch_tables_) step.tables = &device_sketch_tables_;
+        step.warp_scratch_bytes = static_cast<u32_t>(warp_scratch_bytes_());
+        return step.launch_kits(vram_kernel_t::sketch_values_k);
     }
 
     /**
-     *  @brief Copies the laid-out parameters into a shared buffer on @p context 's device.
+     *  @brief Copies the laid-out parameters and the sketch tables into shared buffers on
+     *      @p context 's device.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k The kit takes parameters, and none were set.
+     *  - @c uninitialized_k The kit reads sketch tables or parameters, or writes sketches, and one
+     *    was not set.
      *  - @c out_of_memory_k The device found no memory.
      */
     status_t upload_parameters_(metal_context_t& context) noexcept {
-        if (host_parameters_.empty())
-            return std::is_empty_v<parameters_t> ? status_code_t::success_k : status_code_t::uninitialized_k;
-        std::size_t const bytes = host_parameters_.size() * sizeof(u32_t);
-        device_parameters_ = metal_allocate(context, bytes);
-        if (!device_parameters_) return status_code_t::out_of_memory_k;
-        std::memcpy(device_parameters_.host, host_parameters_.data(), bytes);
+        if ((host_sketch_tables_.empty() && !std::is_empty_v<sketch_tables_t>) ||
+            (kit_type_::sketching_k && !sketch_bytes_) ||
+            (host_canonical_parameters_.empty() && !std::is_empty_v<canonical_parameters_t>))
+            return {status_code_t::uninitialized_k, "Sketch tables, sketch bytes or parameters not set"};
+        if (!host_sketch_tables_.empty()) {
+            device_sketch_tables_ = metal_allocate(context, host_sketch_tables_.size());
+            if (!device_sketch_tables_) return status_code_t::out_of_memory_k;
+            std::memcpy(device_sketch_tables_.host, host_sketch_tables_.data(), host_sketch_tables_.size());
+        }
+        if (host_canonical_parameters_.empty()) return status_code_t::success_k;
+        std::size_t const bytes = host_canonical_parameters_.size() * sizeof(u32_t);
+        device_canonical_parameters_ = metal_allocate(context, bytes);
+        if (!device_canonical_parameters_) return status_code_t::out_of_memory_k;
+        std::memcpy(device_canonical_parameters_.host, host_canonical_parameters_.data(), bytes);
         return status_code_t::success_k;
     }
 
     /** The kit's parameters on the device, empty for a kit taking none. */
-    metal_buffer_t const& parameters_() const noexcept { return device_parameters_; }
+    metal_buffer_t const& parameters_() const noexcept { return device_canonical_parameters_; }
 
-    /** The kit's parameters as its host members read them, a span into @c host_parameters_ where
-     *  they are one. */
-    parameters_t kept_parameters_ {};
+    /** The kit's parameters as its host members read them. */
+    canonical_parameters_t kept_canonical_parameters_ {};
 
     /** The kit's parameters laid out as its kernels read them, on the host and, past the first
      *  @c reserve, in a shared buffer. */
-    growing_buffer<u32_t, std::allocator<byte_t>> host_parameters_ {std::allocator<byte_t> {}};
-    metal_buffer_t device_parameters_;
+    growing_buffer<u32_t, std::allocator<byte_t>> host_canonical_parameters_ {std::allocator<byte_t> {}};
+    metal_buffer_t device_canonical_parameters_;
+
+    /** The kit's sketch tables as @ref sketch_tables laid them out, and in a shared buffer past the
+     *  first @c reserve, where the sketch phases of an insert, a search and a load read them; empty
+     *  for a kit reading none. */
+    growing_buffer<byte_t, std::allocator<byte_t>> host_sketch_tables_ {std::allocator<byte_t> {}};
+    metal_buffer_t device_sketch_tables_;
+
+    /** Bytes of every stored sketch, as @ref sketch_tables set them. */
+    u32_t sketch_bytes_ = 0;
 };
 
 /** Similarity Search over byte sequences on Apple GPUs scored by the sequence kit @p kit_type_
  *  describes, on its rungs. Node IDs are @p node_id_type_. It owns a @c basic::vram_apple_graph
- *  over its kits and forwards its verbs, types and constants, which that graph documents. */
+ *  over its kits and forwards its verbs, types and constants, which that graph documents. Every
+ *  value of its tape is the kit's sketch, the sequence and the closing padding, so @ref insert
+ *  takes a tape laid out in that stored form, its sketches left for the device. */
 template <typename kit_type_, typename node_id_type_>
 struct vram_apple_index {
     /* Components */
     using kits_t = vram_apple_kits<kit_type_, node_id_type_>;
-    using parameters_t = typename kits_t::parameters_t;
+    using canonical_parameters_t = typename kits_t::canonical_parameters_t;
+    using sketch_tables_t = typename kits_t::sketch_tables_t;
     using graph_t = basic::vram_apple_graph<node_id_type_, kits_t>;
     using traversal_context_t = typename graph_t::traversal_context_t;
 
@@ -442,10 +517,26 @@ struct vram_apple_index {
      *  - @c config_mismatch_k The index is reserved already.
      *  - @c out_of_memory_k The host copy found no memory.
      */
-    status_t parameters(parameters_t parameters) noexcept {
+    status_t canonical_parameters(canonical_parameters_t parameters) noexcept {
         if (graph_.connectivity()) return status_code_t::config_mismatch_k;
-        return graph_.kits().parameters(parameters);
+        return graph_.kits().canonical_parameters(parameters);
     }
+
+    /**
+     *  @brief Keeps the tables the kit's sketches read and the @p sketch_bytes of every stored
+     *      sketch, frozen once the first @c reserve has uploaded them to the device.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The index is reserved already, or the kits refuse the bytes.
+     *  - @c out_of_memory_k The host copy found no memory.
+     */
+    status_t sketch_tables(sketch_tables_t const& tables, std::size_t sketch_bytes) noexcept {
+        if (graph_.connectivity()) return status_code_t::config_mismatch_k;
+        return graph_.kits().sketch_tables(tables, sketch_bytes);
+    }
+
+    /** Bytes of the sketch in front of every stored sequence; zero for a kit writing none. */
+    std::size_t sketch_bytes() const noexcept { return graph_.kits().sketch_bytes(); }
 
     std::size_t size() const noexcept { return graph_.size(); }
     status_t status() const noexcept { return graph_.status(); }
@@ -467,8 +558,13 @@ struct vram_apple_index {
     }
 
     expected<insert_plan_t> plan_insert(std::size_t entries) noexcept { return graph_.plan_insert(entries); }
+
+    /** Inserts a tape of stored values, refusing with @c config_mismatch_k one holding a value no
+     *  @ref vram_stored_bytes sizes: bare sequences, or values closed otherwise. */
     expected<insert_result_t> insert(std::span<key_t const> keys, tape_view<byte_t const> tape,
                                      traversal_context_t& context, insert_config_t config = {}) noexcept {
+        if (!vram_tape_is_stored(tape, sketch_bytes()))
+            return {{}, {status_code_t::config_mismatch_k, "Tape not laid out behind sketches"}};
         return graph_.insert(keys, tape, context, config);
     }
     expected<search_result_t> search(tape_view<byte_t const> queries, nk::matrix_span<node_id_t> result_ids,
@@ -511,6 +607,9 @@ struct vram_apple_index {
     }
     status_t load(safegraphs_saved_columns<node_id_t> const& saved, traversal_context_t& context) noexcept {
         return graph_.load(saved, context);
+    }
+    status_t adopt_links(typename graph_t::links_view_t links, traversal_context_t& context) noexcept {
+        return graph_.adopt_links(links, context);
     }
 
     keyed_t const& keys() const noexcept { return graph_.keys(); }

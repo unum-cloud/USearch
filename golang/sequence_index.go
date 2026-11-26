@@ -1,4 +1,4 @@
-// Similarity Search over variable-length byte sequences, under edit distances and alignments.
+// Similarity Search over sequences: alignment of proteins, overlap of DNA, containment of text.
 //
 // File: golang/sequence_index.go
 // Author: Ash Vardanian
@@ -68,21 +68,31 @@ import "C"
 
 // region: Geometry
 
-// SequenceMetric names how two sequences are scored: the uniform edit distances, a weighted
-// global alignment, or the overlap of their windows.
+// SequenceMetric names what the sequences are, the form they are stored in, and the score ranking
+// them. Every metric stores a sequence folded, and a get returns the stored form, never the bytes
+// an insertion passed.
 type SequenceMetric int32
 
 const (
 	// SequenceMetricUnknown tags a metric the library could not name.
 	SequenceMetricUnknown SequenceMetric = C.usearch_sequence_metric_unknown_k
-	// SequenceMetricLevenshteinBytes counts single-byte insertions, deletions and substitutions.
-	SequenceMetricLevenshteinBytes SequenceMetric = C.usearch_sequence_metric_levenshtein_bytes_k
-	// SequenceMetricLevenshteinUTF8 counts the same edits over decoded code points.
-	SequenceMetricLevenshteinUTF8 SequenceMetric = C.usearch_sequence_metric_levenshtein_utf8_k
-	// SequenceMetricNeedlemanWunsch is a global alignment under a substitution matrix and a gap cost.
-	SequenceMetricNeedlemanWunsch SequenceMetric = C.usearch_sequence_metric_needleman_wunsch_k
-	// SequenceMetricOverlap is the share of the larger window set the other side misses.
-	SequenceMetricOverlap SequenceMetric = C.usearch_sequence_metric_overlap_k
+	// SequenceMetricProteinAlignment is a global alignment of proteins with linear gaps: BLOSUM62
+	// with a gap of 7 over the 20 amino acids, B, Z, X and the stop in either case, any other byte
+	// as X, unless the index names its own costs. A stored sequence reads back as its class codes,
+	// five bits apiece, little-endian behind one byte counting the slots the last bytes leave
+	// unused.
+	SequenceMetricProteinAlignment SequenceMetric = C.usearch_sequence_metric_protein_alignment_k
+	// SequenceMetricDNAOverlap is the shifted overlap of DNA or RNA: the cost of aligning two
+	// sequences where one slides over the other, at the shift most windows of 12 and 19 symbols
+	// vote for, on either strand. Bytes fold into the classes of A, C, G and T in either case, U
+	// read as T and any other byte as T. A stored sequence reads back as its class codes, one byte
+	// apiece.
+	SequenceMetricDNAOverlap SequenceMetric = C.usearch_sequence_metric_dna_overlap_k
+	// SequenceMetricUTF8Containment is the window containment of UTF-8 text: the share of the
+	// query's distinct windows of 5 and 8 bytes the stored side lacks, whatever the case. Text is
+	// case-folded before it is stored or scored, which may lengthen it up to three times, and a
+	// stored text reads back folded. It takes no costs.
+	SequenceMetricUTF8Containment SequenceMetric = C.usearch_sequence_metric_utf8_containment_k
 )
 
 // String renders the metric as the library spells it.
@@ -101,12 +111,15 @@ func SequenceMetricFromName(name string) (SequenceMetric, error) {
 	return SequenceMetric(metric), nil
 }
 
-// SequenceWeights are the substitution matrix and gap cost an alignment scores with; the
-// Levenshtein kinds score with unit costs and take none. The library reads them during the call
-// that names them alone.
-type SequenceWeights struct {
-	// SubstitutionMatrix holds 256 × 256 signed scores over byte alphabets, row-major.
-	SubstitutionMatrix []int8
+// SequenceCosts is how alike two symbols are, and the cost of leaving one unaligned, where an
+// index scores by other costs than its metric's own. The library reads it during the call that
+// names it alone, and a checkpoint records it, so loads and views take none. Bytes sharing their
+// rows and columns fold into one class, at most 32. A DNA overlap needs costs folding bytes into
+// exactly four classes holding A, C, G and T apart.
+type SequenceCosts struct {
+	// Similarities holds 256 × 256 signed scores between raw bytes, row-major, so the score of A
+	// against C sits at 'A'*256 + 'C'.
+	Similarities []int8
 	// Gap is the cost of one unaligned symbol.
 	Gap int8
 }
@@ -114,16 +127,16 @@ type SequenceWeights struct {
 // SequenceOptions holds the construction options of a sequence index, the fields SequenceInitRam
 // and SequenceInitVram share.
 type SequenceOptions struct {
-	// Metric is how two sequences are scored.
+	// Metric is what the sequences are and the score ranking them.
 	Metric SequenceMetric
-	// Weights are what SequenceMetricNeedlemanWunsch needs, and every other kind refuses; nil for
-	// none.
-	Weights *SequenceWeights
-	// WindowWidths are the window widths in bytes SequenceMetricOverlap needs, and every other kind
-	// refuses.
-	WindowWidths []uint
+	// Costs is the optional costs; nil for the metric's own, and refused for
+	// SequenceMetricUTF8Containment.
+	Costs *SequenceCosts
 	// Connectivity bounds the connections per node in the graph; zero derives.
 	Connectivity uint
+	// SketchBytes is the bytes of the sketch in front of each stored sequence, a multiple of four;
+	// zero takes the metric's default, and SequenceMetricDNAOverlap keeps none and refuses any.
+	SketchBytes uint
 	// ValuesPerKey bounds how many entries may share one key; zero is unbounded.
 	ValuesPerKey uint
 	// CPUClassCeiling is the newest class dispatch may pick, intersected with what the machine runs,
@@ -135,23 +148,28 @@ type SequenceOptions struct {
 	GPUClassCeiling GPUClass
 }
 
-// DefaultSequenceOptions is a byte-level Levenshtein index, with every optional field derived.
+// DefaultSequenceOptions is a protein alignment index, with every optional field derived.
 func DefaultSequenceOptions() SequenceOptions {
-	return SequenceOptions{Metric: SequenceMetricLevenshteinBytes}
+	return SequenceOptions{Metric: SequenceMetricProteinAlignment}
 }
 
-// SequenceMetadata is the metric and connectivity a checkpoint froze.
+// SequenceMetadata is the metric and geometry a checkpoint froze.
 type SequenceMetadata struct {
 	// Metric is the scoring kind the checkpoint scores with.
 	Metric SequenceMetric
 	// Connectivity is the connections per node the graph was built with.
 	Connectivity uint
+	// Classes counts the classes the recorded costs folded bytes into; zero for a containment.
+	Classes uint
+	// SketchBytes is the bytes of the sketch in front of each stored sequence; zero when the
+	// metric keeps none.
+	SketchBytes uint
 }
 
 // SequenceIndexDescription is a live index's frozen metadata and current counters, each read
 // once, so under concurrent insertions they may come from slightly different moments.
 type SequenceIndexDescription struct {
-	// Metadata is the frozen metric and connectivity, as a checkpoint reports them.
+	// Metadata is the frozen metric and geometry, as a checkpoint reports them.
 	Metadata SequenceMetadata
 	// Size is the number of stored entries.
 	Size uint
@@ -408,25 +426,25 @@ type SequenceRefinePlan = livePlan[C.usearch_sequence_refine_plan_t]
 // names admits no insertion and no save, and each call names the executor it was opened with.
 type SequenceReshardPlan = livePlan[C.usearch_sequence_reshard_plan_t]
 
-// check refuses a matrix of another size than the 256 × 256 the library reads, since only this
-// side sees its length.
-func (weights *SequenceWeights) check() error {
-	if weights == nil || weights.SubstitutionMatrix == nil || len(weights.SubstitutionMatrix) == 256*256 {
+// check refuses similarities of another size than the 256 × 256 the library reads, since only
+// this side sees their length.
+func (costs *SequenceCosts) check() error {
+	if costs == nil || len(costs.Similarities) == 256*256 {
 		return nil
 	}
-	return fail(StatusShapeMismatch, "a substitution matrix holds 256 × 256 scores")
+	return fail(StatusShapeMismatch, "similarities hold 256 × 256 scores")
 }
 
-// weights passes optional weights for the call alone, nil for none.
-func (call *call) weights(weights *SequenceWeights) *C.usearch_sequence_weights_t {
-	if weights == nil {
+// costs passes optional costs for the call alone, nil for none.
+func (call *call) costs(costs *SequenceCosts) *C.usearch_sequence_costs_t {
+	if costs == nil {
 		return nil
 	}
-	lowered := &C.usearch_sequence_weights_t{
-		substitution_matrix: (*C.int8_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(weights.SubstitutionMatrix)), len(weights.SubstitutionMatrix))),
-		gap:                 C.int8_t(weights.Gap),
+	lowered := &C.usearch_sequence_costs_t{
+		similarities: (*C.int8_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(costs.Similarities)), len(costs.Similarities))),
+		gap:          C.int8_t(costs.Gap),
 	}
-	return (*C.usearch_sequence_weights_t)(call.pin(unsafe.Pointer(lowered)))
+	return (*C.usearch_sequence_costs_t)(call.pin(unsafe.Pointer(lowered)))
 }
 
 // endregion: Configs
@@ -470,21 +488,20 @@ func (index *SequenceIndex) Close() error {
 // SequenceInitRam creates an empty, mutable index in host memory, one shard per NUMA node
 // memoryDomains names; empty derives every node the process may use.
 func SequenceInitRam(options SequenceOptions, memoryDomains []int32) (*SequenceIndex, error) {
-	if err := options.Weights.check(); err != nil {
+	if err := options.Costs.check(); err != nil {
 		return nil, err
 	}
 	var call callWithResult[C.usearch_sequence_index_t]
 	arguments := open[C.usearch_sequence_init_ram_t](&call)
 	*arguments = C.usearch_sequence_init_ram_t{
-		index:               call.result,
-		outcome:             call.outcome(),
-		metric:              C.usearch_sequence_metric_t(options.Metric),
-		weights:             call.weights(options.Weights),
-		window_widths:       (*C.size_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(options.WindowWidths)), len(options.WindowWidths))),
-		window_widths_count: C.size_t(len(options.WindowWidths)),
-		connectivity:        C.size_t(options.Connectivity),
-		values_per_key:      C.size_t(options.ValuesPerKey),
-		ram:                 call.ram(memoryDomains, options.CPUClassCeiling),
+		index:          call.result,
+		outcome:        call.outcome(),
+		metric:         C.usearch_sequence_metric_t(options.Metric),
+		costs:          call.costs(options.Costs),
+		connectivity:   C.size_t(options.Connectivity),
+		sketch_bytes:   C.size_t(options.SketchBytes),
+		values_per_key: C.size_t(options.ValuesPerKey),
+		ram:            call.ram(memoryDomains, options.CPUClassCeiling),
 	}
 	C.usearch_sequence_init_ram(arguments)
 	return sequenceIndexOf(block(&call, nil))
@@ -493,36 +510,31 @@ func SequenceInitRam(options SequenceOptions, memoryDomains []int32) (*SequenceI
 // SequenceInitVram creates an empty, mutable index in device memory, sharded across the CUDA
 // ordinals devices names and never replicated; empty derives one free device.
 func SequenceInitVram(options SequenceOptions, devices []int32) (*SequenceIndex, error) {
-	if err := options.Weights.check(); err != nil {
+	if err := options.Costs.check(); err != nil {
 		return nil, err
 	}
 	var call callWithResult[C.usearch_sequence_index_t]
 	arguments := open[C.usearch_sequence_init_vram_t](&call)
 	*arguments = C.usearch_sequence_init_vram_t{
-		index:               call.result,
-		outcome:             call.outcome(),
-		metric:              C.usearch_sequence_metric_t(options.Metric),
-		weights:             call.weights(options.Weights),
-		window_widths:       (*C.size_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(options.WindowWidths)), len(options.WindowWidths))),
-		window_widths_count: C.size_t(len(options.WindowWidths)),
-		connectivity:        C.size_t(options.Connectivity),
-		values_per_key:      C.size_t(options.ValuesPerKey),
-		vram:                call.vram(devices, options.GPUClassCeiling),
+		index:          call.result,
+		outcome:        call.outcome(),
+		metric:         C.usearch_sequence_metric_t(options.Metric),
+		costs:          call.costs(options.Costs),
+		connectivity:   C.size_t(options.Connectivity),
+		sketch_bytes:   C.size_t(options.SketchBytes),
+		values_per_key: C.size_t(options.ValuesPerKey),
+		vram:           call.vram(devices, options.GPUClassCeiling),
 	}
 	C.usearch_sequence_init_vram(arguments)
 	return sequenceIndexOf(block(&call, nil))
 }
 
 // SequenceLoadRam copies a checkpoint into a new, mutable index in host memory. The path names a
-// manifest of a sharded checkpoint or a single .safegraphs monolith, and weights are the ones a
-// Needleman-Wunsch checkpoint scores with, which no checkpoint records.
-func SequenceLoadRam(path string, weights *SequenceWeights, config *SequenceLoadRamConfig) (*SequenceIndex, error) {
+// manifest of a sharded checkpoint or a single .safegraphs monolith, which records the costs.
+func SequenceLoadRam(path string, config *SequenceLoadRamConfig) (*SequenceIndex, error) {
 	options := configOf(config)
 	executor, err := options.Executor.lower()
 	if err != nil {
-		return nil, err
-	}
-	if err := weights.check(); err != nil {
 		return nil, err
 	}
 	var call callWithResult[C.usearch_sequence_index_t]
@@ -534,7 +546,6 @@ func SequenceLoadRam(path string, weights *SequenceWeights, config *SequenceLoad
 		path:           call.text(path),
 		ram:            call.ram(options.MemoryDomains, options.CPUClassCeiling),
 		values_per_key: C.size_t(options.ValuesPerKey),
-		weights:        call.weights(weights),
 		progress:       call.progress(options.Progress, options.ProgressSteps),
 	}
 	C.usearch_sequence_load_ram(arguments)
@@ -543,13 +554,10 @@ func SequenceLoadRam(path string, weights *SequenceWeights, config *SequenceLoad
 
 // SequenceLoadVram copies a checkpoint into a new, mutable index in device memory, with the
 // placement rules of SequenceLoadRam.
-func SequenceLoadVram(path string, weights *SequenceWeights, config *SequenceLoadVramConfig) (*SequenceIndex, error) {
+func SequenceLoadVram(path string, config *SequenceLoadVramConfig) (*SequenceIndex, error) {
 	options := configOf(config)
 	executor, err := options.Executor.lower()
 	if err != nil {
-		return nil, err
-	}
-	if err := weights.check(); err != nil {
 		return nil, err
 	}
 	var call callWithResult[C.usearch_sequence_index_t]
@@ -561,7 +569,6 @@ func SequenceLoadVram(path string, weights *SequenceWeights, config *SequenceLoa
 		path:           call.text(path),
 		vram:           call.vram(options.Devices, options.GPUClassCeiling),
 		values_per_key: C.size_t(options.ValuesPerKey),
-		weights:        call.weights(weights),
 		progress:       call.progress(options.Progress, options.ProgressSteps),
 	}
 	C.usearch_sequence_load_vram(arguments)
@@ -570,14 +577,10 @@ func SequenceLoadVram(path string, weights *SequenceWeights, config *SequenceLoa
 
 // SequenceLoadRamBuffer copies a monolith from a buffer into a new, mutable index in host memory,
 // as SequenceLoadRam does a path.
-func SequenceLoadRamBuffer(buffer []byte, weights *SequenceWeights,
-	config *SequenceLoadRamBufferConfig) (*SequenceIndex, error) {
+func SequenceLoadRamBuffer(buffer []byte, config *SequenceLoadRamBufferConfig) (*SequenceIndex, error) {
 	options := configOf(config)
 	executor, err := options.Executor.lower()
 	if err != nil {
-		return nil, err
-	}
-	if err := weights.check(); err != nil {
 		return nil, err
 	}
 	var call callWithResult[C.usearch_sequence_index_t]
@@ -589,7 +592,6 @@ func SequenceLoadRamBuffer(buffer []byte, weights *SequenceWeights,
 		buffer:         call.bytes(buffer),
 		ram:            call.ram(options.MemoryDomains, options.CPUClassCeiling),
 		values_per_key: C.size_t(options.ValuesPerKey),
-		weights:        call.weights(weights),
 		progress:       call.progress(options.Progress, options.ProgressSteps),
 	}
 	C.usearch_sequence_load_ram_buffer(arguments)
@@ -598,14 +600,10 @@ func SequenceLoadRamBuffer(buffer []byte, weights *SequenceWeights,
 
 // SequenceLoadVramBuffer copies a monolith from a buffer into a new, mutable index in device
 // memory.
-func SequenceLoadVramBuffer(buffer []byte, weights *SequenceWeights,
-	config *SequenceLoadVramBufferConfig) (*SequenceIndex, error) {
+func SequenceLoadVramBuffer(buffer []byte, config *SequenceLoadVramBufferConfig) (*SequenceIndex, error) {
 	options := configOf(config)
 	executor, err := options.Executor.lower()
 	if err != nil {
-		return nil, err
-	}
-	if err := weights.check(); err != nil {
 		return nil, err
 	}
 	var call callWithResult[C.usearch_sequence_index_t]
@@ -617,7 +615,6 @@ func SequenceLoadVramBuffer(buffer []byte, weights *SequenceWeights,
 		buffer:         call.bytes(buffer),
 		vram:           call.vram(options.Devices, options.GPUClassCeiling),
 		values_per_key: C.size_t(options.ValuesPerKey),
-		weights:        call.weights(weights),
 		progress:       call.progress(options.Progress, options.ProgressSteps),
 	}
 	C.usearch_sequence_load_vram_buffer(arguments)
@@ -626,17 +623,13 @@ func SequenceLoadVramBuffer(buffer []byte, weights *SequenceWeights,
 
 // SequenceViewRam serves a checkpoint in place through a memory mapping, as a read-only index
 // whose mutating verbs report StatusReadOnly; the files must stay unmodified while it lives.
-func SequenceViewRam(path string, weights *SequenceWeights) (*SequenceIndex, error) {
-	if err := weights.check(); err != nil {
-		return nil, err
-	}
+func SequenceViewRam(path string) (*SequenceIndex, error) {
 	var call callWithResult[C.usearch_sequence_index_t]
 	arguments := open[C.usearch_sequence_view_ram_t](&call)
 	*arguments = C.usearch_sequence_view_ram_t{
 		index:   call.result,
 		outcome: call.outcome(),
 		path:    call.text(path),
-		weights: call.weights(weights),
 	}
 	C.usearch_sequence_view_ram(arguments)
 	return sequenceIndexOf(block(&call, nil))
@@ -644,13 +637,10 @@ func SequenceViewRam(path string, weights *SequenceWeights) (*SequenceIndex, err
 
 // SequenceViewNvme serves a checkpoint in place from NVMe drives, read through the executor's
 // submission rings, as a read-only index.
-func SequenceViewNvme(path string, weights *SequenceWeights, config *SequenceViewNvmeConfig) (*SequenceIndex, error) {
+func SequenceViewNvme(path string, config *SequenceViewNvmeConfig) (*SequenceIndex, error) {
 	options := configOf(config)
 	executor, err := options.Executor.lower()
 	if err != nil {
-		return nil, err
-	}
-	if err := weights.check(); err != nil {
 		return nil, err
 	}
 	var call callWithResult[C.usearch_sequence_index_t]
@@ -661,13 +651,12 @@ func SequenceViewNvme(path string, weights *SequenceWeights, config *SequenceVie
 		outcome:  call.outcome(),
 		path:     call.text(path),
 		nvme:     call.nvme(options.Paths, options.CPUClassCeiling),
-		weights:  call.weights(weights),
 	}
 	C.usearch_sequence_view_nvme(arguments)
 	return sequenceIndexOf(block(&call, nil))
 }
 
-// SequenceMetadataRead reads a checkpoint's metric and connectivity without loading it.
+// SequenceMetadataRead reads a checkpoint's metric and geometry without loading it.
 func SequenceMetadataRead(path string, config *SequenceMetadataReadConfig) (SequenceMetadata, error) {
 	options := configOf(config)
 	executor, err := options.Executor.lower()
@@ -686,7 +675,7 @@ func SequenceMetadataRead(path string, config *SequenceMetadataReadConfig) (Sequ
 	return block(&call, nil)
 }
 
-// SequenceMetadataReadBuffer reads the metric and connectivity out of a serialized monolith buffer.
+// SequenceMetadataReadBuffer reads the metric and geometry out of a serialized monolith buffer.
 func SequenceMetadataReadBuffer(buffer []byte, config *SequenceMetadataReadBufferConfig) (SequenceMetadata, error) {
 	options := configOf(config)
 	executor, err := options.Executor.lower()

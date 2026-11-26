@@ -88,15 +88,15 @@ struct f16_cdna3_shapes_kit_t {
 
     /** The kit's identity in kernel symbols. */
     inline static constexpr char name_k[] = "f16_cdna3_shapes_kit_t";
-    inline static constexpr u32_t lanes_per_entry_k = 32;
+    inline static constexpr u32_t canonical_lanes_per_entry_k = 32;
 
     using warp_t = hip_warp<64>;
     using scan_t = cdna3_scan_t;
-    using query_t = vram_pack_query_t;
+    using canonical_query_t = vram_pack_query_t;
     using selector_t = basic::vram_keep_diverse_t;
     using scalar_t = nk::f16_t;
 
-    static constexpr bool serves(std::size_t) noexcept { return true; }
+    static constexpr bool canonical_serves(std::size_t) noexcept { return true; }
 
     /** Packs a load's clouds into the tape on the device. */
     template <typename node_id_type_>
@@ -105,27 +105,30 @@ struct f16_cdna3_shapes_kit_t {
     }
 
     /** Bytes the pack at @p data takes once prepared: the pack itself. */
-    static constexpr std::size_t span_bytes(byte_t const*, std::size_t bytes) noexcept {
+    static constexpr std::size_t canonical_span_bytes(byte_t const*, std::size_t bytes) noexcept {
         return round_up_to_multiple<std::size_t>(bytes, 16);
     }
 
-    static __device__ __forceinline__ query_t prepare(basic::vram_entry_t shape, byte_t* span, u32_t lane) noexcept {
+    static __device__ __forceinline__ canonical_query_t canonical_prepare(basic::vram_entry_t shape, byte_t* span,
+                                                                          u32_t lane) noexcept {
         return hip_prepare_pack<warp_t>(shape, span, lane);
     }
 
     /** The gap between the two clouds' largest radii, from their headers alone, bounds Hausdorff;
      *  nothing bounds Chamfer. */
-    static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t kernel, query_t const& query,
-                                                             basic::vram_entry_t shape) noexcept {
+    static __device__ __forceinline__ distance_t canonical_lower_bound(nk_kernel_kind_t kernel,
+                                                                       canonical_query_t const& query,
+                                                                       basic::vram_entry_t shape) noexcept {
         return kernel == nk_kernel_hausdorffs_packed_k ? nk_hausdorff_bound_packed_f16_simt_(query.pack, shape.data)
                                                        : 0;
     }
 
     /** Scores on the team holding @p lane, whose lanes split the outer cloud's points. */
-    static __device__ __forceinline__ distance_t score(nk_kernel_kind_t kernel, query_t const& query,
-                                                       basic::vram_entry_t shape, distance_t radius,
-                                                       u32_t lane) noexcept {
-        u32_t const team_lane = lane % lanes_per_entry_k;
+    static __device__ __forceinline__ distance_t canonical_distance(nk_kernel_kind_t kernel,
+                                                                    canonical_query_t const& query,
+                                                                    basic::vram_entry_t shape, distance_t radius,
+                                                                    u32_t lane) noexcept {
+        u32_t const team_lane = lane % canonical_lanes_per_entry_k;
         return kernel == nk_kernel_hausdorffs_packed_k
                    ? nk_hausdorff_warp_packed_f16_rocm_(query.pack, shape.data, radius, team_lane)
                    : nk_chamfer_warp_packed_f16_rocm_(query.pack, shape.data, radius, team_lane);
@@ -139,15 +142,15 @@ struct f16_cdna5_shapes_kit_t {
 
     /** The kit's identity in kernel symbols. */
     inline static constexpr char name_k[] = "f16_cdna5_shapes_kit_t";
-    inline static constexpr u32_t lanes_per_entry_k = 32;
+    inline static constexpr u32_t canonical_lanes_per_entry_k = 32;
 
     using warp_t = hip_warp<32>;
     using scan_t = cdna5_scan_t;
-    using query_t = vram_pack_query_t;
+    using canonical_query_t = vram_pack_query_t;
     using selector_t = basic::vram_keep_diverse_t;
     using scalar_t = nk::f16_t;
 
-    static constexpr bool serves(std::size_t) noexcept { return true; }
+    static constexpr bool canonical_serves(std::size_t) noexcept { return true; }
 
     /** Packs a load's clouds into the tape on the device. */
     template <typename node_id_type_>
@@ -156,27 +159,30 @@ struct f16_cdna5_shapes_kit_t {
     }
 
     /** Bytes the pack at @p data takes once prepared: the pack itself. */
-    static constexpr std::size_t span_bytes(byte_t const*, std::size_t bytes) noexcept {
+    static constexpr std::size_t canonical_span_bytes(byte_t const*, std::size_t bytes) noexcept {
         return round_up_to_multiple<std::size_t>(bytes, 16);
     }
 
-    static __device__ __forceinline__ query_t prepare(basic::vram_entry_t shape, byte_t* span, u32_t lane) noexcept {
+    static __device__ __forceinline__ canonical_query_t canonical_prepare(basic::vram_entry_t shape, byte_t* span,
+                                                                          u32_t lane) noexcept {
         return hip_prepare_pack<warp_t>(shape, span, lane);
     }
 
     /** The gap between the two clouds' largest radii, from their headers alone, bounds Hausdorff;
      *  nothing bounds Chamfer. */
-    static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t kernel, query_t const& query,
-                                                             basic::vram_entry_t shape) noexcept {
+    static __device__ __forceinline__ distance_t canonical_lower_bound(nk_kernel_kind_t kernel,
+                                                                       canonical_query_t const& query,
+                                                                       basic::vram_entry_t shape) noexcept {
         return kernel == nk_kernel_hausdorffs_packed_k ? nk_hausdorff_bound_packed_f16_simt_(query.pack, shape.data)
                                                        : 0;
     }
 
     /** Scores on the team holding @p lane, whose lanes split the outer cloud's points. */
-    static __device__ __forceinline__ distance_t score(nk_kernel_kind_t kernel, query_t const& query,
-                                                       basic::vram_entry_t shape, distance_t radius,
-                                                       u32_t lane) noexcept {
-        u32_t const team_lane = lane % lanes_per_entry_k;
+    static __device__ __forceinline__ distance_t canonical_distance(nk_kernel_kind_t kernel,
+                                                                    canonical_query_t const& query,
+                                                                    basic::vram_entry_t shape, distance_t radius,
+                                                                    u32_t lane) noexcept {
+        u32_t const team_lane = lane % canonical_lanes_per_entry_k;
         return kernel == nk_kernel_hausdorffs_packed_k
                    ? nk_hausdorff_warp_packed_f16_rocm_(query.pack, shape.data, radius, team_lane)
                    : nk_chamfer_warp_packed_f16_rocm_(query.pack, shape.data, radius, team_lane);
@@ -190,15 +196,15 @@ struct f32_cdna3_shapes_kit_t {
 
     /** The kit's identity in kernel symbols. */
     inline static constexpr char name_k[] = "f32_cdna3_shapes_kit_t";
-    inline static constexpr u32_t lanes_per_entry_k = 32;
+    inline static constexpr u32_t canonical_lanes_per_entry_k = 32;
 
     using warp_t = hip_warp<64>;
     using scan_t = cdna3_scan_t;
-    using query_t = vram_pack_query_t;
+    using canonical_query_t = vram_pack_query_t;
     using selector_t = basic::vram_keep_diverse_t;
     using scalar_t = nk::f32_t;
 
-    static constexpr bool serves(std::size_t) noexcept { return true; }
+    static constexpr bool canonical_serves(std::size_t) noexcept { return true; }
 
     /** Packs a load's clouds into the tape on the device. */
     template <typename node_id_type_>
@@ -207,28 +213,31 @@ struct f32_cdna3_shapes_kit_t {
     }
 
     /** Bytes the pack at @p data takes once prepared: the pack itself. */
-    static constexpr std::size_t span_bytes(byte_t const*, std::size_t bytes) noexcept {
+    static constexpr std::size_t canonical_span_bytes(byte_t const*, std::size_t bytes) noexcept {
         return round_up_to_multiple<std::size_t>(bytes, 16);
     }
 
-    static __device__ __forceinline__ query_t prepare(basic::vram_entry_t shape, byte_t* span, u32_t lane) noexcept {
+    static __device__ __forceinline__ canonical_query_t canonical_prepare(basic::vram_entry_t shape, byte_t* span,
+                                                                          u32_t lane) noexcept {
         return hip_prepare_pack<warp_t>(shape, span, lane);
     }
 
     /** The gap between the two clouds' largest radii, from their headers alone, bounds Hausdorff;
      *  nothing bounds Chamfer. */
-    static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t kernel, query_t const& query,
-                                                             basic::vram_entry_t shape) noexcept {
+    static __device__ __forceinline__ distance_t canonical_lower_bound(nk_kernel_kind_t kernel,
+                                                                       canonical_query_t const& query,
+                                                                       basic::vram_entry_t shape) noexcept {
         return kernel == nk_kernel_hausdorffs_packed_k
                    ? static_cast<distance_t>(nk_hausdorff_bound_packed_f32_simt_(query.pack, shape.data))
                    : 0;
     }
 
     /** Scores on the team holding @p lane, whose lanes split the outer cloud's points. */
-    static __device__ __forceinline__ distance_t score(nk_kernel_kind_t kernel, query_t const& query,
-                                                       basic::vram_entry_t shape, distance_t radius,
-                                                       u32_t lane) noexcept {
-        u32_t const team_lane = lane % lanes_per_entry_k;
+    static __device__ __forceinline__ distance_t canonical_distance(nk_kernel_kind_t kernel,
+                                                                    canonical_query_t const& query,
+                                                                    basic::vram_entry_t shape, distance_t radius,
+                                                                    u32_t lane) noexcept {
+        u32_t const team_lane = lane % canonical_lanes_per_entry_k;
         return static_cast<distance_t>(
             kernel == nk_kernel_hausdorffs_packed_k
                 ? nk_hausdorff_warp_packed_f32_rocm_(query.pack, shape.data, radius, team_lane)
@@ -243,15 +252,15 @@ struct f32_cdna5_shapes_kit_t {
 
     /** The kit's identity in kernel symbols. */
     inline static constexpr char name_k[] = "f32_cdna5_shapes_kit_t";
-    inline static constexpr u32_t lanes_per_entry_k = 32;
+    inline static constexpr u32_t canonical_lanes_per_entry_k = 32;
 
     using warp_t = hip_warp<32>;
     using scan_t = cdna5_scan_t;
-    using query_t = vram_pack_query_t;
+    using canonical_query_t = vram_pack_query_t;
     using selector_t = basic::vram_keep_diverse_t;
     using scalar_t = nk::f32_t;
 
-    static constexpr bool serves(std::size_t) noexcept { return true; }
+    static constexpr bool canonical_serves(std::size_t) noexcept { return true; }
 
     /** Packs a load's clouds into the tape on the device. */
     template <typename node_id_type_>
@@ -260,28 +269,31 @@ struct f32_cdna5_shapes_kit_t {
     }
 
     /** Bytes the pack at @p data takes once prepared: the pack itself. */
-    static constexpr std::size_t span_bytes(byte_t const*, std::size_t bytes) noexcept {
+    static constexpr std::size_t canonical_span_bytes(byte_t const*, std::size_t bytes) noexcept {
         return round_up_to_multiple<std::size_t>(bytes, 16);
     }
 
-    static __device__ __forceinline__ query_t prepare(basic::vram_entry_t shape, byte_t* span, u32_t lane) noexcept {
+    static __device__ __forceinline__ canonical_query_t canonical_prepare(basic::vram_entry_t shape, byte_t* span,
+                                                                          u32_t lane) noexcept {
         return hip_prepare_pack<warp_t>(shape, span, lane);
     }
 
     /** The gap between the two clouds' largest radii, from their headers alone, bounds Hausdorff;
      *  nothing bounds Chamfer. */
-    static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t kernel, query_t const& query,
-                                                             basic::vram_entry_t shape) noexcept {
+    static __device__ __forceinline__ distance_t canonical_lower_bound(nk_kernel_kind_t kernel,
+                                                                       canonical_query_t const& query,
+                                                                       basic::vram_entry_t shape) noexcept {
         return kernel == nk_kernel_hausdorffs_packed_k
                    ? static_cast<distance_t>(nk_hausdorff_bound_packed_f32_simt_(query.pack, shape.data))
                    : 0;
     }
 
     /** Scores on the team holding @p lane, whose lanes split the outer cloud's points. */
-    static __device__ __forceinline__ distance_t score(nk_kernel_kind_t kernel, query_t const& query,
-                                                       basic::vram_entry_t shape, distance_t radius,
-                                                       u32_t lane) noexcept {
-        u32_t const team_lane = lane % lanes_per_entry_k;
+    static __device__ __forceinline__ distance_t canonical_distance(nk_kernel_kind_t kernel,
+                                                                    canonical_query_t const& query,
+                                                                    basic::vram_entry_t shape, distance_t radius,
+                                                                    u32_t lane) noexcept {
+        u32_t const team_lane = lane % canonical_lanes_per_entry_k;
         return static_cast<distance_t>(
             kernel == nk_kernel_hausdorffs_packed_k
                 ? nk_hausdorff_warp_packed_f32_rocm_(query.pack, shape.data, radius, team_lane)
@@ -316,19 +328,20 @@ void append_itanium_argument(vram_kernel_symbol_t& symbol, itanium_type<kit_type
 }
 
 template <typename kit_type_, typename node_id_type_, typename kernels_type_>
-std::size_t vram_amd_kits<kit_type_, node_id_type_, kernels_type_>::rung_serving_(std::size_t longest) noexcept {
-    return kit_type_::serves(longest) ? 0 : rungs_k;
+std::size_t vram_amd_kits<kit_type_, node_id_type_, kernels_type_>::rung_serving_(score_role_t,
+                                                                                  std::size_t longest) noexcept {
+    return kit_type_::canonical_serves(longest) ? 0 : canonical_rungs_count_k;
 }
 
 template <typename kit_type_, typename node_id_type_, typename kernels_type_>
-u32_t vram_amd_kits<kit_type_, node_id_type_, kernels_type_>::lanes_per_entry_(std::size_t) noexcept {
-    return kit_type_::lanes_per_entry_k;
+u32_t vram_amd_kits<kit_type_, node_id_type_, kernels_type_>::lanes_per_entry_(score_role_t, std::size_t) noexcept {
+    return kit_type_::canonical_lanes_per_entry_k;
 }
 
 template <typename kit_type_, typename node_id_type_, typename kernels_type_>
-std::size_t vram_amd_kits<kit_type_, node_id_type_, kernels_type_>::span_bytes_(byte_t const* data,
+std::size_t vram_amd_kits<kit_type_, node_id_type_, kernels_type_>::span_bytes_(score_role_t, byte_t const* data,
                                                                                 std::size_t bytes) noexcept {
-    return kit_type_::span_bytes(data, bytes);
+    return kit_type_::canonical_span_bytes(data, bytes);
 }
 
 template <typename kit_type_, typename node_id_type_, typename kernels_type_>
@@ -381,11 +394,18 @@ __global__ void __launch_bounds__(vram_warps_per_block_k* kit_type_::warp_t::wid
     basic::hip_kernel_body<kernel_, kit_type_, 0, slots_>(arguments);
 }
 
+/** Instantiates the kernel at @p position_ of @c basic::amd_rungs for @p kit_type_, but a seeding
+ *  walk, which a kit storing no sketch never runs. */
+template <typename kit_type_, typename node_id_type_, std::size_t position_>
+void amd_instantiate_rung() noexcept {
+    constexpr basic::amd_rung_t instantiated_k = basic::amd_rungs[position_];
+    if constexpr (instantiated_k.kernel != vram_kernel_t::seed_k)
+        static_cast<void>(&amd_kernel<instantiated_k.kernel, kit_type_, node_id_type_, instantiated_k.slots>);
+}
+
 template <typename kit_type_, typename node_id_type_, std::size_t... rungs_>
 void amd_instantiate_rungs(std::index_sequence<rungs_...>) noexcept {
-    (static_cast<void>(
-         &amd_kernel<basic::amd_rungs[rungs_].kernel, kit_type_, node_id_type_, basic::amd_rungs[rungs_].slots>),
-     ...);
+    (amd_instantiate_rung<kit_type_, node_id_type_, rungs_>(), ...);
 }
 
 /** Instantiates every kernel of @p kit_type_ with @p node_id_type_ IDs; the unit compiling the code
@@ -396,7 +416,7 @@ template <typename kit_type_, typename node_id_type_>
 void amd_instantiate() noexcept {
     amd_instantiate_rungs<kit_type_, node_id_type_>(std::make_index_sequence<std::size(basic::amd_rungs)> {});
     static_cast<void>(&amd_kernel<vram_kernel_t::load_values_k, kit_type_, node_id_type_, 0>);
-    static_cast<void>(&amd_kernel<vram_kernel_t::size_spans_k, kit_type_, node_id_type_, 0>);
+    static_cast<void>(&amd_kernel<vram_kernel_t::sketch_values_k, kit_type_, node_id_type_, 0>);
 }
 
 #pragma endregion Face

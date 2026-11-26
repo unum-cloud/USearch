@@ -918,9 +918,8 @@ int checkpoint_search(world_t& world, int argc, char const* const* argv, std::st
         fmt::println(stderr, "a checkpoint is required, once");
         return EXIT_FAILURE;
     }
-    if (!hints_path.empty() &&
-        (std::is_same_v<verbs_type_, sequence_verbs_t> || std::is_same_v<verbs_type_, geospatial_verbs_t>)) {
-        fmt::println(stderr, "--hints seeds dense and shapes walks only");
+    if (!hints_path.empty() && std::is_same_v<verbs_type_, geospatial_verbs_t>) {
+        fmt::println(stderr, "--hints seeds dense, shapes and sequence walks only");
         return EXIT_FAILURE;
     }
     std::optional<checkpoint_queries<verbs_type_>> const queries = open_queries();
@@ -995,10 +994,14 @@ int checkpoint_search(world_t& world, int argc, char const* const* argv, std::st
     }
     sz::string_t const missing = hints_path.empty() ? sz::string_t {}
                                                     : formatted(", {} hints missing", totals.missing_hints);
-    fmt::println(steps,
-                 "searched {} queries for the top {} in {:.3f} s: {:.0f} queries per second, {:.1f} distances each{}",
-                 queries->count, settings.wanted.value, seconds, static_cast<double>(queries->count) / seconds,
-                 static_cast<double>(totals.computed_distances) / static_cast<double>(queries->count), missing);
+    sz::string_t const seeding = !totals.seeding_distances ? sz::string_t {}
+                                                           : formatted(", {:.1f} of them sketches",
+                                                                       static_cast<double>(totals.seeding_distances) /
+                                                                           static_cast<double>(queries->count));
+    fmt::println(
+        steps, "searched {} queries for the top {} in {:.3f} s: {:.0f} queries per second, {:.1f} distances each{}{}",
+        queries->count, settings.wanted.value, seconds, static_cast<double>(queries->count) / seconds,
+        static_cast<double>(totals.computed_distances) / static_cast<double>(queries->count), seeding, missing);
     return EXIT_SUCCESS;
 }
 

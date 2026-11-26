@@ -368,10 +368,77 @@ public sealed class SequenceIndexTests : ModalityTests<SequenceIndex, SequenceRe
     [Fact]
     public void InitRamKeepsTheMetric()
     {
-        using SequenceIndex index = SequenceIndex.InitRam(
-            SequenceOptions.Default with { Metric = SequenceMetric.LevenshteinUtf8 });
+        using SequenceIndex index = SequenceIndex.InitRam(new SequenceOptions { Metric = SequenceMetric.DnaOverlap });
 
-        Assert.Equal(SequenceMetric.LevenshteinUtf8, index.Describe().Metadata.Metric);
+        Assert.Equal(SequenceMetric.DnaOverlap, index.Describe().Metadata.Metric);
+    }
+
+    [Fact]
+    public void ContainmentTakesNoCosts()
+    {
+        USearchException refused = Assert.Throws<USearchException>(() => SequenceIndex.InitRam(new SequenceOptions
+        {
+            Metric = SequenceMetric.Utf8Containment, Costs = new SequenceCosts(new sbyte[256 * 256], 1),
+        }));
+
+        Assert.Equal(Status.ConfigMismatch, refused.Status);
+    }
+
+    /// <summary>Scores each of A, C, G and T against itself at <paramref name="self"/>, and A and G
+    /// against each other at <paramref name="near"/>.</summary>
+    private static sbyte[] NucleotideSimilarities(sbyte self, sbyte near)
+    {
+        sbyte[] similarities = new sbyte[256 * 256];
+        foreach (char nucleotide in "ACGT")
+        {
+            similarities[nucleotide * 256 + nucleotide] = self;
+        }
+
+        similarities['A' * 256 + 'G'] = near;
+        similarities['G' * 256 + 'A'] = near;
+        return similarities;
+    }
+
+    [Fact]
+    public void OverlapFindsTheReverseComplement()
+    {
+        using SequenceIndex index = SequenceIndex.InitRam(new SequenceOptions { Metric = SequenceMetric.DnaOverlap });
+        index.Insert(KeysFrom(1, 3), Tape.Utf8(
+            "ACGTTGCAAGGCTTAACCGGTTACGATCGA", "GGCTTAACCGGTTACGATCGATTTGCAGCA", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"));
+
+        Matches found = index.Search(Tape.Utf8("TGCTGCAAATCGATCGTAACCGGTTAAGCC"), wanted: 2, this.Arena);
+
+        Assert.Equal(Key.FromUInt64(2), found[0].Keys[0]);
+        Assert.Equal(0.0, found[0].Distances[0]);
+    }
+
+    [Fact]
+    public void AlignmentRanksByCosts()
+    {
+        using SequenceIndex index = SequenceIndex.InitRam(new SequenceOptions
+        {
+            Metric = SequenceMetric.ProteinAlignment,
+            Costs = new SequenceCosts(NucleotideSimilarities(4, 3), 4),
+        });
+        index.Insert(KeysFrom(1, 2), Tape.Utf8("GCGTTGCAACGT", "CCGTTGCAACGT"));
+
+        Matches found = index.Search(Tape.Utf8("ACGTTGCAACGT"), wanted: 2, this.Arena);
+
+        Assert.Equal(Key.FromUInt64(1), found[0].Keys[0]);
+        Assert.True(found[0].Distances[0] < found[0].Distances[1]);
+    }
+
+    [Fact]
+    public void ContainmentFindsTheHoldingText()
+    {
+        using SequenceIndex index = SequenceIndex.InitRam(
+            new SequenceOptions { Metric = SequenceMetric.Utf8Containment });
+        index.Insert(KeysFrom(1, 2), Tape.Utf8(
+            "the quick brown fox jumps over the lazy dog", "a journey of a thousand miles begins with a single step"));
+
+        Matches found = index.Search(Tape.Utf8("BROWN FOX jumps"), wanted: 2, this.Arena);
+
+        Assert.Equal(Key.FromUInt64(1), found[0].Keys[0]);
     }
 
     [Fact]
@@ -388,9 +455,10 @@ public sealed class SequenceIndexTests : ModalityTests<SequenceIndex, SequenceRe
     }
 
     [Fact]
-    public void GetAndCountReadTheBytesUnderAKey()
+    public void GetAndCountReadTheStoredText()
     {
-        using SequenceIndex index = this.InitRam();
+        using SequenceIndex index = SequenceIndex.InitRam(
+            new SequenceOptions { Metric = SequenceMetric.Utf8Containment });
         index.Insert(KeysFrom(1, 3), Tape.Utf8("kitten", "sitting", "mitten"));
 
         TapeEntries entries = index.Get(2UL, this.Arena);
@@ -404,21 +472,21 @@ public sealed class SequenceIndexTests : ModalityTests<SequenceIndex, SequenceRe
     /// <summary>Mirrors the example under <c>## Sequence Indexes</c> in <c>csharp/README.md</c>; the
     /// arena is this class's own.</summary>
     [Fact]
-    public void ReadmeExampleFindsTheWordOneEditAway()
+    public void ReadmeExampleFindsTheHoldingText()
     {
         Arena arena = this.Arena;
 
         using SequenceIndex index = SequenceIndex.InitRam(
-            SequenceOptions.Default with { Metric = SequenceMetric.LevenshteinUtf8 });
+            new SequenceOptions { Metric = SequenceMetric.Utf8Containment });
         Key[] keys = [1UL, 2UL, 3UL];
-        index.Insert(keys, Tape.Utf8("kitten", "sitting", "mitten"));
+        index.Insert(keys, Tape.Utf8("The quick brown fox", "A lazy dog", "Pack my box"));
 
-        Matches found = index.Search(Tape.Utf8("sittin"), wanted: 1, arena);
+        Matches found = index.Search(Tape.Utf8("BROWN FOX"), wanted: 1, arena);
         Key nearest = found[0].Keys[0];
         double distance = found[0].Distances[0];
 
-        Assert.Equal(Key.FromUInt64(2), nearest);
-        Assert.Equal(1.0, distance);
+        Assert.Equal(Key.FromUInt64(1), nearest);
+        Assert.InRange(distance, 0.0, 1.0 / 32768);
     }
 }
 

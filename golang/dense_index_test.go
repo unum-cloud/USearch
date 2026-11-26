@@ -599,7 +599,7 @@ func TestExecutorConstructorsTakeOnlyWhatTheirResidencyHas(t *testing.T) {
 	}
 	drives.Close()
 
-	if _, err := ExecutorForVram([]int32{0}, GPUClassUnknown, make([]unsafe.Pointer, 2), 0); !errors.Is(err, StatusShapeMismatch) {
+	if _, err := ExecutorForVram([]int32{0}, GPUClassUnknown, make([]unsafe.Pointer, 2), 0); !errors.Is(err, StatusInvalidArgument) {
 		t.Errorf("a stream list of the wrong length reported %v", err)
 	}
 	// The stub has no NVMe residency, so it refuses before looking for the file.

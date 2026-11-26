@@ -182,7 +182,8 @@ final class Library {
                     SIZE.withName("visited_members"),
                     SIZE.withName("computed_distances"),
                     SIZE.withName("restarts"),
-                    SIZE.withName("missing_hints"))
+                    SIZE.withName("missing_hints"),
+                    SIZE.withName("seeding_distances"))
             .withName("usearch_traversal_stats_t");
 
     /** @c usearch_predicate_t, the handler a walk asks which candidate keys it may report. */

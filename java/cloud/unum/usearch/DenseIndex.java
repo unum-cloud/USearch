@@ -1617,8 +1617,7 @@ public final class DenseIndex implements AutoCloseable {
         return Call.block(verb, index, executor, call -> {
             call.reference(CURSOR_NEXT_CURSOR, cursor);
             MemorySegment keys = call.output(CURSOR_NEXT_KEYS, Library.KEYS_VIEW);
-            MemorySegment tape =
-                    linked ? call.output(CURSOR_NEXT_LINKS, Library.KEYS_TAPE_VIEW) : MemorySegment.NULL;
+            MemorySegment tape = linked ? call.output(CURSOR_NEXT_LINKS, Library.KEYS_TAPE_VIEW) : MemorySegment.NULL;
             MemorySegment written = call.output(CURSOR_NEXT_WRITTEN, Library.SIZE);
             call.arena(CURSOR_NEXT_ARENA, arena);
             call.size(CURSOR_NEXT_WANTED, wanted);
@@ -2920,7 +2919,8 @@ public final class DenseIndex implements AutoCloseable {
 
     /** {@code usearch_dense_init_ram_t} or its VRAM twin, whose placement field is named {@code placement}. */
     private static StructLayout initializing(String placement) {
-        MemoryLayout[] members = INIT_SHARED.memberLayouts()
+        MemoryLayout[] members = INIT_SHARED
+                .memberLayouts()
                 .toArray(new MemoryLayout[INIT_SHARED.memberLayouts().size() + 1]);
         members[members.length - 1] = Library.placement(placement);
         return MemoryLayout.structLayout(members);
@@ -2957,6 +2957,7 @@ public final class DenseIndex implements AutoCloseable {
             Library.padding(),
             Library.BYTES_VIEW.withName("source"),
             Library.placement("vram"),
+            Library.SIZE.withName("connectivity"),
             Library.SIZE.withName("values_per_key"),
             Library.PROGRESS);
 

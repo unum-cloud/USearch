@@ -20,7 +20,7 @@
 #include "usearch/dense/vram_index.cuh"             // `vram_rebase_links`, the health passes' & splits' bodies
 #include "usearch/basic/vram_nvidia_index.hpp"
 
-#include "lib.hpp" // `gpu_class_t`, `cuda_class_k` - the class this unit compiles as
+#include "classes.hpp" // `gpu_class_t`, `cuda_class_k` - the class this unit compiles as
 
 /** The bounds of the fatbin every basic face loads, linked in as raw bytes, from the table CMake
  *  writes for the class this unit compiles as; the other classes' tables stay unreferenced. */
@@ -40,7 +40,7 @@ util::byte_t const* const* basic_bundles() noexcept {
 
 namespace unum::usearch::basic {
 
-bytes_view_t cuda_graph_fatbin_t::bytes() noexcept {
+util::bytes_view_t cuda_graph_fatbin_t::bytes() noexcept {
     util::byte_t const* const* const bounds = basic_bundles<cuda_class_k>();
     return {bounds[0], bounds[1]};
 }
@@ -104,6 +104,6 @@ __device__ void cuda_instantiate() noexcept {
     cuda_instantiate_kernels<node_id_type_>(std::make_index_sequence<std::size(cuda_graph_kernels)> {});
 }
 
-template __device__ void cuda_instantiate<u32_t>();
+template __device__ void cuda_instantiate<util::u32_t>();
 
 } // namespace unum::usearch::basic

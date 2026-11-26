@@ -21,6 +21,7 @@ from usearch import (
     GPUClass,
     GPUVendor,
     HostAccess,
+    SequenceCosts,
     SequenceIndex,
     SequenceMetric,
     SequenceOptions,
@@ -1221,33 +1222,112 @@ def _sequences(
 
 
 def test_sequence_index_starts_empty_and_keeps_its_metric() raises:
-    """A fresh host index is empty, on a CPU class, and reads back the kind it froze, spelled by the engine."""
+    """A fresh host index is empty, on a CPU class, and reads back the metric it froze, spelled by the engine."""
     if not _library_is_present():
         _skipped(library_missing_k)
         return
     var library = Library()
-    var index = SequenceIndex.init_ram(library, SequenceOptions(SequenceMetric.LEVENSHTEIN_UTF8))
+    var index = SequenceIndex.init_ram(library, SequenceOptions(SequenceMetric.DNA_OVERLAP))
     var described = index.describe()
     assert_equal(Int(described.size), 0, "a fresh index is empty")
     assert_true(described.cpu_class != CPUClass.UNKNOWN and described.gpu_class == GPUClass.UNKNOWN, "on a CPU")
-    assert_true(described.metadata.metric == SequenceMetric.LEVENSHTEIN_UTF8, "the frozen kind reads back")
-    var spelled = library.sequence_metric_name(SequenceMetric.LEVENSHTEIN_UTF8)
-    assert_true(library.sequence_metric_from_name(spelled) == SequenceMetric.LEVENSHTEIN_UTF8, "names round-trip")
+    assert_true(described.metadata.metric == SequenceMetric.DNA_OVERLAP, "the frozen metric reads back")
+    var spelled = library.sequence_metric_name(SequenceMetric.DNA_OVERLAP)
+    assert_true(library.sequence_metric_from_name(spelled) == SequenceMetric.DNA_OVERLAP, "names round-trip")
+    var similarities = _nucleotide_similarities(2, 0)
+    var costed = SequenceCosts(Span(similarities), 2)
     var status = Status.SUCCESS
     try:
-        _ = SequenceIndex.init_ram(library, SequenceOptions(SequenceMetric.OVERLAP))
+        _ = SequenceIndex.init_ram(library, SequenceOptions(SequenceMetric.UTF8_CONTAINMENT, costed))
     except error:
         status = error.status
-    assert_true(status == Status.CONFIG_MISMATCH, "the overlap kind without window widths is the engine's refusal")
+    assert_true(status == Status.CONFIG_MISMATCH, "a containment under costs is the engine's refusal")
+    var short = SequenceCosts(Span(similarities)[0:256], 2)
+    status = Status.SUCCESS
+    try:
+        _ = SequenceIndex.init_ram(library, SequenceOptions(costs=short))
+    except error:
+        status = error.status
+    assert_true(status == Status.SHAPE_MISMATCH, "a short table, which crosses with no count, is the binding's")
 
 
-def test_sequence_search_get_and_count() raises:
-    """Every word searched for comes back first under its own key at distance zero, and reads back whole."""
+def _nucleotide_similarities(same: Int8, near: Int8) -> List[Int8]:
+    """Similarities over `ACGT` alone: each base scores `same` against itself, `A` and `G` score `near`
+    against each other, and every other pair scores zero."""
+    var similarities = List[Int8](length=256 * 256, fill=0)
+    for base in [65, 67, 71, 84]:
+        similarities[base * 256 + base] = same
+    similarities[65 * 256 + 71] = near
+    similarities[71 * 256 + 65] = near
+    return similarities^
+
+
+def test_sequence_overlap_finds_a_reverse_complement() raises:
+    """A query that is the reverse complement of a read finds that read first, at distance zero."""
     if not _library_is_present():
         _skipped(library_missing_k)
         return
     var library = Library()
-    var index = SequenceIndex.init_ram(library)
+    var index = SequenceIndex.init_ram(library, SequenceOptions(SequenceMetric.DNA_OVERLAP))
+    var reads = Tape[DType.uint8]()
+    reads.append("ACGTTGCAAGGCTTAACCGGTTACGATCGA")
+    reads.append("GGCTTAACCGGTTACGATCGATTTGCAGCA")
+    reads.append("TTTTTTTTTTTTTTTTTTTTTTTTTTTTTT")
+    index.insert(_keys(1, 3), reads.view())
+    var query = Tape[DType.uint8]()
+    query.append("TGCTGCAAATCGATCGTAACCGGTTAAGCC")
+    var arena = Arena(library)
+    var matches = index.search(query.view(), 2, arena)
+    assert_true(matches.query_keys(0)[0] == Key(integer=2), "the reverse complement comes first")
+    assert_equal(matches.query_distances(0)[0], 0, "at distance zero")
+
+
+def test_sequence_alignment_weighs_costs() raises:
+    """Under costs placing `A` near `G`, one `A` to `G` substitution ranks above one `A` to `C`."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
+        return
+    var library = Library()
+    var similarities = _nucleotide_similarities(4, 3)
+    var costs = SequenceCosts(Span(similarities), 4)
+    var index = SequenceIndex.init_ram(library, SequenceOptions(costs=costs))
+    var entries = Tape[DType.uint8]()
+    entries.append("GCGTTGCAACGT")
+    entries.append("CCGTTGCAACGT")
+    index.insert(_keys(1, 2), entries.view())
+    var query = Tape[DType.uint8]()
+    query.append("ACGTTGCAACGT")
+    var arena = Arena(library)
+    var matches = index.search(query.view(), 2, arena)
+    assert_true(matches.query_keys(0)[0] == Key(integer=1), "the near substitution comes first")
+    assert_true(matches.query_distances(0)[0] < matches.query_distances(0)[1], "strictly nearer")
+
+
+def test_sequence_containment_finds_the_holding_text() raises:
+    """Containment needs no costs: a query held by one text finds it first, whatever the case."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
+        return
+    var library = Library()
+    var index = SequenceIndex.init_ram(library, SequenceOptions(SequenceMetric.UTF8_CONTAINMENT))
+    var texts = Tape[DType.uint8]()
+    texts.append("the quick brown fox jumps over the lazy dog")
+    texts.append("a journey of a thousand miles begins with a single step")
+    index.insert(_keys(1, 2), texts.view())
+    var query = Tape[DType.uint8]()
+    query.append("BROWN FOX jumps")
+    var arena = Arena(library)
+    var matches = index.search(query.view(), 2, arena)
+    assert_true(matches.query_keys(0)[0] == Key(integer=1), "the holding text comes first")
+
+
+def test_sequence_search_get_and_count() raises:
+    """Every text searched for comes back first under its own key at distance zero, and reads back as stored."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
+        return
+    var library = Library()
+    var index = SequenceIndex.init_ram(library, SequenceOptions(SequenceMetric.UTF8_CONTAINMENT))
     var words = Tape[DType.uint8]()
     words.append("kitten")
     words.append("sitting")
@@ -1282,7 +1362,7 @@ def test_sequence_saves_and_loads_a_buffer() raises:
     var arena = Arena(executor)
     var monolith = index.on(executor).save_buffer(arena)
     var frozen = sequence_metadata_read_buffer(executor, monolith.bytes())
-    assert_true(frozen.metric == SequenceMetric.LEVENSHTEIN_BYTES, "the header names the kind")
+    assert_true(frozen.metric == SequenceMetric.PROTEIN_ALIGNMENT, "the header names the metric")
     var restored = SequenceIndex.load_ram_buffer(executor, monolith.bytes())
     assert_equal(Int(restored.describe().size), 16, "every entry loads back")
 
@@ -1452,7 +1532,7 @@ def test_shapes_index_starts_empty_and_keeps_its_metric() raises:
     var described = index.describe()
     assert_equal(Int(described.size), 0, "a fresh index is empty")
     assert_true(described.cpu_class != CPUClass.UNKNOWN and described.gpu_class == GPUClass.UNKNOWN, "on a CPU")
-    assert_true(described.metadata.metric == ShapesMetric.HAUSDORFF, "the frozen kind reads back")
+    assert_true(described.metadata.metric == ShapesMetric.HAUSDORFF, "the frozen score reads back")
     assert_true(described.metadata.quantization == ScalarKind.F32, "over f32 points by default")
     var spelled = library.shapes_metric_name(ShapesMetric.WASSERSTEIN_PROCRUSTES)
     assert_true(library.shapes_metric_from_name(spelled) == ShapesMetric.WASSERSTEIN_PROCRUSTES, "names round-trip")
@@ -1731,16 +1811,16 @@ def test_readme_quickstart() raises:
     var library = Library()
     var arena = Arena(library)
 
-    var sequences = SequenceIndex.init_ram(library, SequenceOptions(SequenceMetric.LEVENSHTEIN_UTF8))
+    var sequences = SequenceIndex.init_ram(library, SequenceOptions(SequenceMetric.UTF8_CONTAINMENT))
     var words = Tape[DType.uint8]()
-    for word in ["kitten", "sitting", "mitten"]:
+    for word in ["The quick brown fox", "A lazy dog", "Pack my box"]:
         words.append(word)
     sequences.insert([Key(integer=1), Key(integer=2), Key(integer=3)], words.view())
     var query = Tape[DType.uint8]()
-    query.append("sittin")
+    query.append("BROWN FOX")
     var matches = sequences.search(query.view(), 1, arena)
-    assert_true(matches.query_keys(0)[0] == Key(integer=2), "the nearest word")
-    assert_equal(matches.query_distances(0)[0], 1, "one edit away")
+    assert_true(matches.query_keys(0)[0] == Key(integer=1), "the holding text")
+    assert_true(matches.query_distances(0)[0] < 1.0 / 32768, "holds every query window, whatever the case")
 
     var shapes = ShapesIndex.init_ram(library)
     var clouds = Tape[DType.float32, 3]()
@@ -1807,6 +1887,9 @@ def main() raises:
     suite.test[test_attention_is_exact_over_every_key]()
     suite.test[test_sequence_index_starts_empty_and_keeps_its_metric]()
     suite.test[test_sequence_search_get_and_count]()
+    suite.test[test_sequence_overlap_finds_a_reverse_complement]()
+    suite.test[test_sequence_alignment_weighs_costs]()
+    suite.test[test_sequence_containment_finds_the_holding_text]()
     suite.test[test_sequence_saves_and_loads_a_buffer]()
     suite.test[test_sequence_refine_plan_resumes_and_finishes]()
     suite.test[test_sequence_reshard_gathers_cuts_and_refuses]()

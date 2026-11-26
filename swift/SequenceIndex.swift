@@ -2,8 +2,8 @@
  *  @file swift/SequenceIndex.swift
  *  @author Ash Vardanian
  *  @date November 16, 2026
- *  @brief Similarity search over variable-length sequences: text, DNA, RNA and proteins, under
- *      Levenshtein, window overlap and Needleman-Wunsch scoring.
+ *  @brief Similarity search over variable-length sequences: proteins under alignment, DNA and RNA
+ *      under shifted overlap, and UTF-8 text under window containment.
  *
  *  Every batch crosses as one tape of bytes, so a sequence is a byte array and a batch an array of
  *  them; the verbs, receivers, plans and reports are the dense index's.
@@ -13,21 +13,30 @@ import USearchC
 
 // MARK: - Options
 
-/// A sequence scoring kind, spelled as the library spells it.
+/// A sequence metric, spelled as the library spells it: what the sequences are, the form they are
+/// stored in, and the score ranking them. Every metric stores a sequence folded, and a get returns
+/// the stored form, never the bytes an insertion passed.
 public struct SequenceMetric: Hashable, Sendable, CustomStringConvertible {
     /// The engine's own value.
     let raw: usearch_sequence_metric_t
 
-    /// No kind named - an unset field, refused by every constructor.
+    /// No metric named - an unset field, refused by every constructor.
     public static let unknown = SequenceMetric(raw: usearch_sequence_metric_unknown_k)
-    /// Single-byte insertions, deletions and substitutions, each costing one.
-    public static let levenshteinBytes = SequenceMetric(raw: usearch_sequence_metric_levenshtein_bytes_k)
-    /// The same edits over decoded UTF-8 code points.
-    public static let levenshteinUTF8 = SequenceMetric(raw: usearch_sequence_metric_levenshtein_utf8_k)
-    /// Global alignment under a substitution matrix and a linear gap cost.
-    public static let needlemanWunsch = SequenceMetric(raw: usearch_sequence_metric_needleman_wunsch_k)
-    /// The share of fixed-width windows one side misses of the other.
-    public static let overlap = SequenceMetric(raw: usearch_sequence_metric_overlap_k)
+    /// Global alignment of proteins with linear gaps: BLOSUM62 with a gap of 7 over the 20 amino
+    /// acids, B, Z, X and the stop in either case, any other byte as X, unless the index names its
+    /// own costs. A stored sequence reads back as its class codes, five bits apiece, little-endian
+    /// behind one byte counting the slots the last bytes leave unused.
+    public static let proteinAlignment = SequenceMetric(raw: usearch_sequence_metric_protein_alignment_k)
+    /// Shifted overlap of DNA or RNA: the cost of aligning two sequences where one slides over the
+    /// other, at the shift most windows of 12 and 19 symbols vote for, on either strand. Bytes fold
+    /// into the classes of A, C, G and T in either case, U read as T and any other byte as T. A
+    /// stored sequence reads back as its class codes, one byte apiece.
+    public static let dnaOverlap = SequenceMetric(raw: usearch_sequence_metric_dna_overlap_k)
+    /// Window containment of UTF-8 text: the share of the query's distinct windows of 5 and 8
+    /// bytes the stored side lacks, whatever the case. Text is case-folded before it is stored or
+    /// scored, which may lengthen it up to three times, and a stored text reads back folded.
+    /// Takes no costs.
+    public static let utf8Containment = SequenceMetric(raw: usearch_sequence_metric_utf8_containment_k)
 
     /// The metric rendered as the library spells it.
     public var description: String { String(cString: usearch_sequence_metric_name(raw)) }
@@ -43,46 +52,50 @@ public struct SequenceMetric: Hashable, Sendable, CustomStringConvertible {
     init(raw: usearch_sequence_metric_t) { self.raw = raw }
 }
 
-/// The substitution matrix and gap cost Needleman-Wunsch scores with.
-public struct SequenceWeights: Sendable {
-    /// Row-major 256×256 signed similarities between byte codes.
-    public var substitutionMatrix: [Int8]
+/// How alike two bytes are, and the cost of leaving one unaligned, where an index scores by other
+/// costs than its metric's own. Similarities fold bytes sharing their rows and columns into at most
+/// 32 classes; a DNA overlap needs costs folding bytes into exactly four classes holding A, C, G
+/// and T apart. Checkpoints record the costs, so loads and views take none.
+public struct SequenceCosts: Sendable {
+    /// Row-major 256×256 signed similarities between raw bytes.
+    public var similarities: [Int8]
     /// The cost of one unaligned symbol.
     public var gap: Int8
 
-    public init(substitutionMatrix: [Int8], gap: Int8) {
-        self.substitutionMatrix = substitutionMatrix
+    public init(similarities: [Int8], gap: Int8) {
+        self.similarities = similarities
         self.gap = gap
     }
 }
 
 extension CallState {
-    /// Passes optional weights as the pointer every sequence lifecycle verb takes; nil passes none.
+    /// Passes optional costs as the pointer both creation verbs take; nil passes none.
     func pass<Value>(
-        _ weights: SequenceWeights?,
-        _ body: (UnsafePointer<usearch_sequence_weights_t>?) throws(USearchError) -> Value
+        _ costs: SequenceCosts?,
+        _ body: (UnsafePointer<usearch_sequence_costs_t>?) throws(USearchError) -> Value
     ) throws(USearchError) -> Value {
-        guard let weights else { return try body(nil) }
-        // The matrix crosses as a pointer with no count, so only this side can see it short.
-        guard weights.substitutionMatrix.count == 256 * 256 else {
-            throw USearchError(status: .shapeMismatch, message: "the substitution matrix is not 256×256")
+        guard let costs else { return try body(nil) }
+        // The table crosses as a pointer with no count, so only this side can see one short.
+        guard costs.similarities.count == 256 * 256 else {
+            throw USearchError(status: .shapeMismatch, message: "the similarities are not 256×256")
         }
-        return try pass(weights.substitutionMatrix) { (matrix) throws(USearchError) -> Value in
-            try body(slots(usearch_sequence_weights_t(substitution_matrix: matrix, gap: weights.gap)))
+        return try pass(costs.similarities) { (similarities) throws(USearchError) -> Value in
+            try body(slots(usearch_sequence_costs_t(similarities: similarities, gap: costs.gap)))
         }
     }
 }
 
 /// The construction options of a sequence index, as `initRam` and `initVram` freeze them.
 public struct SequenceOptions: Sendable {
-    /// The scoring kind.
+    /// What the sequences are and the score ranking them.
     public var metric: SequenceMetric
-    /// The weights Needleman-Wunsch needs; every other kind refuses any.
-    public var weights: SequenceWeights?
-    /// The window widths in bytes the overlap kind needs; every other kind refuses any.
-    public var windowWidths: [Int]
+    /// The optional costs; nil for the metric's own, and refused for `utf8Containment`.
+    public var costs: SequenceCosts?
     /// The bound on connections per node in the graph; zero derives.
     public var connectivity: Int
+    /// The bytes of the sketch in front of each stored sequence, a multiple of four; zero takes the
+    /// metric's default, and `dnaOverlap` keeps none and refuses any.
+    public var sketchBytes: Int
     /// The bound on entries sharing one key; zero is unbounded.
     public var valuesPerKey: Int
     /// The newest class dispatch may pick, intersected with what the machine runs; nil means no
@@ -91,20 +104,20 @@ public struct SequenceOptions: Sendable {
     /// The newest class dispatch may pick on the named devices; nil means no ceiling.
     public var gpuClassCeiling: GPUClass?
 
-    /// A byte Levenshtein index, with every optional field derived.
+    /// A protein alignment index, with every optional field derived.
     public init(
-        metric: SequenceMetric = .levenshteinBytes,
-        weights: SequenceWeights? = nil,
-        windowWidths: [Int] = [],
+        metric: SequenceMetric = .proteinAlignment,
+        costs: SequenceCosts? = nil,
         connectivity: Int = 0,
+        sketchBytes: Int = 0,
         valuesPerKey: Int = 0,
         cpuClassCeiling: CPUClass? = nil,
         gpuClassCeiling: GPUClass? = nil
     ) {
         self.metric = metric
-        self.weights = weights
-        self.windowWidths = windowWidths
+        self.costs = costs
         self.connectivity = connectivity
+        self.sketchBytes = sketchBytes
         self.valuesPerKey = valuesPerKey
         self.cpuClassCeiling = cpuClassCeiling
         self.gpuClassCeiling = gpuClassCeiling
@@ -120,6 +133,10 @@ public struct SequenceMetadata: Sendable {
     public var metric: SequenceMetric { SequenceMetric(raw: raw.metric) }
     /// The connections-per-node bound the graph was built with.
     public var connectivity: Int { raw.connectivity }
+    /// The classes the recorded costs folded bytes into; zero for a containment.
+    public var classes: Int { raw.classes }
+    /// The bytes of the sketch in front of each stored sequence; zero when the metric keeps none.
+    public var sketchBytes: Int { raw.sketch_bytes }
 }
 
 /// A live index's frozen metadata and current counters, each read once.
@@ -207,7 +224,7 @@ public final class SequenceReshardPlan: @unchecked Sendable {
 
 // MARK: - Index
 
-/// A Similarity Search Index over variable-length byte sequences, in RAM or VRAM, or viewed from
+/// A Similarity Search Index over variable-length sequences, in RAM or VRAM, or viewed from
 /// NVMe.
 ///
 /// A handle may be shared across threads, so no method here takes a lock: insertions and searches
@@ -231,22 +248,19 @@ public final class SequenceIndex: @unchecked Sendable {
     ) throws(USearchError) -> SequenceIndex {
         let callState = CallState()
         let index = callState.slots(usearch_sequence_index_t?.none)
-        try callState.pass(options.weights) { (weights) throws(USearchError) in
-            try callState.pass(options.windowWidths) { (widths) throws(USearchError) in
-                try callState.pass(memoryDomains) { (domains) throws(USearchError) in
-                    var arguments = usearch_sequence_init_ram_t(
-                        index: index,
-                        outcome: callState.outcome,
-                        metric: options.metric.raw,
-                        weights: weights,
-                        window_widths: widths,
-                        window_widths_count: options.windowWidths.count,
-                        connectivity: options.connectivity,
-                        values_per_key: options.valuesPerKey,
-                        ram: ramOptions(domains, memoryDomains.count, options.cpuClassCeiling)
-                    )
-                    usearch_sequence_init_ram(&arguments)
-                }
+        try callState.pass(options.costs) { (costs) throws(USearchError) in
+            try callState.pass(memoryDomains) { (domains) throws(USearchError) in
+                var arguments = usearch_sequence_init_ram_t(
+                    index: index,
+                    outcome: callState.outcome,
+                    metric: options.metric.raw,
+                    costs: costs,
+                    connectivity: options.connectivity,
+                    sketch_bytes: options.sketchBytes,
+                    values_per_key: options.valuesPerKey,
+                    ram: ramOptions(domains, memoryDomains.count, options.cpuClassCeiling)
+                )
+                usearch_sequence_init_ram(&arguments)
             }
         }
         return try adopted(index, callState)
@@ -259,53 +273,48 @@ public final class SequenceIndex: @unchecked Sendable {
     ) throws(USearchError) -> SequenceIndex {
         let callState = CallState()
         let index = callState.slots(usearch_sequence_index_t?.none)
-        try callState.pass(options.weights) { (weights) throws(USearchError) in
-            try callState.pass(options.windowWidths) { (widths) throws(USearchError) in
-                try callState.pass(devices) { (passedDevices) throws(USearchError) in
-                    var arguments = usearch_sequence_init_vram_t(
-                        index: index,
-                        outcome: callState.outcome,
-                        metric: options.metric.raw,
-                        weights: weights,
-                        window_widths: widths,
-                        window_widths_count: options.windowWidths.count,
-                        connectivity: options.connectivity,
-                        values_per_key: options.valuesPerKey,
-                        vram: vramOptions(passedDevices, devices.count, options.gpuClassCeiling)
-                    )
-                    usearch_sequence_init_vram(&arguments)
-                }
+        try callState.pass(options.costs) { (costs) throws(USearchError) in
+            try callState.pass(devices) { (passedDevices) throws(USearchError) in
+                var arguments = usearch_sequence_init_vram_t(
+                    index: index,
+                    outcome: callState.outcome,
+                    metric: options.metric.raw,
+                    costs: costs,
+                    connectivity: options.connectivity,
+                    sketch_bytes: options.sketchBytes,
+                    values_per_key: options.valuesPerKey,
+                    vram: vramOptions(passedDevices, devices.count, options.gpuClassCeiling)
+                )
+                usearch_sequence_init_vram(&arguments)
             }
         }
         return try adopted(index, callState)
     }
 
-    /// Copies a checkpoint into a new, mutable index in host memory; an alignment checkpoint needs
-    /// the weights it was built with again. A cancelled or failed load creates no index.
+    /// Copies a checkpoint into a new, mutable index in host memory; the checkpoint records the
+    /// costs. A cancelled or failed load creates no index.
     public static func loadRam(
         _ path: String,
-        weights: SequenceWeights? = nil,
         config: DenseLoadRamConfig = DenseLoadRamConfig()
     ) throws(USearchError) -> SequenceIndex {
         let callState = CallState()
         let index = callState.slots(usearch_sequence_index_t?.none)
         let progress = callState.pass(config.progress, steps: config.progressSteps)
         try callState.pass(path) { (path) throws(USearchError) in
-            try callState.pass(weights) { (weights) throws(USearchError) in
-                try callState.pass(config.memoryDomains) { (domains) throws(USearchError) in
-                    var arguments = usearch_sequence_load_ram_t(
-                        index: index,
-                        executor: config.executor?.raw,
-                        outcome: callState.outcome,
-                        completion: callState.completion,
-                        path: path,
-                        ram: ramOptions(domains, config.memoryDomains.count, config.cpuClassCeiling),
-                        values_per_key: config.valuesPerKey,
-                        weights: weights,
-                        progress: progress
-                    )
-                    usearch_sequence_load_ram(&arguments)
-                }
+            try callState.pass(config.memoryDomains) { (domains) throws(USearchError) in
+                var arguments = usearch_sequence_load_ram_t(
+                    index: index,
+                    executor: config.executor?.raw,
+                    outcome: callState.outcome,
+                    completion: callState.completion,
+                    path: path,
+                    ram: ramOptions(domains, config.memoryDomains.count, config.cpuClassCeiling),
+                    connectivity: 0,
+                    sketch_bytes: 0,
+                    values_per_key: config.valuesPerKey,
+                    progress: progress
+                )
+                usearch_sequence_load_ram(&arguments)
             }
         }
         return try adopted(index, callState)
@@ -314,28 +323,26 @@ public final class SequenceIndex: @unchecked Sendable {
     /// Copies a checkpoint into a new, mutable index in device memory.
     public static func loadVram(
         _ path: String,
-        weights: SequenceWeights? = nil,
         config: DenseLoadVramConfig = DenseLoadVramConfig()
     ) throws(USearchError) -> SequenceIndex {
         let callState = CallState()
         let index = callState.slots(usearch_sequence_index_t?.none)
         let progress = callState.pass(config.progress, steps: config.progressSteps)
         try callState.pass(path) { (path) throws(USearchError) in
-            try callState.pass(weights) { (weights) throws(USearchError) in
-                try callState.pass(config.devices) { (devices) throws(USearchError) in
-                    var arguments = usearch_sequence_load_vram_t(
-                        index: index,
-                        executor: config.executor?.raw,
-                        outcome: callState.outcome,
-                        completion: callState.completion,
-                        path: path,
-                        vram: vramOptions(devices, config.devices.count, config.gpuClassCeiling),
-                        values_per_key: config.valuesPerKey,
-                        weights: weights,
-                        progress: progress
-                    )
-                    usearch_sequence_load_vram(&arguments)
-                }
+            try callState.pass(config.devices) { (devices) throws(USearchError) in
+                var arguments = usearch_sequence_load_vram_t(
+                    index: index,
+                    executor: config.executor?.raw,
+                    outcome: callState.outcome,
+                    completion: callState.completion,
+                    path: path,
+                    vram: vramOptions(devices, config.devices.count, config.gpuClassCeiling),
+                    connectivity: 0,
+                    sketch_bytes: 0,
+                    values_per_key: config.valuesPerKey,
+                    progress: progress
+                )
+                usearch_sequence_load_vram(&arguments)
             }
         }
         return try adopted(index, callState)
@@ -344,28 +351,26 @@ public final class SequenceIndex: @unchecked Sendable {
     /// Copies a checkpoint from a buffer into a new index in host memory, as `loadRam` does a path.
     public static func loadRamBuffer(
         _ buffer: RawSpan,
-        weights: SequenceWeights? = nil,
         config: DenseLoadRamBufferConfig = DenseLoadRamBufferConfig()
     ) throws(USearchError) -> SequenceIndex {
         let callState = CallState()
         let index = callState.slots(usearch_sequence_index_t?.none)
         let progress = callState.pass(config.progress, steps: config.progressSteps)
         try buffer.withUnsafeBytes { (bytes) throws(USearchError) in
-            try callState.pass(weights) { (weights) throws(USearchError) in
-                try callState.pass(config.memoryDomains) { (domains) throws(USearchError) in
-                    var arguments = usearch_sequence_load_ram_buffer_t(
-                        index: index,
-                        executor: config.executor?.raw,
-                        outcome: callState.outcome,
-                        completion: callState.completion,
-                        buffer: usearch_bytes_view_t(bytes),
-                        ram: ramOptions(domains, config.memoryDomains.count, config.cpuClassCeiling),
-                        values_per_key: config.valuesPerKey,
-                        weights: weights,
-                        progress: progress
-                    )
-                    usearch_sequence_load_ram_buffer(&arguments)
-                }
+            try callState.pass(config.memoryDomains) { (domains) throws(USearchError) in
+                var arguments = usearch_sequence_load_ram_buffer_t(
+                    index: index,
+                    executor: config.executor?.raw,
+                    outcome: callState.outcome,
+                    completion: callState.completion,
+                    buffer: usearch_bytes_view_t(bytes),
+                    ram: ramOptions(domains, config.memoryDomains.count, config.cpuClassCeiling),
+                    connectivity: 0,
+                    sketch_bytes: 0,
+                    values_per_key: config.valuesPerKey,
+                    progress: progress
+                )
+                usearch_sequence_load_ram_buffer(&arguments)
             }
         }
         return try adopted(index, callState)
@@ -375,28 +380,26 @@ public final class SequenceIndex: @unchecked Sendable {
     /// path.
     public static func loadVramBuffer(
         _ buffer: RawSpan,
-        weights: SequenceWeights? = nil,
         config: DenseLoadVramBufferConfig = DenseLoadVramBufferConfig()
     ) throws(USearchError) -> SequenceIndex {
         let callState = CallState()
         let index = callState.slots(usearch_sequence_index_t?.none)
         let progress = callState.pass(config.progress, steps: config.progressSteps)
         try buffer.withUnsafeBytes { (bytes) throws(USearchError) in
-            try callState.pass(weights) { (weights) throws(USearchError) in
-                try callState.pass(config.devices) { (devices) throws(USearchError) in
-                    var arguments = usearch_sequence_load_vram_buffer_t(
-                        index: index,
-                        executor: config.executor?.raw,
-                        outcome: callState.outcome,
-                        completion: callState.completion,
-                        buffer: usearch_bytes_view_t(bytes),
-                        vram: vramOptions(devices, config.devices.count, config.gpuClassCeiling),
-                        values_per_key: config.valuesPerKey,
-                        weights: weights,
-                        progress: progress
-                    )
-                    usearch_sequence_load_vram_buffer(&arguments)
-                }
+            try callState.pass(config.devices) { (devices) throws(USearchError) in
+                var arguments = usearch_sequence_load_vram_buffer_t(
+                    index: index,
+                    executor: config.executor?.raw,
+                    outcome: callState.outcome,
+                    completion: callState.completion,
+                    buffer: usearch_bytes_view_t(bytes),
+                    vram: vramOptions(devices, config.devices.count, config.gpuClassCeiling),
+                    connectivity: 0,
+                    sketch_bytes: 0,
+                    values_per_key: config.valuesPerKey,
+                    progress: progress
+                )
+                usearch_sequence_load_vram_buffer(&arguments)
             }
         }
         return try adopted(index, callState)
@@ -405,24 +408,20 @@ public final class SequenceIndex: @unchecked Sendable {
     /// Serves a checkpoint in place through a memory mapping, as a read-only index.
     public static func viewRam(
         _ path: String,
-        weights: SequenceWeights? = nil,
         memoryDomains: [Int32] = [],
         cpuClassCeiling: CPUClass? = nil
     ) throws(USearchError) -> SequenceIndex {
         let callState = CallState()
         let index = callState.slots(usearch_sequence_index_t?.none)
         try callState.pass(path) { (path) throws(USearchError) in
-            try callState.pass(weights) { (weights) throws(USearchError) in
-                try callState.pass(memoryDomains) { (domains) throws(USearchError) in
-                    var arguments = usearch_sequence_view_ram_t(
-                        index: index,
-                        outcome: callState.outcome,
-                        path: path,
-                        weights: weights,
-                        ram: ramOptions(domains, memoryDomains.count, cpuClassCeiling)
-                    )
-                    usearch_sequence_view_ram(&arguments)
-                }
+            try callState.pass(memoryDomains) { (domains) throws(USearchError) in
+                var arguments = usearch_sequence_view_ram_t(
+                    index: index,
+                    outcome: callState.outcome,
+                    path: path,
+                    ram: ramOptions(domains, memoryDomains.count, cpuClassCeiling)
+                )
+                usearch_sequence_view_ram(&arguments)
             }
         }
         return try adopted(index, callState)
@@ -432,25 +431,22 @@ public final class SequenceIndex: @unchecked Sendable {
     /// as a read-only index.
     public static func viewNvme(
         _ path: String,
-        weights: SequenceWeights? = nil,
         config: BasicViewNvmeConfig = BasicViewNvmeConfig()
     ) throws(USearchError) -> SequenceIndex {
         let callState = CallState()
         let index = callState.slots(usearch_sequence_index_t?.none)
         try callState.pass(path) { (path) throws(USearchError) in
-            try callState.pass(weights) { (weights) throws(USearchError) in
-                withPaths(config.paths, config.cpuClassCeiling) { nvme in
-                    var arguments = usearch_sequence_view_nvme_t(
-                        index: index,
-                        executor: config.executor?.raw,
-                        outcome: callState.outcome,
-                        completion: callState.completion,
-                        path: path,
-                        nvme: nvme,
-                        weights: weights
-                    )
-                    usearch_sequence_view_nvme(&arguments)
-                }
+            withPaths(config.paths, config.cpuClassCeiling) { nvme in
+                var arguments = usearch_sequence_view_nvme_t(
+                    index: index,
+                    executor: config.executor?.raw,
+                    outcome: callState.outcome,
+                    completion: callState.completion,
+                    path: path,
+                    nvme: nvme,
+                    sketch_bytes: 0
+                )
+                usearch_sequence_view_nvme(&arguments)
             }
         }
         return try adopted(index, callState)
@@ -1033,6 +1029,7 @@ struct SequenceCall {
                 expansion_factor: config.expansionFactor,
                 traversal: config.traversal.raw,
                 predicate: callState.pass(config.predicate),
+                hints: nil,
                 progress: callState.pass(config.progress, steps: config.progressSteps),
                 stats: config.stats?.raw
             )

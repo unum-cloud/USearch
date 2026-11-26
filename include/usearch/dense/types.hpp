@@ -39,6 +39,17 @@ static_assert(sizeof(shard_node_t) == 8);
 template <nk::a_numeric_dtype scalar_, nk_capability_t caps_>
 struct quads_ladder;
 
+/** The tiles, values, RMS-cast and visited-set cascades, which @c ram_metric.hpp defines, declared
+ *  here so a kit pick can be named without the CPU kits. */
+template <nk::a_numeric_dtype scalar_, nk_capability_t caps_>
+struct tiles_ladder;
+template <nk_capability_t caps_>
+struct elementwise_ladder;
+template <typename scalar_type_, nk_capability_t caps_>
+struct rmscast_ladder;
+template <nk_capability_t caps_>
+struct visits_hash_set_ladder;
+
 /** The GPU kernels only dense indexes launch, the first template argument of each vendor's dense
  *  kernel template - @c cuda_dense_kernel and @c amd_dense_kernel - and the words of Apple's dense
  *  exported names; the walks basic graphs share stay in @c util::vram_kernel_t. A vendor sizes its

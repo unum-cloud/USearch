@@ -1772,6 +1772,7 @@ internal unsafe struct NativeGeospatialLoadRam
     public Completion Completion;
     public NativeBytesView Path;
     public NativeRamOptions Ram;
+    public nuint Connectivity;
     public nuint ValuesPerKey;
     public NativeGeospatialTerrain Terrain;
     public NativeProgress Progress;
@@ -1786,6 +1787,7 @@ internal unsafe struct NativeGeospatialLoadRamBuffer
     public Completion Completion;
     public NativeBytesView Buffer;
     public NativeRamOptions Ram;
+    public nuint Connectivity;
     public nuint ValuesPerKey;
     public NativeGeospatialTerrain Terrain;
     public NativeProgress Progress;
@@ -1800,6 +1802,7 @@ internal unsafe struct NativeGeospatialLoadVram
     public Completion Completion;
     public NativeBytesView Path;
     public NativeVramOptions Vram;
+    public nuint Connectivity;
     public nuint ValuesPerKey;
     public NativeGeospatialTerrain Terrain;
     public NativeProgress Progress;
@@ -1814,6 +1817,7 @@ internal unsafe struct NativeGeospatialLoadVramBuffer
     public Completion Completion;
     public NativeBytesView Buffer;
     public NativeVramOptions Vram;
+    public nuint Connectivity;
     public nuint ValuesPerKey;
     public NativeGeospatialTerrain Terrain;
     public NativeProgress Progress;

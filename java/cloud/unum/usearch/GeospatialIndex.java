@@ -1516,6 +1516,7 @@ public final class GeospatialIndex implements AutoCloseable {
                 Library.padding(),
                 Library.BYTES_VIEW.withName("source"),
                 Library.placement(placement),
+                Library.SIZE.withName("connectivity"),
                 Library.SIZE.withName("values_per_key"),
                 TERRAIN.withName("terrain"),
                 Library.PROGRESS);

@@ -2,16 +2,15 @@
  *  @file c/usearch/sequence_index.h
  *  @author Ash Vardanian
  *  @date August 14, 2026
- *  @brief The sequence-modality C interface: similarity search over variable-length sequences -
- *      textual documents, DNA, RNA, and protein strings - under Levenshtein, window overlap, and
- *      Needleman-Wunsch scoring.
+ *  @brief The sequence-modality C interface: similarity search over variable-length
+ *      sequences - proteins scored by alignment, DNA and RNA by shifted overlap, and UTF-8
+ *      text by window containment.
  *
  *  Variable-length payloads cannot ride a run of equal rows, so every batch input is a @b tape:
  *  the bytes of every sequence end to end, and @c count + 1 Apache Arrow offsets around them - the
- *  sequence-modality twin of the dense header's rows. One constructor serves every metric family:
- *  uniform edit distances need no parameters, window overlap takes its window widths, weighted
- *  alignments take a substitution matrix and gap costs. Handles are created by a lifecycle verb
- *  naming both an action and a residency:
+ *  sequence-modality twin of the dense header's rows. One constructor serves every metric, under
+ *  the metric's own costs or the ones it is given.
+ *  Handles are created by a lifecycle verb naming both an action and a residency:
  *
  *      Action                           RAM          VRAM         NVMe
  *      init: start empty, mutable       init_ram     init_vram    none
@@ -19,10 +18,9 @@
  *      view: serve one in place         view_ram     none         view_nvme
  *      save: write a checkpoint         save         save         none
  *
- *  Each is spelled @c usearch_sequence_ and the suffix above. A VRAM handle serves byte and UTF-8
- *  Levenshtein, window overlap and Needleman-Wunsch, on one GPU, through the insertion, search,
- *  count and description verbs, refusing the rest with @c usearch_status_unsupported_k, and a
- *  search there takes no @c predicate.
+ *  Each is spelled @c usearch_sequence_ and the suffix above. A VRAM handle serves every metric, on
+ *  one GPU, through the insertion, search, count and description verbs, refusing the rest with
+ *  @c usearch_status_unsupported_k, and a search there takes no @c predicate.
  *
  *  A viewed handle is read-only, refusing every mutating verb with @c usearch_status_read_only_k.
  *  An NVMe handle answers every read verb as a RAM handle does, its entries read through the
@@ -99,112 +97,152 @@ typedef struct usearch_sequence_refine_plan_handle_t* usearch_sequence_refine_pl
 typedef struct usearch_sequence_reshard_plan_handle_t* usearch_sequence_reshard_plan_t;
 
 /**
- *  @brief The sequence scoring kinds supported out of the box.
+ *  @brief The sequence metrics supported out of the box: each names what the sequences are, the
+ *      form they are stored in, and the score ranking them.
  *
- *  The edit kinds fill a @b [|a|+1,|b|+1] table of cell @c D[i,j], the least cost of turning the
- *  prefix of @c a ending at @c i into the prefix of @c b ending at @c j, holding one row, so each
- *  is quadratic in time. They write @c c for the substitution cost and @c g for the gap cost.
+ *  Every metric stores a sequence folded, and a get returns the stored form, never the bytes an
+ *  insertion passed: packed class codes for a protein alignment, one class code a byte for a DNA
+ *  overlap, and case-folded UTF-8 for a containment.
  */
 typedef enum usearch_sequence_metric_t {
     usearch_sequence_metric_unknown_k = 0,
 
     /**
-     *  @brief Levenshtein edit distance over raw bytes.
+     *  @brief Global alignment of proteins with linear gap costs.
      *
-     *  The number of single-byte insertions, deletions and substitutions turning one sequence
-     *  into the other, every edit costing one. A true metric, and the cheapest kind here.
-     *
-     *  D[i,j] = min( D[i-1,j] + 1, D[i,j-1] + 1, D[i-1,j-1] + (a[i] ≠ b[j]) )
-     *
-     *  @code{.py}
-     *  row = list(range(len(b) + 1))                # one [|b|+1] row is the whole working set
-     *  for i, x in enumerate(a, 1):
-     *      row, prev = [i] + [0] * len(b), row
-     *      for j, y in enumerate(b, 1):
-     *          row[j] = min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (x != y))
-     *  levenshtein = row[-1]
-     *  @endcode
-     */
-    usearch_sequence_metric_levenshtein_bytes_k = 1,
-
-    /**
-     *  @brief Levenshtein edit distance over UTF-8 code points.
-     *
-     *  The same recurrence, run over decoded code points rather than bytes, so one accented
-     *  character costs one edit instead of the two or three its encoding occupies.
-     */
-    usearch_sequence_metric_levenshtein_utf8_k = 2,
-
-    /**
-     *  @brief Global alignment with linear gap costs - Needleman-Wunsch.
-     *
-     *  Levenshtein with the unit costs replaced by a substitution matrix and a flat gap cost,
-     *  so a mismatch between similar symbols can be cheaper than one between dissimilar ones.
-     *  Both sequences are aligned end to end, and every unaligned symbol is charged.
+     *  Both sequences are aligned end to end over the classes the costs fold bytes into, and every
+     *  unaligned symbol is charged the gap cost: BLOSUM62 with a gap of 7 over the 20 amino acids,
+     *  B, Z, X and the stop in either case, any other byte as X, unless the index names its own
+     *  costs. The table of cell @c D[i,j] is the least cost of turning the prefix of @c a ending
+     *  at @c i into the prefix of @c b ending at @c j, so a score is quadratic in time. A stored
+     *  sequence reads back as its class codes, five bits apiece, little-endian behind one byte
+     *  counting the slots the last bytes leave unused.
      *
      *  D[i,j] = min( D[i-1,j] + g, D[i,j-1] + g, D[i-1,j-1] + c(a[i], b[j]) )
      *
      *  @code{.py}
-     *  row = [j * g for j in range(len(b) + 1)]
+     *  row = [j * g for j in range(b_count + 1)]     # one [b_count+1] row is the whole working set
      *  for i, x in enumerate(a, 1):
-     *      row, prev = [i * g] + [0] * len(b), row
+     *      row, prev = [i * g] + [0] * b_count, row
      *      for j, y in enumerate(b, 1):
      *          row[j] = min(prev[j] + g, row[j - 1] + g, prev[j - 1] + c[x][y])
-     *  needleman_wunsch = row[-1]
+     *  alignment = row[-1]
      *  @endcode
      */
-    usearch_sequence_metric_needleman_wunsch_k = 3,
+    usearch_sequence_metric_protein_alignment_k = 1,
 
     /**
-     *  @brief Window overlap: the share of the larger window set the other side misses.
+     *  @brief Shifted overlap of DNA or RNA: the cost of aligning the two sequences where one
+     *      slides over the other, at the shift most windows vote for, on either strand.
      *
-     *  Every window of every configured width is taken from both sequences, and a window of the
-     *  stored @c b is a hit when the query @c a holds the same bytes at the same width. The
-     *  distance is the misses over whichever side has more windows: zero where the windows
-     *  coincide at every width, one where they share none. Exact at every radius; the window
-     *  widths are in bytes, fixed at creation and recorded in the checkpoint.
-     *
-     *  d(a, b) = (max(|W(a)|, |W(b)|) − |{ v ∈ W(b) : v ∈ W(a) }|) / max(|W(a)|, |W(b)|)
+     *  Bytes fold into the four classes of A, C, G and T in either case, U read as T and any other
+     *  byte as T, under costs that charge a transition half a transversion and a gap of 2, unless
+     *  the index names its own. Every window of 12 and of 19 symbols of the stored sequence that
+     *  the query holds exactly once votes for the shift between the two places, once for every
+     *  place it takes in the stored sequence; a window the query repeats names no single shift and
+     *  never votes. The most voted shift wins, the least on a tie. The symbols it lays over each
+     *  other are aligned end to end under the costs, inside a band around that diagonal a sixteenth
+     *  of them wide either side, at least 4 and at most 64 symbols, and the symbols of the shorter
+     *  side the shift leaves outside are charged the gap cost. The distance is first that cost over
+     *  twice the gap cost of the whole shorter side, in 15 bits, and below it, in 8 bits, the share
+     *  of the longer side the overlap leaves out. The query also scores as its reverse complement,
+     *  and the lower distance counts. Zero only where the two are equally long and align at no
+     *  cost; just under one where no shift takes two votes. A stored sequence reads back as its
+     *  class codes, one byte apiece.
      *
      *  @code{.py}
-     *  windows = lambda s: [(w, s[i:i + w]) for w in widths for i in range(len(s) - w + 1)]
-     *  query, stored = windows(a), windows(b)       # repeats kept, every width at once
-     *  hits = sum(window in set(query) for window in stored)
-     *  longer = max(len(query), len(stored))
-     *  overlap = (longer - hits) / longer if longer else 1
+     *  # gap and cost(x, y) are the costs between classes; widths = (12, 19)
+     *  def overlap(a, b):
+     *      length, votes = operator.length_hint, collections.Counter()
+     *      for w in widths:
+     *          places = collections.defaultdict(list)
+     *          for i in range(length(a) - w + 1):
+     *              places[a[i:i + w]].append(i)
+     *          for j in range(length(b) - w + 1):
+     *              if length(places[b[j:j + w]]) == 1:      # a window the query repeats never votes
+     *                  votes[j - places[b[j:j + w]][0]] += 1
+     *      shift = min(votes, key=lambda s: (-votes[s], s), default=0)  # the least shift wins a tie
+     *      if votes[shift] < 2:
+     *          return (32767 * 256 + 255) / 2**23
+     *      low = max(0, -shift)
+     *      span = min(length(a) - low, length(b) - low - shift)
+     *      x, y, band = a[low:low + span], b[low + shift:low + shift + span], min(64, max(4, span // 16))
+     *      row = [j * gap if j <= band else math.inf for j in range(span + 1)]
+     *      for i in range(1, span + 1):                     # the alignment's recurrence, inside the band
+     *          above, row = row, [math.inf] * (span + 1)
+     *          for j in range(max(0, i - band), min(span, i + band) + 1):
+     *              step = above[j - 1] + cost(x[i - 1], y[j - 1]) if j else i * gap
+     *              row[j] = min(above[j] + gap, row[j - 1] + gap, step) if j else step
+     *      shorter, longer = min(length(a), length(b)), max(length(a), length(b))
+     *      total = row[span] + gap * (shorter - span)
+     *      primary = min(32767, total * 32767 // (2 * gap * shorter)) if gap else 32767 * (total > 0)
+     *      secondary = math.ceil((longer - span) * 255 / longer)
+     *      return (primary * 256 + secondary) / 2**23
+     *  distance = min(overlap(a, b), overlap(reverse_complement(a), b))
      *  @endcode
      */
-    usearch_sequence_metric_overlap_k = 4,
+    usearch_sequence_metric_dna_overlap_k = 2,
+
+    /**
+     *  @brief Window containment of UTF-8 text: the share of the query's distinct windows the
+     *      stored side lacks, whatever the case.
+     *
+     *  A text is case-folded as Unicode folds it before it is stored or scored, which may lengthen
+     *  it up to three times, and malformed bytes pass through as they are. Every window of 5 and of
+     *  8 bytes is taken from both folded texts, and a distinct window of the query @c a is held
+     *  when the stored @c b has the same bytes at the same width. The distance is first the windows
+     *  the query holds that @c b lacks over the query's distinct windows, in 15 bits, and below
+     *  them, in 8 bits, the windows of @c b not held over all of them, so among rows holding as
+     *  much of the query the one adding least ranks first. Zero only where @c b holds every query
+     *  window and nothing more; just under one where it holds none. Asymmetric, and exact at every
+     *  radius. A stored text reads back folded. Takes no costs.
+     *
+     *  @code{.py}
+     *  a, b, widths = a.casefold().encode(), b.casefold().encode(), (5, 8)
+     *  length = operator.length_hint
+     *  windows = lambda s: [(w, s[i:i + w]) for w in widths for i in range(length(s) - w + 1)]
+     *  query, stored = set(windows(a)), set(windows(b))  # distinct, every width at once
+     *  distinct, held = sum(1 for v in query), sum(v in stored for v in query)
+     *  total = sum(1 for v in windows(b))
+     *  primary = math.floor((distinct - held) * 32767 / distinct) if distinct else 32767
+     *  secondary = math.ceil((total - min(total, held)) * 255 / total) if total else 255
+     *  containment = (primary * 256 + secondary) / 2**23
+     *  @endcode
+     */
+    usearch_sequence_metric_utf8_containment_k = 3,
 } usearch_sequence_metric_t;
 
-/** The spelling a checkpoint records for a kind, as
- *  @c usearch_sequence_metric_levenshtein_bytes_k spells "levenshtein"; "unknown" for a value
- *  outside the set. */
+/** The spelling a checkpoint records for a metric: "protein-alignment", "dna-overlap" or
+ *  "utf8-containment"; "unknown" for a value outside the set. */
 USEARCH_EXPORT char const* usearch_sequence_metric_name(usearch_sequence_metric_t metric);
 
-/** Reads a kind back into @p metric, or fails with @c usearch_status_invalid_argument_k. */
+/** Reads a metric back into @p metric, or fails with @c usearch_status_invalid_argument_k for any
+ *  other spelling. */
 USEARCH_EXPORT usearch_status_t usearch_sequence_metric_from_name(usearch_bytes_view_t name,
                                                                   usearch_sequence_metric_t* metric);
 
 /**
- *  @brief The substitution matrix and gap costs an alignment kind scores with; the Levenshtein
- *      kinds score with unit costs and take none.
+ *  @brief How alike two symbols are, and the cost of leaving one unaligned, where an index scores
+ *      by other costs than its metric's own.
  *
- *  Needleman-Wunsch reads the matrix as similarities @c s between class codes, the classes ending
- *  at the last code scoring anything, at most 32 of them, and its sequences as those codes packed
- *  two bits apiece up to four classes and five past, little-endian behind one byte counting the
- *  slots the last bytes leave unused. It scores with @c c(a,b) = (s(a,a) + s(b,b)) / 2 − s(a,b),
- *  costs that must not be negative, rounded to integers of at most 15 together with the gap cost,
- *  all scaled down by one factor when either passes it.
+ *  The @c similarities are scores @c s between raw bytes, folded once at creation: bytes sharing
+ *  their rows and columns share a class, at most 32 classes, numbered in the order their first
+ *  bytes come. A protein alignment and a DNA overlap charge @c c(a,b) = (s(a,a) + s(b,b)) / 2 −
+ *  s(a,b) between classes, costs that must not be negative, rounded to integers of at most 15
+ *  together with the gap cost, all scaled down by one factor when either passes it. A DNA overlap
+ *  keeps the complement its own, so its costs must fold bytes into exactly four classes holding
+ *  A, C, G and T apart, with every letter of either case, U read as T, in a class whose
+ *  complement holds its own. A checkpoint records the class of every byte and the class costs, so
+ *  loads and views take none.
  */
-typedef struct usearch_sequence_weights_t {
+typedef struct usearch_sequence_costs_t {
 
-    /** Row-major 256×256 signed scores over byte alphabets. */
-    int8_t const* substitution_matrix;
+    /** Row-major 256×256 signed similarities between bytes. */
+    int8_t const* similarities;
 
     /** Cost of one unaligned symbol. */
     int8_t gap;
-} usearch_sequence_weights_t;
+} usearch_sequence_costs_t;
 
 /** The arguments of @c usearch_sequence_init_ram. */
 typedef struct usearch_sequence_init_ram_t {
@@ -215,21 +253,19 @@ typedef struct usearch_sequence_init_ram_t {
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** The scoring kind. */
+    /** What the sequences are and the score ranking them. */
     usearch_sequence_metric_t metric;
 
-    /** The weights an alignment kind needs; @c NULL for the Levenshtein kinds, which refuse any. */
-    usearch_sequence_weights_t const* weights;
-
-    /** Window widths in bytes for the overlap kind, which needs at least one; every other kind
-     *  refuses any. */
-    size_t const* window_widths;
-
-    /** Number of entries in @c window_widths. */
-    size_t window_widths_count;
+    /** The @b optional costs; @c NULL for the metric's own, and refused for
+     *  @c usearch_sequence_metric_utf8_containment_k. */
+    usearch_sequence_costs_t const* costs;
 
     /** The @b optional connections-per-node bound; zero derives. */
     size_t connectivity;
+
+    /** The @b optional bytes of the sketch in front of each stored sequence, a multiple of four;
+     *  zero takes the metric's default, and a metric without a sketch refuses any other. */
+    size_t sketch_bytes;
 
     /** Upper bound on entries sharing one key; zero is unbounded. */
     size_t values_per_key;
@@ -239,18 +275,17 @@ typedef struct usearch_sequence_init_ram_t {
 } usearch_sequence_init_ram_t;
 
 /**
- *  @brief Creates an empty, mutable sequence index in host memory, for the uniform edit distances
- *      or the weighted alignments alike.
+ *  @brief Creates an empty, mutable sequence index in host memory, under any metric.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k @c NULL @c window_widths for a nonzero count, a
- *    zero window width, @c weights without a substitution matrix, or a @c cpu_class_ceiling
- *    no class takes.
+ *  - @c usearch_status_invalid_argument_k Costs without similarities, or a @c cpu_class_ceiling no
+ *    class takes.
  *  - @c usearch_status_unknown_kind_k An unknown @c metric.
- *  - @c usearch_status_config_mismatch_k @c weights for a kind other than Needleman-Wunsch,
- *    Needleman-Wunsch without them, window widths missing for the overlap kind or given to
- *    another, or weights folding into more than 32 classes, a negative gap or a pair above its
- *    mean self-score.
+ *  - @c usearch_status_config_mismatch_k Costs for a containment, or sketch bytes off a multiple of
+ *    four or for a DNA overlap.
+ *  - @c usearch_status_config_mismatch_k Similarities folding into one class or more than 32, a
+ *    negative gap, a pair above its mean self-score, or DNA overlap costs that do not fold into the
+ *    four letters' classes.
  *  - @c usearch_status_unsupported_k A @c cpu_class_ceiling below every class compiled here.
  */
 USEARCH_EXPORT void usearch_sequence_init_ram(usearch_sequence_init_ram_t* arguments);
@@ -265,21 +300,19 @@ typedef struct usearch_sequence_init_vram_t {
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** The scoring kind; byte and UTF-8 Levenshtein, window overlap and Needleman-Wunsch serve a
-     *  GPU. */
+    /** What the sequences are and the score ranking them; every metric serves a GPU. */
     usearch_sequence_metric_t metric;
 
-    /** The weights an alignment kind needs; @c NULL for the Levenshtein kinds, which refuse any. */
-    usearch_sequence_weights_t const* weights;
-
-    /** Window widths in bytes for the overlap kind; every other kind refuses any. */
-    size_t const* window_widths;
-
-    /** Number of entries in @c window_widths. */
-    size_t window_widths_count;
+    /** The @b optional costs; @c NULL for the metric's own, and refused for
+     *  @c usearch_sequence_metric_utf8_containment_k. */
+    usearch_sequence_costs_t const* costs;
 
     /** The @b optional connections-per-node bound; zero derives. */
     size_t connectivity;
+
+    /** The @b optional bytes of the sketch in front of each stored sequence, a multiple of four;
+     *  zero takes the metric's default, and a metric without a sketch refuses any other. */
+    size_t sketch_bytes;
 
     /** Zero alone: a GPU index keeps no key lookup, so it bounds no key's entries and refuses any
      *  bound it is given. */
@@ -296,13 +329,15 @@ typedef struct usearch_sequence_init_vram_t {
  *  matches in device memory in an arena made for that executor, or on host pages in a host one.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k @c NULL window widths for a nonzero count, a @c NULL
- *    substitution matrix, an empty window, or a @c gpu_class_ceiling no class takes.
- *  - @c usearch_status_unknown_kind_k A kind other than byte or UTF-8 Levenshtein, window overlap
- *    or Needleman-Wunsch.
- *  - @c usearch_status_config_mismatch_k Weights for a kind that does not align, an alignment
- *    kind without weights, window widths for any kind but overlap or none for overlap, or devices
- *    of two classes.
+ *  - @c usearch_status_invalid_argument_k Costs without similarities, or a @c gpu_class_ceiling no
+ *    class takes.
+ *  - @c usearch_status_unknown_kind_k An unknown @c metric.
+ *  - @c usearch_status_config_mismatch_k Costs for a containment, or sketch bytes off a multiple of
+ *    four or for a DNA overlap.
+ *  - @c usearch_status_config_mismatch_k Similarities folding into one class or more than 32, a
+ *    negative gap, a pair above its mean self-score, or DNA overlap costs that do not fold into the
+ *    four letters' classes.
+ *  - @c usearch_status_config_mismatch_k Devices of two classes.
  *  - @c usearch_status_unsupported_k A @c values_per_key bound, or devices that load no class under
  *    @c gpu_class_ceiling.
  *  - @c usearch_status_device_k A device past the listing, one whose vendor no kernel serves, or
@@ -335,11 +370,12 @@ typedef struct usearch_sequence_load_ram_t {
      *  and leave the rest empty for a refine to fill; zero keeps the checkpoint's. */
     size_t connectivity;
 
+    /** The @b optional bytes of the sketch in front of each stored sequence, a multiple of four,
+     *  each sketch written afresh as the sequences load; zero keeps the checkpoint's. */
+    size_t sketch_bytes;
+
     /** Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded. */
     size_t values_per_key;
-
-    /** The weights an alignment checkpoint was built with; @c NULL for the Levenshtein kinds. */
-    usearch_sequence_weights_t const* weights;
 
     /** The @b optional handler, called with parts placed and their count. */
     usearch_progress_t progress;
@@ -354,17 +390,14 @@ typedef struct usearch_sequence_load_ram_t {
  *
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does not
- *    parse, @c weights without a substitution matrix, or a @c cpu_class_ceiling no class takes.
+ *    parse, or a @c cpu_class_ceiling no class takes.
  *  - @c usearch_status_malformed_k The checkpoint lists no part, or a part, its header, columns,
- *    sums or recorded costs do not parse.
+ *    sums or recorded costs and byte classes do not parse.
  *  - @c usearch_status_unknown_kind_k A checkpoint of an unknown metric.
  *  - @c usearch_status_unsupported_k A @c cpu_class_ceiling below every class compiled here.
  *  - @c usearch_status_uninitialized_k The executor holds no pool workers.
- *  - @c usearch_status_config_mismatch_k @c weights for a checkpoint of another kind than
- *    Needleman-Wunsch or folding into more than 32 classes, a negative gap or a pair above its
- *    mean self-score, a Needleman-Wunsch checkpoint recording no costs and given no weights, a
- *    @c connectivity narrower than the checkpoint's, or the checkpoint's columns differing from
- *    the shards' in dtype, shape or key width.
+ *  - @c usearch_status_config_mismatch_k A @c connectivity narrower than the checkpoint's, or the
+ *    checkpoint's columns differing from the shards' in dtype, shape or key width.
  *  - @c usearch_status_device_k The executor is not a RAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor, or its pool runs another
  *    dispatch.
@@ -396,11 +429,12 @@ typedef struct usearch_sequence_load_ram_buffer_t {
     /** Neighbor IDs per node, as @c usearch_sequence_load_ram takes it. */
     size_t connectivity;
 
+    /** Bytes of the sketch in front of each stored sequence, as @c usearch_sequence_load_ram takes
+     *  them. */
+    size_t sketch_bytes;
+
     /** Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded. */
     size_t values_per_key;
-
-    /** The weights an alignment checkpoint was built with; @c NULL for the Levenshtein kinds. */
-    usearch_sequence_weights_t const* weights;
 
     /** The @b optional handler, called with parts placed and their count. */
     usearch_progress_t progress;
@@ -413,16 +447,15 @@ typedef struct usearch_sequence_load_ram_buffer_t {
  *  bytes through a mapping, so @c buffer needs no file behind it, and a mapped file no copy.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k An empty @c buffer, @c weights without a substitution
- *    matrix, or a @c cpu_class_ceiling no class takes.
+ *  - @c usearch_status_invalid_argument_k An empty @c buffer, or a @c cpu_class_ceiling no class
+ *    takes.
  *  - @c usearch_status_malformed_k The manifest lists no part, or a part, its header, columns,
- *    sums or recorded costs do not parse.
+ *    sums or recorded costs and byte classes do not parse.
  *  - @c usearch_status_unknown_kind_k A checkpoint of an unknown metric.
  *  - @c usearch_status_unsupported_k A @c cpu_class_ceiling below every class compiled here.
  *  - @c usearch_status_uninitialized_k The executor holds no pool workers.
- *  - @c usearch_status_config_mismatch_k @c weights, recorded costs or a @c connectivity
- *    @c usearch_sequence_load_ram refuses for the same reasons, or the checkpoint's columns
- *    differing from the shards' in dtype, shape or key width.
+ *  - @c usearch_status_config_mismatch_k A @c connectivity @c usearch_sequence_load_ram refuses,
+ *    or the checkpoint's columns differing from the shards' in dtype, shape or key width.
  *  - @c usearch_status_device_k The executor is not a RAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor, or its pool runs another
  *    dispatch.
@@ -455,12 +488,13 @@ typedef struct usearch_sequence_load_vram_t {
      *  and leave the rest empty for a refine to fill; zero keeps the checkpoint's. */
     size_t connectivity;
 
+    /** The @b optional bytes of the sketch in front of each stored sequence, a multiple of four,
+     *  each sketch written afresh as the sequences load; zero keeps the checkpoint's. */
+    size_t sketch_bytes;
+
     /** Zero alone: a GPU index keeps no key lookup, so it bounds no key's entries and refuses any
      *  bound it is given. */
     size_t values_per_key;
-
-    /** The weights an alignment checkpoint was built with; @c NULL for the Levenshtein kinds. */
-    usearch_sequence_weights_t const* weights;
 
     /** The @b optional handler, called with parts placed and their count. */
     usearch_progress_t progress;
@@ -472,17 +506,14 @@ typedef struct usearch_sequence_load_vram_t {
  *
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does not
- *    parse, @c weights without a substitution matrix, or a @c gpu_class_ceiling no class takes.
+ *    parse, or a @c gpu_class_ceiling no class takes.
  *  - @c usearch_status_malformed_k The checkpoint lists no part, or a part, its header, columns,
- *    sums or recorded costs do not parse.
+ *    sums or recorded costs and byte classes do not parse.
  *  - @c usearch_status_unknown_kind_k A checkpoint of an unknown metric.
  *  - @c usearch_status_unsupported_k A @c values_per_key bound, or devices that load no class under
  *    @c gpu_class_ceiling.
  *  - @c usearch_status_config_mismatch_k Devices of two classes, or the executor driving no stream
  *    on some shard's device.
- *  - @c usearch_status_config_mismatch_k @c weights for a checkpoint of another kind than
- *    Needleman-Wunsch or folding into more than 32 classes, a negative gap or a pair above its mean
- *    self-score, or a Needleman-Wunsch checkpoint recording no costs and given no weights.
  *  - @c usearch_status_config_mismatch_k A @c connectivity narrower than the checkpoint's or not a
  *    power of two, or the checkpoint's columns differing from the shards' in dtype, shape or key
  *    width.
@@ -519,12 +550,13 @@ typedef struct usearch_sequence_load_vram_buffer_t {
     /** Neighbor IDs per node, as @c usearch_sequence_load_ram takes it. */
     size_t connectivity;
 
+    /** Bytes of the sketch in front of each stored sequence, as @c usearch_sequence_load_ram takes
+     *  them. */
+    size_t sketch_bytes;
+
     /** Zero alone: a GPU index keeps no key lookup, so it bounds no key's entries and refuses any
      *  bound it is given. */
     size_t values_per_key;
-
-    /** The weights an alignment checkpoint was built with; @c NULL for the Levenshtein kinds. */
-    usearch_sequence_weights_t const* weights;
 
     /** The @b optional handler, called with parts placed and their count. */
     usearch_progress_t progress;
@@ -535,10 +567,10 @@ typedef struct usearch_sequence_load_vram_buffer_t {
  *      reporting and cancelling like @c usearch_sequence_load_vram.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k An empty @c buffer, @c weights without a substitution
- *    matrix, or a @c gpu_class_ceiling no class takes.
+ *  - @c usearch_status_invalid_argument_k An empty @c buffer, or a @c gpu_class_ceiling no class
+ *    takes.
  *  - @c usearch_status_malformed_k The manifest lists no part, or a part, its header, columns, sums
- *    or recorded costs do not parse.
+ *    or recorded costs and byte classes do not parse.
  *  - @c usearch_status_unknown_kind_k A checkpoint of an unknown metric.
  *  - @c usearch_status_unsupported_k A @c buffer in device memory, a @c values_per_key bound, or
  *    devices that load no class under @c gpu_class_ceiling.
@@ -562,9 +594,6 @@ typedef struct usearch_sequence_view_ram_t {
     /** Checkpoint path - a monolith, or a manifest naming many. */
     usearch_bytes_view_t path;
 
-    /** The weights an alignment checkpoint was built with; @c NULL for the Levenshtein kinds. */
-    usearch_sequence_weights_t const* weights;
-
     /** The class to dispatch as; a view reads its shards from the checkpoint, so only
      *  @c usearch_ram_options_t::cpu_class_ceiling is read. */
     usearch_ram_options_t ram;
@@ -576,13 +605,10 @@ typedef struct usearch_sequence_view_ram_t {
  *
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does not
- *    parse, @c weights without a substitution matrix, or a @c cpu_class_ceiling no class takes.
+ *    parse, or a @c cpu_class_ceiling no class takes.
  *  - @c usearch_status_malformed_k The checkpoint lists no part, or a part, its header or its
- *    recorded costs do not parse.
+ *    recorded costs and byte classes do not parse.
  *  - @c usearch_status_unknown_kind_k A checkpoint of an unknown metric.
- *  - @c usearch_status_config_mismatch_k @c weights for a checkpoint of another kind than
- *    Needleman-Wunsch or folding into more than 32 classes, a negative gap or a pair above its
- *    mean self-score, or a Needleman-Wunsch checkpoint recording no costs and given no weights.
  *  - @c usearch_status_unsupported_k Every other checkpoint, as RAM shards cannot serve a mapping
  *    in place yet.
  */
@@ -609,8 +635,9 @@ typedef struct usearch_sequence_view_nvme_t {
     /** The devices the parts are served from; naming none serves each where its manifest points. */
     usearch_nvme_options_t nvme;
 
-    /** The weights an alignment checkpoint was built with; @c NULL for the Levenshtein kinds. */
-    usearch_sequence_weights_t const* weights;
+    /** The @b optional bytes of the sketch each fetched sequence is sketched into as it lands, for
+     *  the walk seeding every search, a multiple of four; zero keeps the checkpoint's. */
+    size_t sketch_bytes;
 } usearch_sequence_view_nvme_t;
 
 /**
@@ -623,15 +650,13 @@ typedef struct usearch_sequence_view_nvme_t {
  *  @par Statuses:
  *  - @c usearch_status_device_k @c executor is not an NVMe executor.
  *  - @c usearch_status_invalid_argument_k An empty @c path, @c NULL paths for a nonzero count, a
- *    path that does not parse or names a base off its medium's block, @c weights without a
- *    substitution matrix, or a @c cpu_class_ceiling no class takes.
+ *    path that does not parse or names a base off its medium's block, or a @c cpu_class_ceiling
+ *    no class takes.
  *  - @c usearch_status_malformed_k The manifest names no part, or a manifest, header, row
- *    directory or the recorded costs do not parse.
+ *    directory or the recorded costs and byte classes do not parse.
  *  - @c usearch_status_unknown_kind_k A checkpoint of an unknown metric.
  *  - @c usearch_status_config_mismatch_k Parts disagreeing with this index's values, keys, node
- *    IDs or metric, or with @c nvme, @c weights for a checkpoint of another kind than
- *    Needleman-Wunsch or folding into more than 32 classes, a negative gap or a pair above its
- *    mean self-score, or a Needleman-Wunsch checkpoint recording no costs and given no weights.
+ *    IDs or metric, or with @c nvme.
  *  - @c usearch_status_unsupported_k A @c cpu_class_ceiling below every class compiled here.
  *  - @c usearch_status_uninitialized_k The executor holds no threads or pool workers.
  *  - @c usearch_status_contended_k Another call holds the executor, or its pool runs another
@@ -724,7 +749,8 @@ typedef struct usearch_sequence_insert_t {
     /** The identities to admit the sequences under, one per sequence. */
     usearch_keys_view_t keys;
 
-    /** The sequences, as bytes end to end around @c count + 1 offsets. */
+    /** The sequences, as bytes end to end around @c count + 1 offsets, which the index stores
+     *  folded as its metric folds them. */
     usearch_tape_view_t sequences;
 
     /** The @b optional breadth of the candidates the build walk explores - the @c ef of the
@@ -919,7 +945,8 @@ typedef struct usearch_sequence_search_t {
     /** Queries to resolve; the outputs have @c count rows of @c wanted entries. */
     size_t count;
 
-    /** The queries, as bytes end to end around @c count + 1 offsets. */
+    /** The queries, as bytes end to end around @c count + 1 offsets, folded as the index folds
+     *  the sequences it stores. */
     usearch_tape_view_t queries;
 
     /** Output for the run, inside @c arena. */
@@ -935,12 +962,18 @@ typedef struct usearch_sequence_search_t {
      *  zero derives, a scan ignores it. */
     size_t expansion_factor;
 
-    /** How entries are reached: a walk, the default, or an exact scan of every entry, on RAM and
-     *  NVMe. */
+    /** How entries are reached: a walk, the default, or an exact scan of every entry. */
     usearch_traversal_t traversal;
 
     /** The @b optional predicate, asked about a batch of candidates at a time. */
     usearch_predicate_t predicate;
+
+    /** The @b optional keys each query's walk starts from ahead of its random landmarks, one row of
+     *  @c counts[query] keys per query, as a search writes its matches, at most one per landmark a
+     *  walk draws, a neighbor list's worth; scores are not read, a scan ignores them, and keys no
+     *  entry holds are skipped and counted in @c stats. RAM walks alone take them, and other
+     *  residencies answer @c usearch_status_unsupported_k. */
+    usearch_matches_view_t const* hints;
 
     /** The @b optional handler, called with queries resolved and their count. */
     usearch_progress_t progress;
@@ -962,11 +995,19 @@ typedef struct usearch_sequence_search_t {
  *  predicate judges far more keys than @c wanted, every scored candidate, asked about a batch of
  *  them at a time, so it belongs on the caller's fast path.
  *
+ *  A metric keeping a sketch walks twice on every residency: first by the sketches, unfiltered,
+ *  then by its canonical score from the nearest entries that walk found, as many as a neighbor
+ *  list holds, with the predicate. @c hints hand both walks landmarks the caller already trusts,
+ *  such as the matches of the same keys in a cheaper index, ahead of the sketch walk's.
+ *
  *  A cancelled search reports @c usearch_status_cancelled_k and leaves @c matches @c NULL.
  *
  *  @par Statuses:
  *  - @c usearch_status_unknown_kind_k A @c traversal other than a walk or a scan.
- *  - @c usearch_status_unsupported_k A scan of a VRAM handle, or a @c predicate on one.
+ *  - @c usearch_status_unsupported_k A @c predicate on a VRAM handle, or @c hints on any handle but
+ *    a RAM one.
+ *  - @c usearch_status_invalid_argument_k @c hints naming no counts, or columns but no keys.
+ *  - @c usearch_status_shape_mismatch_k A hinted query counts more keys than the hints' columns.
  */
 USEARCH_EXPORT void usearch_sequence_search(usearch_sequence_search_t* arguments);
 
@@ -1038,8 +1079,8 @@ typedef struct usearch_sequence_get_t {
     /** The key whose entries are exported. */
     usearch_key_t key;
 
-    /** Output for the tape inside @c arena: entries' bytes end to end, never terminated, around
-     *  @c written + 1 offsets. */
+    /** Output for the tape inside @c arena: entries' bytes end to end in their stored form, never
+     *  terminated, around @c written + 1 offsets. */
     usearch_tape_view_t* sequences;
 
     /** The @b optional output for the entries written; zero when the key is absent. */
@@ -1053,7 +1094,9 @@ typedef struct usearch_sequence_get_t {
  *  @brief Retrieves every sequence stored under one key as an Apache Arrow tape, in insertion order -
  *      one call, however many and however long they turn out to be.
  *
- *  An absent key leaves the tape's pointers @c NULL.
+ *  An absent key leaves the tape's pointers @c NULL. Each sequence comes back as the metric
+ *  stored it, never as the bytes its insertion passed: packed class codes, one class code a byte,
+ *  or case-folded UTF-8.
  *
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k A @c NULL @c arena.
@@ -1485,11 +1528,18 @@ USEARCH_EXPORT void usearch_sequence_save_buffer(usearch_sequence_save_buffer_t*
 /** The metric and geometry a checkpoint froze - everything a reader learns without opening it. */
 typedef struct usearch_sequence_metadata_t {
 
-    /** The scoring kind the checkpoint was built under. */
+    /** The metric the checkpoint was built under. */
     usearch_sequence_metric_t metric;
 
     /** Connections per node the graph was built with. */
     size_t connectivity;
+
+    /** Classes the recorded costs folded bytes into; zero for a containment. */
+    size_t classes;
+
+    /** Bytes of the sketch in front of each stored sequence; zero for a DNA overlap, which keeps
+     *  none, and for a checkpoint naming none, which takes the metric's default. */
+    size_t sketch_bytes;
 } usearch_sequence_metadata_t;
 
 /** The arguments of @c usearch_sequence_metadata_read. */

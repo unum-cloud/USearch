@@ -178,7 +178,8 @@ int checkpoints_metadata(world_t& world, int argc, char const* const* argv) {
         if (piped) sequence_verbs_t::metadata_read_buffer(executor, buffer, &metadata, &outcome);
         else usearch_sequence_metadata_read(&read);
         if (report_failure(outcome, "reading {}", address)) return EXIT_FAILURE;
-        fmt::println("sequence: connectivity {}", metadata.connectivity);
+        fmt::println("sequence: {}, connectivity {}, sketch bytes {}", usearch_sequence_metric_name(metadata.metric),
+                     metadata.connectivity, metadata.sketch_bytes);
         return EXIT_SUCCESS;
     }
     case checkpoints_modality_t::shapes_k: {

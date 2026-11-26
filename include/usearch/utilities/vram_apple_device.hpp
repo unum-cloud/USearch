@@ -1275,6 +1275,7 @@ struct metal_traversal_context {
         block.changed_nodes = words[metal_changed_k];
         block.tail_compactions = metal_tally(words, metal_tail_compactions_k);
         block.tail_dropped = metal_tally(words, metal_tail_dropped_k);
+        block.sketched = metal_tally(words, metal_sketched_k);
         return block;
     }
 

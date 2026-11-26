@@ -1,5 +1,5 @@
-//! The sequence modality - Sequence Search over byte strings, UTF-8 text, DNA, RNA and proteins,
-//! under edit distances and alignments.
+//! The sequence modality - Sequence Search over proteins under alignment, DNA and RNA under shifted
+//! overlap, and UTF-8 text under window containment.
 //!
 //! `SequenceIndex` is the handle; `TapeView` is the batch currency every verb reads, the bytes of
 //! every sequence end to end around one more offset than entries, as an Apache Arrow `Binary`
@@ -60,24 +60,32 @@ const usearch_vram_options_t = types.abi.vram_options_t;
 extern fn usearch_sequence_metric_name(metric: SequenceMetric) [*:0]const u8;
 extern fn usearch_sequence_metric_from_name(name: BytesView, metric: *SequenceMetric) Status;
 
-/// The sequence kinds: edit distances over bytes or code points, a weighted alignment, and the
-/// overlap of fixed-width windows. Mirrors `usearch_sequence_metric_t`.
+/// The sequence metrics: what the sequences are, the form they are stored in, and the score ranking
+/// them. Every metric stores a sequence folded, and a get returns the stored form, never the bytes
+/// an insertion passed. Mirrors `usearch_sequence_metric_t`.
 ///
 /// Non-exhaustive, so a kind a newer engine reports arrives intact rather than coerced.
 pub const SequenceMetric = enum(c_int) {
     /// No kind named - an unset field, refused by every constructor.
     unknown = 0,
-    /// Edits between two byte strings, each insertion, deletion or substitution counting one.
-    levenshtein_bytes = 1,
-    /// Edits between two UTF-8 strings, counted over code points rather than bytes.
-    levenshtein_utf8 = 2,
-    /// The global alignment under `SequenceWeights`, every unaligned symbol charged the gap cost.
-    needleman_wunsch = 3,
-    /// The share of the larger window set the other side misses, over the frozen window widths.
-    overlap = 4,
+    /// Global alignment of proteins with linear gaps: BLOSUM62 with a gap of 7 over the 20 amino
+    /// acids, B, Z, X and the stop in either case, any other byte as X, unless the index names its
+    /// own costs. A stored sequence reads back as its class codes, five bits apiece, little-endian
+    /// behind one byte counting the slots the last bytes leave unused.
+    protein_alignment = 1,
+    /// Shifted overlap of DNA or RNA: the cost of aligning two sequences where one slides over the
+    /// other, at the shift most windows of 12 and 19 symbols vote for, on either strand. Bytes fold
+    /// into the classes of A, C, G and T in either case, U read as T and any other byte as T. A
+    /// stored sequence reads back as its class codes, one byte apiece.
+    dna_overlap = 2,
+    /// Window containment of UTF-8 text: the share of the query's distinct windows of 5 and 8
+    /// bytes the stored side lacks, whatever the case. Text is case-folded before it is stored or
+    /// scored, which may lengthen it up to three times, and a stored text reads back folded.
+    /// Takes no costs.
+    utf8_containment = 3,
     _,
 
-    /// The canonical spelling, as `.levenshtein_bytes` spells "levenshtein".
+    /// The canonical spelling, as `.protein_alignment` spells "protein-alignment".
     /// Calls `usearch_sequence_metric_name`.
     pub fn name(self: SequenceMetric) [:0]const u8 {
         return std.mem.span(usearch_sequence_metric_name(self));
@@ -91,41 +99,45 @@ pub const SequenceMetric = enum(c_int) {
     }
 };
 
-/// The weights `.needleman_wunsch` scores with; the Levenshtein kinds refuse any.
-/// Mirrors `usearch_sequence_weights_t`.
-pub const SequenceWeights = extern struct {
-    /// Signed scores of every byte against every byte, row-major.
-    substitution_matrix: *const [256][256]i8,
+/// How alike two bytes are, and the cost of leaving one unaligned, where an index scores by other
+/// costs than its metric's own. Similarities fold bytes sharing their rows and columns into at most
+/// 32 classes; a DNA overlap needs costs folding bytes into exactly four classes holding A, C, G
+/// and T apart. A checkpoint records the costs, so loads and views take none. Mirrors
+/// `usearch_sequence_costs_t`.
+pub const SequenceCosts = extern struct {
+    /// Signed similarities of every raw byte against every raw byte, row-major.
+    similarities: *const [256][256]i8,
     /// Cost of one unaligned symbol.
-    gap: i8 = 0,
+    gap: i8,
 };
 
 /// The kind and graph an empty index freezes - what `SequenceIndex.initRam` and `initVram` read
 /// beside their placement. Binding-only.
 pub const SequenceOptions = struct {
-    /// The kind every pair is scored under.
-    metric: SequenceMetric = .levenshtein_bytes,
-    /// The weights an alignment kind needs; null for the Levenshtein kinds, which refuse any.
-    weights: ?*const SequenceWeights = null,
-    /// Window widths in bytes for the overlap kind, which needs at least one; every other kind
-    /// refuses any.
-    window_widths: []const usize = &.{},
+    /// What the sequences are and the score ranking them.
+    metric: SequenceMetric = .protein_alignment,
+    /// The optional costs; null for the metric's own, and refused for `.utf8_containment`.
+    costs: ?*const SequenceCosts = null,
     /// The optional connections-per-node bound; zero derives.
     connectivity: usize = 0,
+    /// Bytes of the sketch in front of each stored sequence, a multiple of four; zero takes the
+    /// metric's default, and `.dna_overlap` keeps none and refuses any.
+    sketch_bytes: usize = 0,
     /// Upper bound on entries sharing one key; zero is unbounded.
     values_per_key: usize = 0,
 };
 
 /// The kind and graph a checkpoint froze - everything a reader learns without opening it.
 /// Mirrors `usearch_sequence_metadata_t`.
-///
-/// The weights are absent because a checkpoint records costs rather than the matrix, so every
-/// load and view of an alignment checkpoint names them again.
 pub const SequenceMetadata = extern struct {
     /// The kind the checkpoint scores with.
     metric: SequenceMetric = .unknown,
     /// Connections per node the graph was built with.
     connectivity: usize = 0,
+    /// Classes the recorded costs folded bytes into; zero for a containment.
+    classes: usize = 0,
+    /// Bytes of the sketch in front of each stored sequence; zero when the metric keeps none.
+    sketch_bytes: usize = 0,
 };
 
 /// A live index's state, reported by `SequenceIndex.describe`. Each counter is read once, so under
@@ -196,8 +208,6 @@ pub const SequenceLoadRamConfig = struct {
     memory_domains: []const i32 = &.{},
     /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     values_per_key: usize = 0,
-    /// The weights an alignment checkpoint was built with; null for the Levenshtein kinds.
-    weights: ?*const SequenceWeights = null,
     /// Called with shards placed; a stopped load creates no index.
     progress: ProgressCallback = .{},
     /// Reports the call makes at most, the last at completion; zero derives to ten.
@@ -214,8 +224,6 @@ pub const SequenceLoadVramConfig = struct {
     devices: []const i32 = &.{},
     /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     values_per_key: usize = 0,
-    /// The weights an alignment checkpoint was built with; null for the Levenshtein kinds.
-    weights: ?*const SequenceWeights = null,
     /// Called with shards placed; a stopped load creates no index.
     progress: ProgressCallback = .{},
     /// Reports the call makes at most, the last at completion; zero derives to ten.
@@ -232,8 +240,6 @@ pub const SequenceLoadRamBufferConfig = struct {
     memory_domains: []const i32 = &.{},
     /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     values_per_key: usize = 0,
-    /// The weights an alignment checkpoint was built with; null for the Levenshtein kinds.
-    weights: ?*const SequenceWeights = null,
     /// Called with bytes placed; a stopped load creates no index.
     progress: ProgressCallback = .{},
     /// Reports the call makes at most, the last at completion; zero derives to ten.
@@ -250,8 +256,6 @@ pub const SequenceLoadVramBufferConfig = struct {
     devices: []const i32 = &.{},
     /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     values_per_key: usize = 0,
-    /// The weights an alignment checkpoint was built with; null for the Levenshtein kinds.
-    weights: ?*const SequenceWeights = null,
     /// Called with bytes placed; a stopped load creates no index.
     progress: ProgressCallback = .{},
     /// Reports the call makes at most, the last at completion; zero derives to ten.
@@ -266,8 +270,6 @@ pub const SequenceViewNvmeConfig = struct {
     executor: ?Executor = null,
     /// The devices the parts are served from; empty serves each where its manifest points.
     paths: []const BytesView = &.{},
-    /// The weights an alignment checkpoint was built with; null for the Levenshtein kinds.
-    weights: ?*const SequenceWeights = null,
     /// Where the call's final outcome, its static message included, is copied; null copies nothing.
     diagnostics: ?*Outcome = null,
 };
@@ -343,10 +345,9 @@ const usearch_sequence_init_ram_t = extern struct {
     index: *?*anyopaque,
     outcome: *Outcome,
     metric: SequenceMetric,
-    weights: ?*const SequenceWeights,
-    window_widths: ?[*]const usize,
-    window_widths_count: usize,
+    costs: ?*const SequenceCosts,
     connectivity: usize,
+    sketch_bytes: usize,
     values_per_key: usize,
     ram: usearch_ram_options_t,
 };
@@ -355,10 +356,9 @@ const usearch_sequence_init_vram_t = extern struct {
     index: *?*anyopaque,
     outcome: *Outcome,
     metric: SequenceMetric,
-    weights: ?*const SequenceWeights,
-    window_widths: ?[*]const usize,
-    window_widths_count: usize,
+    costs: ?*const SequenceCosts,
     connectivity: usize,
+    sketch_bytes: usize,
     values_per_key: usize,
     vram: usearch_vram_options_t,
 };
@@ -371,8 +371,8 @@ const usearch_sequence_load_ram_t = extern struct {
     path: BytesView,
     ram: usearch_ram_options_t,
     connectivity: usize,
+    sketch_bytes: usize,
     values_per_key: usize,
-    weights: ?*const SequenceWeights,
     progress: usearch_progress_t,
 };
 
@@ -384,8 +384,8 @@ const usearch_sequence_load_ram_buffer_t = extern struct {
     buffer: BytesView,
     ram: usearch_ram_options_t,
     connectivity: usize,
+    sketch_bytes: usize,
     values_per_key: usize,
-    weights: ?*const SequenceWeights,
     progress: usearch_progress_t,
 };
 
@@ -397,8 +397,8 @@ const usearch_sequence_load_vram_t = extern struct {
     path: BytesView,
     vram: usearch_vram_options_t,
     connectivity: usize,
+    sketch_bytes: usize,
     values_per_key: usize,
-    weights: ?*const SequenceWeights,
     progress: usearch_progress_t,
 };
 
@@ -410,8 +410,8 @@ const usearch_sequence_load_vram_buffer_t = extern struct {
     buffer: BytesView,
     vram: usearch_vram_options_t,
     connectivity: usize,
+    sketch_bytes: usize,
     values_per_key: usize,
-    weights: ?*const SequenceWeights,
     progress: usearch_progress_t,
 };
 
@@ -419,7 +419,6 @@ const usearch_sequence_view_ram_t = extern struct {
     index: *?*anyopaque,
     outcome: *Outcome,
     path: BytesView,
-    weights: ?*const SequenceWeights,
     ram: usearch_ram_options_t = .{},
 };
 
@@ -430,7 +429,7 @@ const usearch_sequence_view_nvme_t = extern struct {
     completion: Completion,
     path: BytesView,
     nvme: usearch_nvme_options_t,
-    weights: ?*const SequenceWeights,
+    sketch_bytes: usize = 0,
 };
 
 const usearch_sequence_reserve_t = extern struct {
@@ -510,6 +509,7 @@ const usearch_sequence_search_t = extern struct {
     expansion_factor: usize,
     traversal: Traversal,
     predicate: Predicate,
+    hints: ?*const usearch_matches_view_t = null,
     progress: usearch_progress_t,
     stats: ?*DenseTraversalStats,
 };
@@ -677,7 +677,7 @@ extern fn usearch_sequence_metadata_read(arguments: *usearch_sequence_metadata_r
 extern fn usearch_sequence_metadata_read_buffer(arguments: *usearch_sequence_metadata_read_buffer_t) void;
 extern fn usearch_sequence_describe(arguments: *usearch_sequence_describe_t) void;
 
-/// Sequence Search Index over variable-length byte strings.
+/// Sequence Search Index over variable-length sequences.
 ///
 /// A handle is shareable across threads: searches never write to the graph, and insertions
 /// synchronize through per-node locks and publish in order. It is the `Executor` that orders,
@@ -686,17 +686,17 @@ extern fn usearch_sequence_describe(arguments: *usearch_sequence_describe_t) voi
 /// ```zig
 /// const usearch = @import("usearch");
 ///
-/// var index = try usearch.SequenceIndex.initRam(.{ .metric = .levenshtein_utf8 }, &.{});
+/// var index = try usearch.SequenceIndex.initRam(.{ .metric = .utf8_containment }, &.{});
 /// defer index.deinit();
 ///
 /// const keys = [_]usearch.Key{ .fromInteger(1), .fromInteger(2) };
-/// const offsets = [_]u64{ 0, 6, 13 };
-/// try index.insert(&keys, try .of(u8, u64, "kittensitting", &offsets), .{});
+/// const offsets = [_]u64{ 0, 19, 29 };
+/// try index.insert(&keys, try .of(u8, u64, "The quick brown foxA lazy dog", &offsets), .{});
 ///
 /// var arena = try usearch.Arena.init(null);
 /// defer arena.deinit();
-/// const query = [_]u64{ 0, 6 };
-/// const matches = try index.search(try .of(u8, u64, "sittin", &query), 1, &arena, .{});
+/// const query = [_]u64{ 0, 9 };
+/// const matches = try index.search(try .of(u8, u64, "BROWN FOX", &query), 1, &arena, .{});
 /// const nearest = (try matches.query(0)).keys[0];
 /// ```
 pub const SequenceIndex = extern struct {
@@ -743,10 +743,9 @@ pub const SequenceIndex = extern struct {
             .index = &handle,
             .outcome = &outcome,
             .metric = options.metric,
-            .weights = options.weights,
-            .window_widths = options.window_widths.ptr,
-            .window_widths_count = options.window_widths.len,
+            .costs = options.costs,
             .connectivity = options.connectivity,
+            .sketch_bytes = options.sketch_bytes,
             .values_per_key = options.values_per_key,
             .ram = .of(memory_domains),
         };
@@ -763,10 +762,9 @@ pub const SequenceIndex = extern struct {
             .index = &handle,
             .outcome = &outcome,
             .metric = options.metric,
-            .weights = options.weights,
-            .window_widths = options.window_widths.ptr,
-            .window_widths_count = options.window_widths.len,
+            .costs = options.costs,
             .connectivity = options.connectivity,
+            .sketch_bytes = options.sketch_bytes,
             .values_per_key = options.values_per_key,
             .vram = .of(devices),
         };
@@ -789,8 +787,8 @@ pub const SequenceIndex = extern struct {
             .path = .of(path),
             .ram = .of(config.memory_domains),
             .connectivity = 0,
+            .sketch_bytes = 0,
             .values_per_key = config.values_per_key,
-            .weights = config.weights,
             .progress = .of(config.progress, config.progress_steps),
         };
         usearch_sequence_load_ram(&arguments);
@@ -810,8 +808,8 @@ pub const SequenceIndex = extern struct {
             .path = .of(path),
             .vram = .of(config.devices),
             .connectivity = 0,
+            .sketch_bytes = 0,
             .values_per_key = config.values_per_key,
-            .weights = config.weights,
             .progress = .of(config.progress, config.progress_steps),
         };
         usearch_sequence_load_vram(&arguments);
@@ -831,8 +829,8 @@ pub const SequenceIndex = extern struct {
             .buffer = .of(buffer),
             .ram = .of(config.memory_domains),
             .connectivity = 0,
+            .sketch_bytes = 0,
             .values_per_key = config.values_per_key,
-            .weights = config.weights,
             .progress = .of(config.progress, config.progress_steps),
         };
         usearch_sequence_load_ram_buffer(&arguments);
@@ -852,8 +850,8 @@ pub const SequenceIndex = extern struct {
             .buffer = .of(buffer),
             .vram = .of(config.devices),
             .connectivity = 0,
+            .sketch_bytes = 0,
             .values_per_key = config.values_per_key,
-            .weights = config.weights,
             .progress = .of(config.progress, config.progress_steps),
         };
         usearch_sequence_load_vram_buffer(&arguments);
@@ -861,12 +859,11 @@ pub const SequenceIndex = extern struct {
     }
 
     /// Serves a checkpoint in place through a memory mapping, as a read-only index whose mutating
-    /// verbs report `Error.ReadOnly`; an alignment checkpoint names its `weights` again.
-    /// Calls `usearch_sequence_view_ram`.
-    pub fn viewRam(path: []const u8, weights: ?*const SequenceWeights) Error!SequenceIndex {
+    /// verbs report `Error.ReadOnly`. Calls `usearch_sequence_view_ram`.
+    pub fn viewRam(path: []const u8) Error!SequenceIndex {
         var handle: ?*anyopaque = null;
         var outcome: Outcome = .{};
-        var arguments: usearch_sequence_view_ram_t = .{ .index = &handle, .outcome = &outcome, .path = .of(path), .weights = weights };
+        var arguments: usearch_sequence_view_ram_t = .{ .index = &handle, .outcome = &outcome, .path = .of(path) };
         usearch_sequence_view_ram(&arguments);
         return adopt(handle, outcome, null);
     }
@@ -883,7 +880,6 @@ pub const SequenceIndex = extern struct {
             .completion = .blocking,
             .path = .of(path),
             .nvme = .of(config.paths),
-            .weights = config.weights,
         };
         usearch_sequence_view_nvme(&arguments);
         return adopt(handle, outcome, config.diagnostics);
@@ -1441,10 +1437,10 @@ pub const SequenceCursor = struct {
 };
 
 test "metrics keep the values the linked library spells them by" {
-    inline for (.{ "levenshtein", "levenshtein-utf8", "needleman-wunsch", "overlap" }, 1..) |spelling, value| {
-        const metric: SequenceMetric = @enumFromInt(value);
-        try std.testing.expectEqualStrings(spelling, metric.name());
-        try std.testing.expectEqual(@as(?SequenceMetric, metric), SequenceMetric.fromName(spelling));
+    inline for (.{ .{ "protein-alignment", 1 }, .{ "dna-overlap", 2 }, .{ "utf8-containment", 3 } }) |pair| {
+        const metric: SequenceMetric = @enumFromInt(pair[1]);
+        try std.testing.expectEqualStrings(pair[0], metric.name());
+        try std.testing.expectEqual(@as(?SequenceMetric, metric), SequenceMetric.fromName(pair[0]));
     }
     try std.testing.expectEqual(@as(?SequenceMetric, null), SequenceMetric.fromName("hamming"));
 }
@@ -1475,11 +1471,11 @@ test { // analyze every declaration, the methods on each handle included
 test "sequences cross as one tape, and each search finds its own entry first" {
     var executor = try Executor.forRam(.{ .threads = 2 });
     defer executor.deinit();
-    var index = try SequenceIndex.initRam(.{ .metric = .levenshtein_utf8 }, &.{});
+    var index = try SequenceIndex.initRam(.{ .metric = .utf8_containment }, &.{});
     defer index.deinit();
     try index.on(executor).reserve(3, 0);
     const description = try index.describe();
-    try std.testing.expectEqual(SequenceMetric.levenshtein_utf8, description.metadata.metric);
+    try std.testing.expectEqual(SequenceMetric.utf8_containment, description.metadata.metric);
     try std.testing.expectEqual(@as(usize, 0), description.size);
 
     const keys = [_]Key{ .fromInteger(1), .fromInteger(2), .fromInteger(3) };
@@ -1500,9 +1496,8 @@ test "sequences cross as one tape, and each search finds its own entry first" {
         try std.testing.expectEqual(@as(f64, 0), (try matches.query(query)).scores[0]);
     }
     const nearly = [_]u64{ 0, 6 };
-    const near = try index.search(try .of(u8, u64, "sittin", &nearly), 1, &arena, .{});
+    const near = try index.search(try .of(u8, u64, "SITTIN", &nearly), 1, &arena, .{});
     try std.testing.expectEqual(keys[1], (try near.query(0)).keys[0]);
-    try std.testing.expectEqual(@as(f64, 1), (try near.query(0)).scores[0]);
 
     const stats = try index.on(executor).count(keys[1]);
     try std.testing.expectEqual(SequenceKeyStats{ .entries = 1, .total_bytes = 7, .largest_bytes = 7 }, stats);
@@ -1539,7 +1534,7 @@ test "sequences cross as one tape, and each search finds its own entry first" {
     var loaded = try SequenceIndex.loadRam(checkpoint, .{ .executor = executor });
     defer loaded.deinit();
     try std.testing.expectEqual(@as(usize, 1), (try loaded.count(keys[0])).entries);
-    if (SequenceIndex.viewRam(checkpoint, null)) |opened| {
+    if (SequenceIndex.viewRam(checkpoint)) |opened| {
         var mapped = opened;
         defer mapped.deinit();
         try std.testing.expectError(Error.ReadOnly, mapped.insert(keys[0..1], try .of(u8, u64, "kitten", offsets[0..2]), .{}));
@@ -1550,6 +1545,61 @@ test "sequences cross as one tape, and each search finds its own entry first" {
     const draws = try index.on(executor).sample(2, &arena, .{ .seed = 42 });
     try std.testing.expect(draws.written <= 2);
     try std.testing.expectEqual(draws.written, (try draws.coordinates()).len);
+}
+
+test "an overlap finds a read from its reverse complement at distance zero" {
+    var index = try SequenceIndex.initRam(.{ .metric = .dna_overlap }, &.{});
+    defer index.deinit();
+
+    const keys = [_]Key{ .fromInteger(1), .fromInteger(2), .fromInteger(3) };
+    const reads = "ACGTTGCAAGGCTTAACCGGTTACGATCGA" ++ "GGCTTAACCGGTTACGATCGATTTGCAGCA" ++ "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTT";
+    const offsets = [_]u64{ 0, 30, 60, 90 };
+    try index.insert(&keys, try .of(u8, u64, reads, &offsets), .{});
+    var arena: Arena = try .init(null);
+    defer arena.deinit();
+    const query = [_]u64{ 0, 30 };
+    const matches = try index.search(try .of(u8, u64, "TGCTGCAAATCGATCGTAACCGGTTAAGCC", &query), 2, &arena, .{});
+    try std.testing.expectEqual(keys[1], (try matches.query(0)).keys[0]);
+    try std.testing.expectEqual(@as(f64, 0), (try matches.query(0)).scores[0]);
+}
+
+test "an alignment under costs ranks a near substitution above a far one" {
+    var similarities = std.mem.zeroes([256][256]i8);
+    for ("ACGT") |base| similarities[base][base] = 4;
+    similarities['A']['G'] = 3;
+    similarities['G']['A'] = 3;
+    const costs: SequenceCosts = .{ .similarities = &similarities, .gap = 4 };
+    var index = try SequenceIndex.initRam(.{ .costs = &costs }, &.{});
+    defer index.deinit();
+
+    const keys = [_]Key{ .fromInteger(1), .fromInteger(2) };
+    const offsets = [_]u64{ 0, 12, 24 };
+    try index.insert(&keys, try .of(u8, u64, "GCGTTGCAACGT" ++ "CCGTTGCAACGT", &offsets), .{});
+    var arena: Arena = try .init(null);
+    defer arena.deinit();
+    const query = [_]u64{ 0, 12 };
+    const matches = try index.search(try .of(u8, u64, "ACGTTGCAACGT", &query), 2, &arena, .{});
+    try std.testing.expectEqual(keys[0], (try matches.query(0)).keys[0]);
+    try std.testing.expect((try matches.query(0)).scores[0] < (try matches.query(0)).scores[1]);
+}
+
+test "a containment over text finds the entry holding the query, and takes no costs" {
+    var index = try SequenceIndex.initRam(.{ .metric = .utf8_containment }, &.{});
+    defer index.deinit();
+
+    const keys = [_]Key{ .fromInteger(1), .fromInteger(2) };
+    const first = "the quick brown fox jumps over the lazy dog";
+    const second = "a journey of a thousand miles begins with a single step";
+    const offsets = [_]u64{ 0, first.len, first.len + second.len };
+    try index.insert(&keys, try .of(u8, u64, first ++ second, &offsets), .{});
+    var arena: Arena = try .init(null);
+    defer arena.deinit();
+    const query = [_]u64{ 0, 15 };
+    const matches = try index.search(try .of(u8, u64, "BROWN FOX jumps", &query), 2, &arena, .{});
+    try std.testing.expectEqual(keys[0], (try matches.query(0)).keys[0]);
+
+    const costs: SequenceCosts = .{ .similarities = &std.mem.zeroes([256][256]i8), .gap = 1 };
+    try std.testing.expectError(Error.ConfigMismatch, SequenceIndex.initRam(.{ .metric = .utf8_containment, .costs = &costs }, &.{}));
 }
 
 test "a sequence refine keeps a stopped round in a plan, and a reshard refuses what it cannot move" {

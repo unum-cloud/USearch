@@ -233,32 +233,6 @@ static usearch_status_t paths_from_store(WolframLibraryData library_data, MArgum
     return usearch_status_success_k;
 }
 
-/**
- *  @brief Reads a @c DataStore of non-negative integers as sizes - window widths - into a fresh
- *      array, which the caller frees.
- *  @return @c usearch_status_invalid_argument_k for an entry of another type or sign.
- */
-static usearch_status_t sizes_from_store(WolframLibraryData library_data, MArgument argument, size_t** sizes,
-                                         size_t* count) {
-    DataStore const store = MArgument_getDataStore(argument);
-    WolframIOLibrary_Functions const io = library_data->ioLibraryFunctions;
-    *count = (size_t)io->DataStore_getLength(store);
-    *sizes = (size_t*)malloc(sizeof(size_t) * (*count ? *count : 1));
-    if (!*sizes) return usearch_status_out_of_memory_k;
-    size_t position = 0;
-    for (DataStoreNode node = io->DataStore_getFirstNode(store); node; node = io->DataStoreNode_getNextNode(node)) {
-        MArgument cell;
-        if (io->DataStoreNode_getDataType(node) != MType_Integer || io->DataStoreNode_getData(node, &cell) != 0 ||
-            MArgument_getInteger(cell) < 0) {
-            free(*sizes);
-            *sizes = NULL;
-            return usearch_status_invalid_argument_k;
-        }
-        (*sizes)[position++] = (size_t)MArgument_getInteger(cell);
-    }
-    return usearch_status_success_k;
-}
-
 /** Reads a byte array as a viewed buffer - the monolith the buffer verbs take. */
 static usearch_status_t buffer_from_array(WolframLibraryData library_data, MNumericArray array,
                                           usearch_bytes_view_t* buffer) {
@@ -2467,11 +2441,13 @@ static int answer_geospatial_count(WolframLibraryData library_data, call_t* call
     return LIBRARY_NO_ERROR;
 }
 
-/** Adds a sequence checkpoint's frozen metric and connectivity. */
+/** Adds a sequence checkpoint's frozen metric, connectivity, classes and sketch bytes. */
 static void store_sequence_metadata(WolframLibraryData library_data, DataStore store,
                                     usearch_sequence_metadata_t const* metadata) {
     store_text(library_data, store, "Metric", usearch_sequence_metric_name(metadata->metric));
     store_size(library_data, store, "Connectivity", metadata->connectivity);
+    store_size(library_data, store, "Classes", metadata->classes);
+    store_size(library_data, store, "SketchBytes", metadata->sketch_bytes);
 }
 
 /** Adds a shapes checkpoint's frozen metric, quantization, points and connectivity. */
@@ -2531,23 +2507,27 @@ static void** fresh_slot(WolframLibraryData library_data, handles_t const* famil
 }
 
 /**
- *  @brief Reads the weights an alignment kind scores with: whether any are named, a 256×256
- *      @c Integer8 substitution matrix, and the gap cost.
+ *  @brief Reads the costs: whether similarities are named, a 256×256 @c Integer8 matrix of
+ *      similarities between raw bytes, and the gap cost.
+ *
  *  @return @c usearch_status_shape_mismatch_k for a matrix of another shape, which the library
- *      cannot see, as it reads a fixed 256×256.
+ *      cannot see, as it reads fixed extents, and @c usearch_status_invalid_argument_k for a gap
+ *      beside no similarities.
  */
-static usearch_status_t weights_from_arguments(WolframLibraryData library_data, MArgument const* arguments,
-                                               usearch_sequence_weights_t* weights, int* named) {
-    *named = MArgument_getBoolean(arguments[0]);
-    if (!*named) return usearch_status_success_k;
+static usearch_status_t costs_from_arguments(WolframLibraryData library_data, MArgument const* arguments,
+                                             usearch_sequence_costs_t* costs, int* named) {
     WolframNumericArrayLibrary_Functions const arrays = library_data->numericarrayLibraryFunctions;
+    mint const gap = MArgument_getInteger(arguments[2]);
+    if (gap < INT8_MIN || gap > INT8_MAX) return usearch_status_invalid_argument_k;
+    *named = MArgument_getBoolean(arguments[0]);
+    if (!*named) return gap ? usearch_status_invalid_argument_k : usearch_status_success_k;
     MNumericArray const matrix = MArgument_getMNumericArray(arguments[1]);
     mint const* const extents = arrays->MNumericArray_getDimensions(matrix);
     if (arrays->MNumericArray_getType(matrix) != MNumericArray_Type_Bit8 ||
         arrays->MNumericArray_getRank(matrix) != 2 || extents[0] != 256 || extents[1] != 256)
         return usearch_status_shape_mismatch_k;
-    weights->substitution_matrix = (int8_t const*)arrays->MNumericArray_getData(matrix);
-    weights->gap = (int8_t)MArgument_getInteger(arguments[2]);
+    costs->similarities = (int8_t const*)arrays->MNumericArray_getData(matrix);
+    costs->gap = (int8_t)gap;
     return usearch_status_success_k;
 }
 
@@ -2568,7 +2548,7 @@ static int sequence_adopt(WolframLibraryData library_data, void** slot, usearch_
 }
 
 /** Calls @c usearch_sequence_init_ram or @c usearch_sequence_init_vram: @c index → @c metric →
- *  whether weights are named → @c substitutionMatrix → @c gap → @c windowWidths → @c connectivity →
+ *  whether similarities are named → @c similarities → @c gap → @c connectivity → @c sketchBytes →
  *  @c valuesPerKey → the memory domains or devices. */
 static int sequence_init(WolframLibraryData library_data, MArgument const* arguments, MArgument result, int vram) {
     int answered = LIBRARY_NO_ERROR;
@@ -2578,23 +2558,19 @@ static int sequence_init(WolframLibraryData library_data, MArgument const* argum
     usearch_status_t const named = sequence_metric_from_argument(library_data, arguments[1], &metric);
     if (named != usearch_status_success_k)
         return answer_failure(library_data, named, "the metric names no kind", result);
-    usearch_sequence_weights_t weights = {0};
-    int weighted = 0;
-    if (weights_from_arguments(library_data, arguments + 2, &weights, &weighted) != usearch_status_success_k)
-        return answer_failure(library_data, usearch_status_shape_mismatch_k,
-                              "a substitution matrix is a 256 by 256 Integer8 array", result);
-    size_t* widths = NULL;
-    size_t widths_count = 0;
-    usearch_status_t read = sizes_from_store(library_data, arguments[5], &widths, &widths_count);
+    usearch_sequence_costs_t costs = {0};
+    int costs_named = 0;
+    usearch_status_t read = costs_from_arguments(library_data, arguments + 2, &costs, &costs_named);
     if (read != usearch_status_success_k)
-        return answer_failure(library_data, read, "window widths are a list of non-negative integers", result);
+        return answer_failure(library_data, read,
+                              "similarities are a 256 by 256 Integer8 array, and the gap fits a signed byte " //
+                              "and comes beside them",
+                              result);
     int32_t* ordinals = NULL;
     size_t ordinals_count = 0;
     read = ordinals_from_store(library_data, arguments[8], &ordinals, &ordinals_count);
-    if (read != usearch_status_success_k) {
-        free(widths);
+    if (read != usearch_status_success_k)
         return answer_failure(library_data, read, "memory domains and devices are lists of integers", result);
-    }
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
     usearch_sequence_index_t index = NULL;
     if (vram)
@@ -2602,10 +2578,9 @@ static int sequence_init(WolframLibraryData library_data, MArgument const* argum
             .index = &index,
             .outcome = &outcome,
             .metric = metric,
-            .weights = weighted ? &weights : NULL,
-            .window_widths = widths_count ? widths : NULL,
-            .window_widths_count = widths_count,
-            .connectivity = (size_t)MArgument_getInteger(arguments[6]),
+            .costs = costs_named ? &costs : NULL,
+            .connectivity = (size_t)MArgument_getInteger(arguments[5]),
+            .sketch_bytes = (size_t)MArgument_getInteger(arguments[6]),
             .values_per_key = (size_t)MArgument_getInteger(arguments[7]),
             .vram = {ordinals_count ? ordinals : NULL, ordinals_count},
         });
@@ -2614,15 +2589,13 @@ static int sequence_init(WolframLibraryData library_data, MArgument const* argum
             .index = &index,
             .outcome = &outcome,
             .metric = metric,
-            .weights = weighted ? &weights : NULL,
-            .window_widths = widths_count ? widths : NULL,
-            .window_widths_count = widths_count,
-            .connectivity = (size_t)MArgument_getInteger(arguments[6]),
+            .costs = costs_named ? &costs : NULL,
+            .connectivity = (size_t)MArgument_getInteger(arguments[5]),
+            .sketch_bytes = (size_t)MArgument_getInteger(arguments[6]),
             .values_per_key = (size_t)MArgument_getInteger(arguments[7]),
             .ram = {ordinals_count ? ordinals : NULL, ordinals_count},
         });
     free(ordinals);
-    free(widths);
     return sequence_adopt(library_data, slot, index, &outcome, result);
 }
 
@@ -2639,9 +2612,8 @@ EXTERN_C DLLEXPORT int SequenceInitVram(WolframLibraryData library_data, mint ar
 }
 
 /**
- *  @brief Calls a sequence load: @c index → @c executor → @c path or @c monolith → the memory
- *      domains or devices → @c valuesPerKey → whether weights are named → @c substitutionMatrix
- *      → @c gap.
+ *  @brief Calls a sequence load: @c index → @c executor → @c path or @c monolith → memory domains
+ *      or devices → @c valuesPerKey.
  *  @param[in] vram Whether the copy lands in device memory.
  *  @param[in] buffered Whether the checkpoint is a monolith in memory rather than a path.
  */
@@ -2658,11 +2630,6 @@ static int sequence_load(WolframLibraryData library_data, MArgument const* argum
         buffer_from_array(library_data, MArgument_getMNumericArray(arguments[2]), &buffer) != usearch_status_success_k)
         return answer_failure(library_data, usearch_status_malformed_k, "a monolith is an UnsignedInteger8 vector",
                               result);
-    usearch_sequence_weights_t weights = {0};
-    int weighted = 0;
-    if (weights_from_arguments(library_data, arguments + 5, &weights, &weighted) != usearch_status_success_k)
-        return answer_failure(library_data, usearch_status_shape_mismatch_k,
-                              "a substitution matrix is a 256 by 256 Integer8 array", result);
     int32_t* ordinals = NULL;
     size_t ordinals_count = 0;
     usearch_status_t const read = ordinals_from_store(library_data, arguments[3], &ordinals, &ordinals_count);
@@ -2674,39 +2641,34 @@ static int sequence_load(WolframLibraryData library_data, MArgument const* argum
     usearch_ram_options_t const ram = {ordinals_count ? ordinals : NULL, ordinals_count};
     usearch_vram_options_t const devices = {ordinals_count ? ordinals : NULL, ordinals_count};
     size_t const values_per_key = (size_t)MArgument_getInteger(arguments[4]);
-    usearch_sequence_weights_t const* const named = weighted ? &weights : NULL;
     if (vram && buffered)
         usearch_sequence_load_vram_buffer(&(usearch_sequence_load_vram_buffer_t) {.index = &index,
                                                                                   .executor = executor,
                                                                                   .outcome = &outcome,
                                                                                   .buffer = buffer,
                                                                                   .vram = devices,
-                                                                                  .values_per_key = values_per_key,
-                                                                                  .weights = named});
+                                                                                  .values_per_key = values_per_key});
     else if (vram)
         usearch_sequence_load_vram(&(usearch_sequence_load_vram_t) {.index = &index,
                                                                     .executor = executor,
                                                                     .outcome = &outcome,
                                                                     .path = bytes_from_text(path_text),
                                                                     .vram = devices,
-                                                                    .values_per_key = values_per_key,
-                                                                    .weights = named});
+                                                                    .values_per_key = values_per_key});
     else if (buffered)
         usearch_sequence_load_ram_buffer(&(usearch_sequence_load_ram_buffer_t) {.index = &index,
                                                                                 .executor = executor,
                                                                                 .outcome = &outcome,
                                                                                 .buffer = buffer,
                                                                                 .ram = ram,
-                                                                                .values_per_key = values_per_key,
-                                                                                .weights = named});
+                                                                                .values_per_key = values_per_key});
     else
         usearch_sequence_load_ram(&(usearch_sequence_load_ram_t) {.index = &index,
                                                                   .executor = executor,
                                                                   .outcome = &outcome,
                                                                   .path = bytes_from_text(path_text),
                                                                   .ram = ram,
-                                                                  .values_per_key = values_per_key,
-                                                                  .weights = named});
+                                                                  .values_per_key = values_per_key});
     if (path_text) library_data->UTF8String_disown(path_text);
     free(ordinals);
     return sequence_adopt(library_data, slot, index, &outcome, result);
@@ -2736,18 +2698,12 @@ EXTERN_C DLLEXPORT int SequenceLoadVramBuffer(WolframLibraryData library_data, m
     return sequence_load(library_data, arguments, result, 1, 1);
 }
 
-/** Calls @c usearch_sequence_view_ram: @c index → @c path → whether weights are named →
- *  @c substitutionMatrix → @c gap, served in place and read-only. */
+/** Calls @c usearch_sequence_view_ram: @c index → @c path, served in place and read-only. */
 EXTERN_C DLLEXPORT int SequenceViewRam(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                        MArgument result) {
     int answered = LIBRARY_NO_ERROR;
     void** const slot = fresh_slot(library_data, &sequences, arguments[0], result, &answered);
     if (!slot) return answered;
-    usearch_sequence_weights_t weights = {0};
-    int weighted = 0;
-    if (weights_from_arguments(library_data, arguments + 2, &weights, &weighted) != usearch_status_success_k)
-        return answer_failure(library_data, usearch_status_shape_mismatch_k,
-                              "a substitution matrix is a 256 by 256 Integer8 array", result);
     char* path_text = MArgument_getUTF8String(arguments[1]);
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
     usearch_sequence_index_t index = NULL;
@@ -2755,14 +2711,13 @@ EXTERN_C DLLEXPORT int SequenceViewRam(WolframLibraryData library_data, mint arg
         .index = &index,
         .outcome = &outcome,
         .path = bytes_from_text(path_text),
-        .weights = weighted ? &weights : NULL,
     });
     library_data->UTF8String_disown(path_text);
     return sequence_adopt(library_data, slot, index, &outcome, result);
 }
 
-/** Calls @c usearch_sequence_view_nvme: @c index → @c executor → @c path → @c paths → whether
- *  weights are named → @c substitutionMatrix → @c gap, served read-only. */
+/** Calls @c usearch_sequence_view_nvme: @c index → @c executor → @c path → @c paths, served
+ *  read-only. */
 EXTERN_C DLLEXPORT int SequenceViewNvme(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                         MArgument result) {
     int answered = LIBRARY_NO_ERROR;
@@ -2771,11 +2726,6 @@ EXTERN_C DLLEXPORT int SequenceViewNvme(WolframLibraryData library_data, mint ar
     usearch_executor_t executor;
     if (!executor_from_argument(arguments[1], &executor))
         return answer_failure(library_data, usearch_status_uninitialized_k, "the Executor was released", result);
-    usearch_sequence_weights_t weights = {0};
-    int weighted = 0;
-    if (weights_from_arguments(library_data, arguments + 4, &weights, &weighted) != usearch_status_success_k)
-        return answer_failure(library_data, usearch_status_shape_mismatch_k,
-                              "a substitution matrix is a 256 by 256 Integer8 array", result);
     usearch_bytes_view_t* paths = NULL;
     size_t paths_count = 0;
     usearch_status_t const read = paths_from_store(library_data, arguments[3], &paths, &paths_count);
@@ -2790,7 +2740,6 @@ EXTERN_C DLLEXPORT int SequenceViewNvme(WolframLibraryData library_data, mint ar
         .outcome = &outcome,
         .path = bytes_from_text(path_text),
         .nvme = {paths_count ? paths : NULL, paths_count},
-        .weights = weighted ? &weights : NULL,
     });
     library_data->UTF8String_disown(path_text);
     free(paths);

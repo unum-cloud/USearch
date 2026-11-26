@@ -1252,7 +1252,7 @@ struct vram_apple_index {
         /** Whether the plan moves entries, which a refine never does. */
         bool moving() const noexcept { return false; }
 
-        /** The position of the round's phase in hand among its six, from the opening health check
+        /** The position of the round's phase in hand among its seven, from the opening health check
          *  to the closing one; zero outside a round's phases. */
         std::size_t ordinal() const noexcept { return rounding() ? round_ordinal(phase_, swept_after_) : 0; }
 
@@ -1528,7 +1528,7 @@ struct vram_apple_index {
         /** Whether the plan still moves entries: its partition, whose last barrier scatters. */
         bool moving() const noexcept { return moves_ != phase_t::done_k; }
 
-        /** Where the bound round's phase sits among its six, and its units done and in all; zero
+        /** Where the bound round's phase sits among its seven, and its units done and in all; zero
          *  in the moves. */
         std::size_t ordinal() const noexcept { return rounding() ? rounds_.ordinal() : 0; }
         std::size_t completed() const noexcept { return moving() || ended_() ? 0 : rounds_.completed(); }

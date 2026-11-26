@@ -920,7 +920,7 @@ struct Library(ImplicitlyCopyable):
         )
 
     def sequence_metric_name(self, metric: SequenceMetric) -> String:
-        """The engine's spelling of a sequence kind, as `LEVENSHTEIN_BYTES` spells "levenshtein". Calls
+        """The engine's spelling of a sequence metric, as `PROTEIN_ALIGNMENT` spells "protein-alignment". Calls
         `usearch_sequence_metric_name`."""
         return text_at(self.symbols().sequence_metric_name(metric.code))
 

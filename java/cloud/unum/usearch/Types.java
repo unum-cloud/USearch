@@ -2051,6 +2051,8 @@ public final class Types {
         GATHER,
         /** A round re-stitching each neighborhood. */
         RESTITCH,
+        /** A round linking island entries by walks from the root. */
+        REACH,
         /** A plan filing what its moves or rounds produced where it lands. */
         WRITE,
         /** The plan ended its round, and nothing is pending. */

@@ -1017,12 +1017,11 @@ struct dense_verbs_t {
     static void free(index_t index) noexcept { usearch_dense_free(index); }
 };
 
-/** What a sequence index is opened with beyond its metadata: the weights and window widths,
- *  viewed. */
+/** What a sequence index is opened with beyond its metadata: the costs an init folds, borrowed
+ *  until the index opens, or none for the metric's own. */
 struct sequence_geometry_t {
     usearch_sequence_metadata_t metadata {};
-    usearch_sequence_weights_t const* weights = nullptr;
-    std::span<std::size_t const> window_widths;
+    usearch_sequence_costs_t const* costs = nullptr;
 };
 
 /** A tape over @p offsets as a caller holding @c std::size_t offsets passes them, in their
@@ -1063,28 +1062,18 @@ struct sequence_verbs_t {
     static values_t slice(values_t tape, std::size_t first) noexcept { return tape_past(tape, first); }
     static void init_ram(index_t* index, geometry_t const& geometry, usearch_ram_options_t ram,
                          usearch_outcome_t* outcome) noexcept {
-        usearch_sequence_init_ram_t arguments {index,
-                                               outcome,
-                                               geometry.metadata.metric,
-                                               geometry.weights,
-                                               geometry.window_widths.data(),
-                                               geometry.window_widths.size(),
-                                               geometry.metadata.connectivity,
-                                               0,
-                                               ram};
+        usearch_sequence_init_ram_t arguments {};
+        arguments.index = index, arguments.outcome = outcome, arguments.metric = geometry.metadata.metric;
+        arguments.costs = geometry.costs, arguments.connectivity = geometry.metadata.connectivity;
+        arguments.sketch_bytes = geometry.metadata.sketch_bytes, arguments.ram = ram;
         usearch_sequence_init_ram(&arguments);
     }
     static void init_vram(index_t* index, geometry_t const& geometry, usearch_vram_options_t vram,
                           usearch_outcome_t* outcome) noexcept {
-        usearch_sequence_init_vram_t arguments {index,
-                                                outcome,
-                                                geometry.metadata.metric,
-                                                geometry.weights,
-                                                geometry.window_widths.data(),
-                                                geometry.window_widths.size(),
-                                                geometry.metadata.connectivity,
-                                                0,
-                                                vram};
+        usearch_sequence_init_vram_t arguments {};
+        arguments.index = index, arguments.outcome = outcome, arguments.metric = geometry.metadata.metric;
+        arguments.costs = geometry.costs, arguments.connectivity = geometry.metadata.connectivity;
+        arguments.sketch_bytes = geometry.metadata.sketch_bytes, arguments.vram = vram;
         usearch_sequence_init_vram(&arguments);
     }
     static void insert(index_t index, usearch_executor_t executor, std::size_t count, usearch_keys_view_t keys,
@@ -1100,12 +1089,11 @@ struct sequence_verbs_t {
                        queries_t queries, std::size_t wanted, std::size_t expansion, usearch_traversal_t traversal,
                        usearch_matches_view_t* matches, usearch_traversal_stats_t* stats, usearch_outcome_t* outcome,
                        usearch_matches_view_t const* hints = nullptr) noexcept {
-        if (hints) return void(*outcome = {usearch_status_unsupported_k, "Sequence searches take no hints"});
         usearch_sequence_search_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
         arguments.count = count, arguments.queries = queries, arguments.matches = matches, arguments.arena = arena;
         arguments.wanted = wanted, arguments.expansion_factor = expansion, arguments.traversal = traversal;
-        arguments.stats = stats;
+        arguments.stats = stats, arguments.hints = hints;
         usearch_sequence_search(&arguments);
     }
     static void save(index_t index, usearch_executor_t executor, usearch_bytes_view_t path,
@@ -1118,8 +1106,9 @@ struct sequence_verbs_t {
                          usearch_ram_options_t ram, geometry_t const& geometry, usearch_outcome_t* outcome) noexcept {
         usearch_sequence_load_ram_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
-        arguments.ram = ram, arguments.weights = geometry.weights;
+        arguments.ram = ram;
         arguments.connectivity = geometry.metadata.connectivity;
+        arguments.sketch_bytes = geometry.metadata.sketch_bytes;
         usearch_sequence_load_ram(&arguments);
     }
     static void save_buffer(index_t index, usearch_executor_t executor, usearch_arena_t arena,
@@ -1134,8 +1123,9 @@ struct sequence_verbs_t {
                                 usearch_outcome_t* outcome) noexcept {
         usearch_sequence_load_ram_buffer_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.buffer = buffer;
-        arguments.ram = ram, arguments.weights = geometry.weights;
+        arguments.ram = ram;
         arguments.connectivity = geometry.metadata.connectivity;
+        arguments.sketch_bytes = geometry.metadata.sketch_bytes;
         usearch_sequence_load_ram_buffer(&arguments);
     }
     static void metadata_read(usearch_executor_t executor, usearch_bytes_view_t path, metadata_t* metadata,
@@ -1161,8 +1151,9 @@ struct sequence_verbs_t {
                           usearch_outcome_t* outcome) noexcept {
         usearch_sequence_load_vram_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
-        arguments.vram = vram, arguments.weights = geometry.weights;
+        arguments.vram = vram;
         arguments.connectivity = geometry.metadata.connectivity;
+        arguments.sketch_bytes = geometry.metadata.sketch_bytes;
         usearch_sequence_load_vram(&arguments);
     }
     static void view_nvme(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
@@ -1170,7 +1161,7 @@ struct sequence_verbs_t {
                           usearch_outcome_t* outcome) noexcept {
         usearch_sequence_view_nvme_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
-        arguments.nvme = nvme, arguments.weights = geometry.weights;
+        arguments.nvme = nvme, arguments.sketch_bytes = geometry.metadata.sketch_bytes;
         usearch_sequence_view_nvme(&arguments);
     }
     static void describe(index_t index, usearch_executor_t executor, description_t* description,
@@ -2079,144 +2070,27 @@ inline byte_tape_t lines_of(util::bytes_view_t text) noexcept {
     return lines;
 }
 
-/** The proteins' classes in BLOSUM62's order: 20 amino acids, then B, Z, X and the stop. */
-inline constexpr std::string_view protein_letters_k = "ARNDCQEGHILKMFPSTWYVBZX*";
-
-/** BLOSUM62 over @ref protein_letters_k, as NCBI publishes it. */
-inline constexpr std::int8_t blosum62_k[24][24] = {
-    {4, -1, -2, -2, 0, -1, -1, 0, -2, -1, -1, -1, -1, -2, -1, 1, 0, -3, -2, 0, -2, -1, 0, -4},
-    {-1, 5, 0, -2, -3, 1, 0, -2, 0, -3, -2, 2, -1, -3, -2, -1, -1, -3, -2, -3, -1, 0, -1, -4},
-    {-2, 0, 6, 1, -3, 0, 0, 0, 1, -3, -3, 0, -2, -3, -2, 1, 0, -4, -2, -3, 3, 0, -1, -4},
-    {-2, -2, 1, 6, -3, 0, 2, -1, -1, -3, -4, -1, -3, -3, -1, 0, -1, -4, -3, -3, 4, 1, -1, -4},
-    {0, -3, -3, -3, 9, -3, -4, -3, -3, -1, -1, -3, -1, -2, -3, -1, -1, -2, -2, -1, -3, -3, -2, -4},
-    {-1, 1, 0, 0, -3, 5, 2, -2, 0, -3, -2, 1, 0, -3, -1, 0, -1, -2, -1, -2, 0, 3, -1, -4},
-    {-1, 0, 0, 2, -4, 2, 5, -2, 0, -3, -3, 1, -2, -3, -1, 0, -1, -3, -2, -2, 1, 4, -1, -4},
-    {0, -2, 0, -1, -3, -2, -2, 6, -2, -4, -4, -2, -3, -3, -2, 0, -2, -2, -3, -3, -1, -2, -1, -4},
-    {-2, 0, 1, -1, -3, 0, 0, -2, 8, -3, -3, -1, -2, -1, -2, -1, -2, -2, 2, -3, 0, 0, -1, -4},
-    {-1, -3, -3, -3, -1, -3, -3, -4, -3, 4, 2, -3, 1, 0, -3, -2, -1, -3, -1, 3, -3, -3, -1, -4},
-    {-1, -2, -3, -4, -1, -2, -3, -4, -3, 2, 4, -2, 2, 0, -3, -2, -1, -2, -1, 1, -4, -3, -1, -4},
-    {-1, 2, 0, -1, -3, 1, 1, -2, -1, -3, -2, 5, -1, -3, -1, 0, -1, -3, -2, -2, 0, 1, -1, -4},
-    {-1, -1, -2, -3, -1, 0, -2, -3, -2, 1, 2, -1, 5, 0, -2, -1, -1, -1, -1, 1, -3, -1, -1, -4},
-    {-2, -3, -3, -3, -2, -3, -3, -3, -1, 0, 0, -3, 0, 6, -4, -2, -2, 1, 3, -1, -3, -3, -1, -4},
-    {-1, -2, -2, -1, -3, -1, -1, -2, -2, -3, -3, -1, -2, -4, 7, -1, -1, -4, -3, -2, -2, -1, -2, -4},
-    {1, -1, 1, 0, -1, 0, 0, 0, -1, -2, -2, 0, -1, -2, -1, 4, 1, -3, -2, -2, 0, 0, 0, -4},
-    {0, -1, 0, -1, -1, -1, -1, -2, -2, -1, -1, -1, -1, -2, -1, 1, 5, -2, -2, 0, -1, -1, 0, -4},
-    {-3, -3, -4, -4, -2, -2, -3, -2, -2, -3, -2, -3, -1, 1, -4, -3, -2, 11, 2, -3, -4, -3, -2, -4},
-    {-2, -2, -2, -3, -2, -1, -2, -3, 2, -1, -1, -2, -1, 3, -3, -2, -2, 2, 7, -1, -3, -2, -1, -4},
-    {0, -3, -3, -3, -1, -2, -2, -3, -3, 3, 1, -2, 1, -1, -2, -2, 0, -3, -1, 4, -3, -2, -1, -4},
-    {-2, -1, 3, 4, -3, 0, 1, -1, 0, -3, -4, 0, -3, -3, -2, 0, -1, -4, -3, -3, 4, 1, -1, -4},
-    {-1, 0, 0, 1, -3, 3, 4, -2, 0, -3, -3, 1, -1, -3, -1, 0, -1, -3, -2, -2, 1, 4, -1, -4},
-    {0, -1, -1, -1, -2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -2, 0, 0, -2, -1, -1, -1, -1, -1, -4},
-    {-4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, 1},
-};
-
-/** The classes text folds into: a-z, the space, any digit, and anything else. */
-inline constexpr std::size_t text_classes_k = 29;
-
-/** Whether an alphabet scores under its own costs or under unit costs over its classes. */
-enum class alphabet_costs_t : std::uint8_t { own_k, uniform_k };
-
-/** An alphabet's byte-to-class fold, and the weights its Needleman-Wunsch index takes. */
-struct alphabet_t {
-    std::array<std::uint8_t, 256> codes {};
+/** Costs over bytes, as the C interface reads them and folds them into classes itself. */
+struct byte_costs_t {
     std::array<std::int8_t, 256 * 256> similarities {};
-    std::size_t classes = 0;
     std::int8_t gap = 0;
 
-    /** The weights the C interface reads, borrowing the similarities. */
-    usearch_sequence_weights_t weights() const noexcept { return {similarities.data(), gap}; }
+    /** The costs the C interface reads, borrowing the similarities. */
+    usearch_sequence_costs_t view() const noexcept { return {similarities.data(), gap}; }
 };
 
-/** The alphabet @p name spells, under its own costs or, when @p costs is uniform, unit costs
- *  over its classes; no classes for a name it does not know. */
-inline alphabet_t alphabet_of(std::string_view name, alphabet_costs_t costs) {
-    alphabet_t alphabet;
-    if (name == "dna") {
-        alphabet.classes = 4, alphabet.gap = 2;
-        alphabet.codes.fill(3);
-        for (char const letter : {'A', 'C', 'G', 'T'}) {
-            std::uint8_t const code = static_cast<std::uint8_t>(std::string_view {"ACGT"}.find(letter));
-            alphabet.codes[static_cast<std::uint8_t>(letter)] = code;
-            alphabet.codes[static_cast<std::uint8_t>(letter | 0x20)] = code;
-        }
-        // Purines take even codes and pyrimidines odd, so a transition keeps half the self-score.
-        for (std::size_t first = 0; first != 4; ++first)
-            for (std::size_t second = 0; second != 4; ++second)
-                alphabet.similarities[first * 256 + second] = first == second ? 2 : (first & 1) == (second & 1) ? 1 : 0;
-    }
-    else if (name == "protein") {
-        alphabet.classes = protein_letters_k.size(), alphabet.gap = 7;
-        alphabet.codes.fill(static_cast<std::uint8_t>(protein_letters_k.find('X')));
-        for (std::size_t code = 0; code != protein_letters_k.size(); ++code) {
-            char const letter = protein_letters_k[code];
-            alphabet.codes[static_cast<std::uint8_t>(letter)] = static_cast<std::uint8_t>(code);
-            if (letter >= 'A' && letter <= 'Z')
-                alphabet.codes[static_cast<std::uint8_t>(letter | 0x20)] = static_cast<std::uint8_t>(code);
-        }
-        for (std::size_t first = 0; first != protein_letters_k.size(); ++first)
-            for (std::size_t second = 0; second != protein_letters_k.size(); ++second)
-                alphabet.similarities[first * 256 + second] = blosum62_k[first][second];
-    }
-    else if (name == "text") {
-        alphabet.classes = text_classes_k, alphabet.gap = 1;
-        alphabet.codes.fill(text_classes_k - 1);
-        for (char letter = 'a'; letter <= 'z'; ++letter)
-            alphabet.codes[static_cast<std::uint8_t>(letter)] = static_cast<std::uint8_t>(letter - 'a');
-        alphabet.codes[' '] = 26;
-        for (char digit = '0'; digit <= '9'; ++digit) alphabet.codes[static_cast<std::uint8_t>(digit)] = 27;
-        for (std::size_t code = 0; code != text_classes_k; ++code) alphabet.similarities[code * 256 + code] = 1;
-    }
-    if (costs == alphabet_costs_t::uniform_k) {
-        alphabet.gap = 1;
-        std::memset(alphabet.similarities.data(), 0, alphabet.similarities.size());
-        for (std::size_t code = 0; code != alphabet.classes; ++code) alphabet.similarities[code * 256 + code] = 1;
-    }
-    return alphabet;
-}
-
-/** Replaces the costs of @p alphabet with the file at @p path, 256x256 int8 similarities and
- *  an int8 gap cost; false after printing why it cannot. */
-inline bool read_weights(std::string_view path, alphabet_t& alphabet) {
+/** The costs in the file at @p path : 256x256 int8 similarities between bytes and an int8 gap cost;
+ *  none after printing why not. */
+inline std::optional<byte_costs_t> read_costs(std::string_view path) {
+    byte_costs_t read;
     auto [file, status] = util::mapped_file_t::read(path);
-    if (failed(status) || file.view().size() != alphabet.similarities.size() + 1) {
-        fmt::println(stderr, "--weights=\"{}\" must hold 65,537 bytes: 256x256 int8 similarities and an int8 gap cost",
-                     path);
-        return false;
+    if (failed(status) || file.view().size() != read.similarities.size() + 1) {
+        fmt::println(stderr, "--costs=\"{}\" must hold 256x256 int8 similarities and an int8 gap cost", path);
+        return std::nullopt;
     }
-    std::memcpy(alphabet.similarities.data(), file.view().data(), alphabet.similarities.size());
-    std::memcpy(&alphabet.gap, file.view().data() + alphabet.similarities.size(), 1);
-    return true;
-}
-
-/** Packs every entry of @p tape as its codes under @p alphabet, one packed row per entry, in the
- *  layout of @c usearch_sequence_weights_t: two bits a code up to four classes and five past,
- *  little-endian behind one byte counting the slots the last bytes leave unused. */
-inline byte_tape_t packed_codes_of(byte_tape_t const& tape, alphabet_t const& alphabet) {
-    std::size_t const code_bits = alphabet.classes <= 4 ? 2 : 5;
-    auto const bytes_of_row = [&](std::size_t row) {
-        return 1 + ((tape.offsets[row + 1] - tape.offsets[row]) * code_bits + 7) / 8;
-    };
-    byte_tape_t packed;
-    std::size_t total = 0;
-    for (std::size_t row = 0; row != tape.size(); ++row) total += bytes_of_row(row);
-    if (packed.bytes.resize(total) != sz::status_t::success_k || st::failed(packed.offsets.push_back(0)))
-        exit_out_of_memory("the packed codes");
-    std::memset(packed.bytes.data(), 0, total);
-    for (std::size_t row = 0; row != tape.size(); ++row) {
-        std::string_view const entry = std::string_view {tape.bytes}.substr(tape.offsets[row],
-                                                                            tape.offsets[row + 1] - tape.offsets[row]);
-        std::size_t const first = packed.offsets.back(), bytes = bytes_of_row(row);
-        char* const sequence = packed.bytes.data() + first;
-        sequence[0] = static_cast<char>((bytes - 1) * 8 / code_bits - entry.size());
-        for (std::size_t index = 0; index != entry.size(); ++index) {
-            std::size_t const bit = index * code_bits, byte = 1 + (bit >> 3);
-            unsigned const shifted = unsigned {alphabet.codes[static_cast<std::uint8_t>(entry[index])]} << (bit & 7u);
-            sequence[byte] |= static_cast<char>(shifted & 0xFFu);
-            if (shifted > 0xFFu) sequence[byte + 1] |= static_cast<char>(shifted >> 8);
-        }
-        if (st::failed(packed.offsets.push_back(first + bytes))) exit_out_of_memory("the packed codes");
-    }
-    return packed;
+    std::memcpy(read.similarities.data(), file.view().data(), read.similarities.size());
+    std::memcpy(&read.gap, file.view().data() + read.similarities.size(), 1);
+    return read;
 }
 
 /** Bytes a key takes in the <tt>.u64bin</tt> or <tt>.u128bin</tt> at @p path, zero for any other name. */
@@ -2393,6 +2267,7 @@ usearch_outcome_t search_queries(handle<verbs_type_>& index, typename verbs_type
             return {usearch_status_device_k, "The matches could not be read back"};
         totals.visited_members += stats.visited_members, totals.computed_distances += stats.computed_distances;
         totals.restarts += stats.restarts, totals.missing_hints += stats.missing_hints;
+        totals.seeding_distances += stats.seeding_distances;
         if (progress.callback && progress.callback(first + sliced, count, progress.state) == usearch_cancel_k)
             return {usearch_status_cancelled_k, "The caller's handler stopped the search between batches"};
     }
@@ -2890,8 +2765,7 @@ inline std::array<flag_t, 9> search_bench_flags(search_bench_settings_t& search)
  *  session's residency. An NVMe session serves a view of what it built from @p checkpoint, or from
  *  the temporary directory when that is empty, and any other session reopens what it saved only
  *  when @p checkpoint names a path; the reopened index takes @p served, so a search may score under
- *  other weights than the build. Each breadth's matches go to @p on_swept as
- *  `(expansion, matches)`.
+ *  other costs than the build. Each breadth's matches go to @p on_swept as @b (expansion,matches).
  *
  *  @return The process exit code.
  */

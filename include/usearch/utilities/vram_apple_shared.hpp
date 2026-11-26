@@ -95,9 +95,13 @@ enum metal_counter_t : unsigned int {
     /** A batch's per-query counts summed on the device, its low word then its high one. */
     metal_matched_k = 25,
 
+    /** The nodes a search's seeding walks scored by sketch, apart from @c metal_scored_k, its low
+     *  word then its high one. */
+    metal_sketched_k = 27,
+
     /** The word count, padded to an even one so whatever follows a block in staging stays 8-byte
      *  aligned. */
-    metal_counter_words_k = 28,
+    metal_counter_words_k = 30,
 };
 
 } // namespace unum::usearch::utilities

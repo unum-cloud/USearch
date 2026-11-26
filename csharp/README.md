@@ -395,21 +395,26 @@ string kernels = USearchCapabilities.CapabilitiesAvailable();
 
 ## Sequence Indexes
 
-A sequence index searches byte strings, UTF-8 text, DNA and proteins under edit distances and alignments.
+A sequence index searches proteins under alignment, DNA and RNA under overlap, and UTF-8 text under containment.
 Variable-length entries cross as a `TapeView<TElement>`, the Apache Arrow layout: elements end to end and one more offset than entries, which `Tape.Utf8` and `Tape.Bytes` pack and `Tape.Of` wraps an Arrow column as it is:
 
 ```csharp
-using SequenceIndex index = SequenceIndex.InitRam(
-    SequenceOptions.Default with { Metric = SequenceMetric.LevenshteinUtf8 });
+using SequenceIndex index = SequenceIndex.InitRam(new SequenceOptions { Metric = SequenceMetric.Utf8Containment });
 Key[] keys = [1UL, 2UL, 3UL];
-index.Insert(keys, Tape.Utf8("kitten", "sitting", "mitten"));
+index.Insert(keys, Tape.Utf8("The quick brown fox", "A lazy dog", "Pack my box"));
 
-Matches found = index.Search(Tape.Utf8("sittin"), wanted: 1, arena);
-Key nearest = found[0].Keys[0];                   // Key 2, one edit away
-double distance = found[0].Distances[0];          // 1
+Matches found = index.Search(Tape.Utf8("BROWN FOX"), wanted: 1, arena);
+Key nearest = found[0].Keys[0];                   // Key 1, whatever the case
+double distance = found[0].Distances[0];          // under 2^-15: holds every query window
 ```
 
-`SequenceMetric.NeedlemanWunsch` takes `SequenceWeights`, a 256 × 256 substitution matrix with a gap cost, and `SequenceMetric.Overlap` takes `WindowWidths`; every load names the weights again, since no checkpoint records them.
+`SequenceMetric.ProteinAlignment` aligns end to end under BLOSUM62, `SequenceMetric.DnaOverlap` aligns one read sliding over the other on either strand, and `SequenceMetric.Utf8Containment` scores the share of the query's windows the stored side lacks.
+Each metric stores a sequence folded, so `Get` returns the stored form rather than the inserted bytes: packed class codes for a protein, one class code a byte for DNA, and case-folded UTF-8 for text.
+Text folds its case inside the engine, so inputs are raw bytes and there is nothing to pack.
+Optional `SequenceCosts` give 256 × 256 similarities between raw bytes and a gap cost in place of the metric's own, and a containment refuses them.
+`SequenceOptions.SketchBytes` sets the bytes of the sketch in front of each stored sequence, a multiple of four, where zero takes the metric's default of 512 for protein alignment and UTF-8 containment.
+A DNA overlap keeps no sketch and refuses any.
+A checkpoint records the costs, so loads and views take none.
 `Get` writes a key's sequences into an arena as `TapeEntries`, read with `Entry<byte>`, and `Count` reports a key's total and largest byte lengths.
 The verbs, receivers, plans and reports are the dense ones: `Refine`, `Reshard` and their `SequenceRefinePlan` and `SequenceReshardPlan`, cursors and `Sample`, all reporting through `RefineReport` and `DenseTraversalStats`.
 

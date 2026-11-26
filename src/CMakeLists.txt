@@ -881,7 +881,7 @@ usearch_variants(geospatial cpu cpu ${usearch_basic_cpu_classes_} GATE BASIC LIB
 if (USEARCH_MULTIVERSIONED)
     usearch_variants(
         sequence vram nvidia nvidia_ampere
-        KERNELS levenshtein_bytes levenshtein_utf8 overlap needleman_wunsch
+        KERNELS protein_alignment dna_overlap utf8_containment
         DEFINITIONS "STRINGZILLA_HEADER_ONLY=1"
         LIBRARIES stringzilla::header
     )
@@ -892,7 +892,7 @@ if (USEARCH_MULTIVERSIONED)
 else ()
     usearch_variants(
         sequence vram nvidia ${usearch_nvidia_kept_}
-        KERNELS levenshtein_bytes levenshtein_utf8 overlap needleman_wunsch
+        KERNELS protein_alignment dna_overlap utf8_containment
         DEFINITIONS "STRINGZILLA_HEADER_ONLY=1"
         LIBRARIES stringzilla::header
     )
@@ -904,7 +904,7 @@ endif ()
 # every kept class compiles every modality, multiversioned or not.
 usearch_variants(
     sequence vram amd ${usearch_amd_classes_}
-    KERNELS levenshtein_bytes levenshtein_utf8 overlap needleman_wunsch
+    KERNELS protein_alignment dna_overlap utf8_containment
     DEFINITIONS "STRINGZILLA_HEADER_ONLY=1"
     LIBRARIES stringzilla::header
 )

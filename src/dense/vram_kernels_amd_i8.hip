@@ -8,7 +8,7 @@
  *  target, into the class's i8 code object, which @c vram_variants_amd_<class>.hip finds
  *  linked in beside its variants.
  */
-#include "dense_kernels.cuh"
-#include "usearch/dense/vram_amd_index.hip"
+#include "dense_kernels.cuh"                // `vram_attend_lookup_t`, `hip_class_capabilities_k`
+#include "usearch/dense/vram_amd_index.hip" // `dense::amd_instantiate`
 
-template void dense::amd_instantiate<amd_class_capabilities_k, nk_i8_k, vram_attend_lookup_t>();
+template void us::dense::amd_instantiate<hip_class_capabilities_k, nk_i8_k, vram_attend_lookup_t>();

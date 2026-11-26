@@ -183,13 +183,13 @@ func ExampleDenseIndexOn_Deferred() {
 // Mirrors the Sequence Indexes snippet of golang/README.md, adding the arena it views and the
 // checks it skips.
 func ExampleSequenceIndex() {
-	index, err := usearch.SequenceInitRam(usearch.SequenceOptions{Metric: usearch.SequenceMetricLevenshteinUTF8}, nil)
+	index, err := usearch.SequenceInitRam(usearch.SequenceOptions{Metric: usearch.SequenceMetricUTF8Containment}, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer index.Close()
 
-	words := usearch.SequencesOf([]byte("kitten"), []byte("sitting"), []byte("mitten"))
+	words := usearch.SequencesOf([]byte("The quick brown fox"), []byte("A lazy dog"), []byte("Pack my box"))
 	keys := []usearch.Key{usearch.KeyFromUint64(1), usearch.KeyFromUint64(2), usearch.KeyFromUint64(3)}
 	if err := index.Insert(keys, words, nil); err != nil {
 		log.Fatal(err)
@@ -200,7 +200,7 @@ func ExampleSequenceIndex() {
 		log.Fatal(err)
 	}
 	defer arena.Close()
-	matches, err := index.Search(usearch.SequencesOf([]byte("sittin")), 1, arena, nil)
+	matches, err := index.Search(usearch.SequencesOf([]byte("BROWN FOX")), 1, arena, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -208,8 +208,9 @@ func ExampleSequenceIndex() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(found[0], distances[0])
-	// Output: 00000000-0000-0000-0000-000000000002 1
+	// Below 2^-15 holds every query window; the rest counts what the stored text adds.
+	fmt.Println(found[0], distances[0] < 1.0/32768)
+	// Output: 00000000-0000-0000-0000-000000000001 true
 }
 
 // Mirrors the Shape Indexes snippet of golang/README.md, adding the arena it views and the checks

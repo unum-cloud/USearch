@@ -61,13 +61,13 @@ pub use geospatial_index::{
     GeospatialWithinConfig,
 };
 pub use sequence_index::{
-    SequenceCount, SequenceCursor, SequenceDescribe, SequenceGet, SequenceHealth, SequenceIndex,
+    SequenceCosts, SequenceCount, SequenceCursor, SequenceDescribe, SequenceGet, SequenceHealth, SequenceIndex,
     SequenceIndexDescription, SequenceInsert, SequenceInsertConfig, SequenceKeyStats, SequenceLoadRamBufferConfig,
     SequenceLoadRamConfig, SequenceLoadVramBufferConfig, SequenceLoadVramConfig, SequenceMetadata, SequenceMetric,
     SequenceOptions, SequenceRefine, SequenceRefineConfig, SequenceRefinePlan, SequenceRefinePlanFinish,
     SequenceReserve, SequenceReshard, SequenceReshardConfig, SequenceReshardPlan, SequenceReshardPlanFinish,
     SequenceSample, SequenceSave, SequenceSaveBuffer, SequenceSearch, SequenceSearchConfig, SequenceVerbs,
-    SequenceViewNvmeConfig, SequenceWeights,
+    SequenceViewNvmeConfig,
 };
 pub use shapes_index::{
     ShapesCount, ShapesCursor, ShapesDescribe, ShapesGet, ShapesHealth, ShapesIndex, ShapesIndexDescription,

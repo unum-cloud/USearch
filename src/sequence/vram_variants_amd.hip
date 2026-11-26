@@ -2,17 +2,17 @@
  *  @file src/sequence/vram_variants_amd.hip
  *  @author Ash Vardanian
  *  @date November 16, 2026
- *  @brief The AMD unit of the sequence kits: Levenshtein over bytes and UTF-8 runes, window overlap
- *      and Needleman-Wunsch need nothing past each class's wavefront and lane shifts, so one unit
- *      serves every AMD class, compiled once per class it is kept for.
+ *  @brief The AMD unit of the sequence kits: alignment with costs, banded overlap and containment
+ *      need nothing past each class's wavefront and lane shifts, so one unit serves every AMD
+ *      class, compiled once per class it is kept for.
  *
  *  HIP-Clang compiles it host-only, where it defines the faces' members reading the kits and names
- *  each kind's code object, linked in beside it; HIP-Clang compiles every
- *  @c vram_kernels_amd_<kind>.hip device-only into those code objects, once per class.
+ *  each family's code object, linked in beside it; HIP-Clang compiles every
+ *  @c vram_kernels_amd_<family>.hip device-only into those code objects, once per class.
  */
 #include "sequence_specializations.cuh"
 
-/** The bounds of each kind's code object, linked in as raw bytes, from the table CMake writes for
+/** The bounds of each family's code object, linked in as raw bytes, from the table CMake writes for
  *  the class this unit compiles as; the other classes' tables stay unreferenced. */
 extern "C" util::byte_t const* const sequence_amd_cdna3_bundles[];
 extern "C" util::byte_t const* const sequence_amd_cdna4_bundles[];
@@ -24,51 +24,37 @@ util::byte_t const* const* sequence_bundles() noexcept {
     else return sequence_amd_cdna3_bundles;
 }
 
-template <>
-util::bytes_view_t
-sequence_amd_code_object<usearch_sequence_metric_levenshtein_bytes_k, hip_class_k>::bytes() noexcept {
-    util::byte_t const* const* const bounds = sequence_bundles<hip_class_k>();
-    return {bounds[0], bounds[1]};
+/** A family's code object: its pair of bounds in the table, the families in the order of their
+ *  metrics. */
+template <usearch_sequence_metric_t metric_, gpu_class_t gpu_class_>
+util::bytes_view_t sequence_amd_code_object<metric_, gpu_class_>::bytes() noexcept {
+    util::byte_t const* const* const bounds = sequence_bundles<gpu_class_>();
+    std::size_t const family = metric_ - usearch_sequence_metric_protein_alignment_k;
+    return {bounds[2 * family], bounds[2 * family + 1]};
 }
-template struct us::sequence::vram_amd_index<
-    sequence_amd_kit<usearch_sequence_metric_levenshtein_bytes_k>, util::u32_t,
-    sequence_amd_code_object<usearch_sequence_metric_levenshtein_bytes_k, hip_class_k>>;
-template struct us::sequence::vram_amd_kits<
-    sequence_amd_kit<usearch_sequence_metric_levenshtein_bytes_k>, util::u32_t,
-    sequence_amd_code_object<usearch_sequence_metric_levenshtein_bytes_k, hip_class_k>>;
 
-template <>
-util::bytes_view_t sequence_amd_code_object<usearch_sequence_metric_levenshtein_utf8_k, hip_class_k>::bytes() noexcept {
-    util::byte_t const* const* const bounds = sequence_bundles<hip_class_k>();
-    return {bounds[2], bounds[3]};
-}
+template struct sequence_amd_code_object<usearch_sequence_metric_protein_alignment_k, hip_class_k>;
 template struct us::sequence::vram_amd_index<
-    sequence_amd_kit<usearch_sequence_metric_levenshtein_utf8_k>, util::u32_t,
-    sequence_amd_code_object<usearch_sequence_metric_levenshtein_utf8_k, hip_class_k>>;
+    sequence_vram_kit<usearch_sequence_metric_protein_alignment_k, hip_class_k>, util::u32_t,
+    sequence_amd_code_object<usearch_sequence_metric_protein_alignment_k, hip_class_k>>;
 template struct us::sequence::vram_amd_kits<
-    sequence_amd_kit<usearch_sequence_metric_levenshtein_utf8_k>, util::u32_t,
-    sequence_amd_code_object<usearch_sequence_metric_levenshtein_utf8_k, hip_class_k>>;
+    sequence_vram_kit<usearch_sequence_metric_protein_alignment_k, hip_class_k>, util::u32_t,
+    sequence_amd_code_object<usearch_sequence_metric_protein_alignment_k, hip_class_k>>;
 
-template <>
-util::bytes_view_t sequence_amd_code_object<usearch_sequence_metric_overlap_k, hip_class_k>::bytes() noexcept {
-    util::byte_t const* const* const bounds = sequence_bundles<hip_class_k>();
-    return {bounds[4], bounds[5]};
-}
-template struct us::sequence::vram_amd_index<sequence_amd_kit<usearch_sequence_metric_overlap_k>, util::u32_t,
-                                             sequence_amd_code_object<usearch_sequence_metric_overlap_k, hip_class_k>>;
-template struct us::sequence::vram_amd_kits<sequence_amd_kit<usearch_sequence_metric_overlap_k>, util::u32_t,
-                                            sequence_amd_code_object<usearch_sequence_metric_overlap_k, hip_class_k>>;
-
-template <>
-util::bytes_view_t sequence_amd_code_object<usearch_sequence_metric_needleman_wunsch_k, hip_class_k>::bytes() noexcept {
-    util::byte_t const* const* const bounds = sequence_bundles<hip_class_k>();
-    return {bounds[6], bounds[7]};
-}
+template struct sequence_amd_code_object<usearch_sequence_metric_dna_overlap_k, hip_class_k>;
 template struct us::sequence::vram_amd_index<
-    sequence_amd_kit<usearch_sequence_metric_needleman_wunsch_k>, util::u32_t,
-    sequence_amd_code_object<usearch_sequence_metric_needleman_wunsch_k, hip_class_k>>;
+    sequence_vram_kit<usearch_sequence_metric_dna_overlap_k, hip_class_k>, util::u32_t,
+    sequence_amd_code_object<usearch_sequence_metric_dna_overlap_k, hip_class_k>>;
 template struct us::sequence::vram_amd_kits<
-    sequence_amd_kit<usearch_sequence_metric_needleman_wunsch_k>, util::u32_t,
-    sequence_amd_code_object<usearch_sequence_metric_needleman_wunsch_k, hip_class_k>>;
+    sequence_vram_kit<usearch_sequence_metric_dna_overlap_k, hip_class_k>, util::u32_t,
+    sequence_amd_code_object<usearch_sequence_metric_dna_overlap_k, hip_class_k>>;
+
+template struct sequence_amd_code_object<usearch_sequence_metric_utf8_containment_k, hip_class_k>;
+template struct us::sequence::vram_amd_index<
+    sequence_vram_kit<usearch_sequence_metric_utf8_containment_k, hip_class_k>, util::u32_t,
+    sequence_amd_code_object<usearch_sequence_metric_utf8_containment_k, hip_class_k>>;
+template struct us::sequence::vram_amd_kits<
+    sequence_vram_kit<usearch_sequence_metric_utf8_containment_k, hip_class_k>, util::u32_t,
+    sequence_amd_code_object<usearch_sequence_metric_utf8_containment_k, hip_class_k>>;
 
 template struct basic_class_tables<sequence_traits_t, vendored_residency_t::vram_amd_k, hip_class_k>;

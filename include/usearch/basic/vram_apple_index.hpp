@@ -101,9 +101,8 @@ struct metal_basic_source {
             "#define USEARCH_METAL_KIT_RUNGS %zu\n"                    //
             "namespace unum { namespace usearch { namespace basic {\n" //
             "using metal_kit_t = %s;\n"                                //
-            "constant constexpr uint metal_kit_rungs_k = %zu;\n"       //
             "} } }\n",                                                 //
-            kits_type_::rungs_k, kits_type_::metal_kit_name_k, kits_type_::rungs_k));
+            kits_type_::canonical_rungs_count_k, kits_type_::metal_kit_name_k));
         std::memcpy(text.data() + length_, metal_basic_index_source_k, sizeof(metal_basic_index_source_k));
     }
 
@@ -134,30 +133,29 @@ struct metal_basic_rung_t {
 };
 
 /** Every instantiation each rung of a face's kits exports, which the host builds a pipeline for at
- *  the first @c reserve. */
+ *  the first @c reserve; the seeding walks only on the first rung of kits building by sketches. */
 inline constexpr metal_basic_rung_t metal_basic_rungs[] = {
-    {vram_kernel_t::insert_k, 0},
-    {vram_kernel_t::insert_k, 2},
-    {vram_kernel_t::insert_k, 4},
-    {vram_kernel_t::insert_k, 8},
-    {vram_kernel_t::insert_k, 16},
-    {vram_kernel_t::refine_k, 0},
-    {vram_kernel_t::refine_k, 2},
-    {vram_kernel_t::refine_k, 4},
-    {vram_kernel_t::refine_k, 8},
-    {vram_kernel_t::refine_k, 16},
-    {vram_kernel_t::back_link_k, 0},
-    {vram_kernel_t::search_k, 0},
-    {vram_kernel_t::search_k, 2},
-    {vram_kernel_t::search_k, 4},
-    {vram_kernel_t::search_k, 8},
-    {vram_kernel_t::search_k, 16},
-    {vram_kernel_t::gather_neighborhoods_k, 0},
+    {vram_kernel_t::insert_k, 0},   {vram_kernel_t::insert_k, 2},    {vram_kernel_t::insert_k, 4},
+    {vram_kernel_t::insert_k, 8},   {vram_kernel_t::insert_k, 16},   {vram_kernel_t::refine_k, 0},
+    {vram_kernel_t::refine_k, 2},   {vram_kernel_t::refine_k, 4},    {vram_kernel_t::refine_k, 8},
+    {vram_kernel_t::refine_k, 16},  {vram_kernel_t::back_link_k, 0}, {vram_kernel_t::search_k, 0},
+    {vram_kernel_t::search_k, 2},   {vram_kernel_t::search_k, 4},    {vram_kernel_t::search_k, 8},
+    {vram_kernel_t::search_k, 16},  {vram_kernel_t::seed_k, 0},      {vram_kernel_t::seed_k, 2},
+    {vram_kernel_t::seed_k, 4},     {vram_kernel_t::seed_k, 8},      {vram_kernel_t::seed_k, 16},
+    {vram_kernel_t::scan_k, 0},     {vram_kernel_t::scan_k, 2},      {vram_kernel_t::scan_k, 4},
+    {vram_kernel_t::scan_k, 8},     {vram_kernel_t::scan_k, 16},     {vram_kernel_t::gather_neighborhoods_k, 0},
     {vram_kernel_t::restitch_k, 0},
 };
 
-/** The kernels a load queues, which each face's kits export once, on their first rung. */
-inline constexpr vram_kernel_t metal_basic_load_kernels[] = {vram_kernel_t::load_values_k, vram_kernel_t::size_spans_k};
+/** The kernels a load and a sketch phase queue over their values, which each face's kits export
+ *  once, on their first rung. */
+inline constexpr vram_kernel_t metal_basic_load_kernels[] = {vram_kernel_t::load_values_k,
+                                                             vram_kernel_t::sketch_values_k};
+
+/** Where @p kernel sits among @ref metal_basic_load_kernels, as a step keeps their pipelines. */
+constexpr std::size_t metal_basic_load_position(vram_kernel_t kernel) noexcept {
+    return kernel == metal_basic_load_kernels[0] ? 0 : 1;
+}
 
 /** Every kernel over the neighbors matrix alone, which the contexts' source holds for every Apple
  *  design: the health check, the heal and a cut's partition. */
@@ -169,7 +167,8 @@ inline constexpr vram_kernel_t metal_graph_kernels[] = {
 };
 
 /** Spells the @c host_name a kit kernel exports @p instantiated on kit rung @p rung under: the
- *  kernel's name, the kit rung, then a walking kernel's candidate slots, none for a load's. */
+ *  kernel's name, the kit rung, then a walking kernel's candidate slots, and nothing more for a
+ *  load or a sketch phase. */
 inline void metal_basic_kernel_symbol(vram_kernel_symbol_t& symbol, std::size_t rung,
                                       metal_basic_rung_t instantiated) noexcept {
     symbol = {};
@@ -178,13 +177,15 @@ inline void metal_basic_kernel_symbol(vram_kernel_symbol_t& symbol, std::size_t 
     case vram_kernel_t::insert_k: symbol.append("usearch_basic_insert_kernel_"); break;
     case vram_kernel_t::refine_k: symbol.append("metal_refine_kernel_"); break;
     case vram_kernel_t::search_k: symbol.append("metal_search_kernel_"); break;
+    case vram_kernel_t::seed_k: symbol.append("metal_seed_kernel_"); break;
+    case vram_kernel_t::scan_k: symbol.append("metal_scan_kernel_"); break;
     case vram_kernel_t::back_link_k: symbol.append("metal_back_link_kernel_"), walks = false; break;
     case vram_kernel_t::gather_neighborhoods_k:
         symbol.append("metal_gather_neighborhoods_kernel_"), walks = false;
         break;
     case vram_kernel_t::restitch_k: symbol.append("metal_restitch_kernel_"), walks = false; break;
     case vram_kernel_t::load_values_k: symbol.append("metal_load_values_kernel"); return;
-    case vram_kernel_t::size_spans_k: symbol.append("metal_size_spans_kernel"); return;
+    case vram_kernel_t::sketch_values_k: symbol.append("metal_sketch_values_kernel"); return;
     default: return;
     }
     symbol.append_value(rung);
@@ -232,11 +233,11 @@ struct metal_ragged_storage {
 
 /**
  *  @brief One run of a load as the kits' hook stores it: the run's saved values in the caller's
- *      memory, their element sums, the planned tape starts their stored values take, and the
- *      widest span the hook raises.
+ *      memory, their element sums, the planned tape starts their stored values take, and the tables
+ *      a kit storing sketches derives them from.
  *
  *  Memory is unified, so a hook storing values as they are copies them on the host; one converting
- *  them launches the kits' load kernels, which read the run staged into the context's staging.
+ *  them launches the kits' load kernel, which reads the run staged into the context's staging.
  */
 template <typename node_id_type_>
 struct metal_load_step {
@@ -254,8 +255,12 @@ struct metal_load_step {
     byte_t* stored = nullptr;
     u64_t const* stored_offsets = nullptr;
 
-    /** The widest span the run's values prepare into, which the hook raises. */
-    std::size_t* span_bytes = nullptr;
+    /** The tables a kit storing sketches derives them from, which its face sets. */
+    metal_buffer_t const* tables = nullptr;
+
+    /** Threadgroup bytes each simdgroup of the launch carves for the kits' sketches, zero for kits
+     *  needing none. */
+    u32_t warp_scratch_bytes = 0;
 
     /** Copies the run's saved values into the tape as they are, for kits storing them so. */
     status_t copy_values() const noexcept {
@@ -264,25 +269,29 @@ struct metal_load_step {
     }
 
     /**
-     *  @brief Commits the kits' load @p kernel over the run the plan staged, on the context's
-     *      stream; the widest span it counts folds in once the run drains on that stream.
+     *  @brief Commits the kits' load @p kernel over the staged run, on the context's stream.
      *
      *  @par Statuses:
      *  - @c device_k The launch could not be encoded.
      */
     status_t launch_kits(vram_kernel_t kernel) const noexcept {
-        metal_pipeline_state_t const state = kernel == vram_kernel_t::load_values_k ? pipelines_[0] : pipelines_[1];
-        metal_launch_t launch {context_->api(), context_->stream(), state.pipeline};
+        metal_launch_t launch {context_->api(), context_->stream(),
+                               pipelines_[metal_basic_load_position(kernel)].pipeline};
         if (!launch) return status_code_t::device_k;
         launch.bind_bytes(&arguments, sizeof(arguments), metal_basic_arguments_buffer_k);
         launch.bind(*values_, metal_basic_values_buffer_k);
         launch.bind(*offsets_, metal_basic_offsets_buffer_k);
         launch.bind(*parameters_, metal_basic_parameters_buffer_k);
+        if (tables) launch.bind(*tables, metal_basic_sketch_tables_buffer_k);
+        // Metal takes threadgroup memory in 16-byte lines, and a kit carving none still binds one.
+        std::size_t const scratch_bytes = metal_simdgroups_k * std::size_t {warp_scratch_bytes};
+        metal_send<void>(*launch.api, launch.encoder, "setThreadgroupMemoryLength:atIndex:",
+                         round_up_to_multiple<std::size_t>(max_of<std::size_t>(scratch_bytes, 16), 16),
+                         std::size_t {0});
         launch.bind(context_->counters_, metal_basic_counters_buffer_k);
         launch.bind(context_->staging_, metal_basic_saved_buffer_k);
         launch.bind(context_->staging_, metal_basic_saved_offsets_buffer_k, saved_offsets_at_);
         launch.bind(*offsets_, metal_basic_stored_offsets_buffer_k, stored_offsets_at_);
-        launch.bind(context_->staging_, metal_basic_span_words_buffer_k, span_word_at_);
         std::size_t const groups = divide_round_up<std::size_t>(arguments.count, metal_threadgroup_threads_k);
         return context_->submit_(launch, max_of<std::size_t>(groups, 1), metal_threadgroup_threads_k);
     }
@@ -291,32 +300,85 @@ struct metal_load_step {
     template <typename, typename, typename, typename>
     friend struct vram_apple_graph;
 
-    /** Stages the run's saved values, their element sums and a zeroed span word, which the kits'
-     *  load kernels read. */
+    /** Stages the run's saved values and their element sums, which the kits' load kernels read. */
     status_t stage_() noexcept {
         std::size_t const count = arguments.count;
         std::size_t const sums_bytes = saved_offsets ? (count + 1) * sizeof(u64_t) : 0;
         saved_offsets_at_ = round_up_to_multiple<std::size_t>(saved.size() + sizeof(u64_t), sizeof(u64_t));
-        span_word_at_ = saved_offsets_at_ + round_up_to_multiple<std::size_t>(sums_bytes, sizeof(u64_t));
         bool fresh = false;
-        if (status_t const grown = context_->ensure_(context_->staging_, span_word_at_ + sizeof(u64_t), fresh);
+        if (status_t const grown = context_->ensure_(context_->staging_, saved_offsets_at_ + sums_bytes, fresh);
             failed(grown))
             return grown;
         byte_t* const staging = context_->staging_.host;
         if (!saved.empty()) std::memcpy(staging, saved.data(), saved.size());
         if (sums_bytes) std::memcpy(staging + saved_offsets_at_, saved_offsets, sums_bytes);
-        std::memset(staging + span_word_at_, 0, sizeof(u64_t));
         return status_code_t::success_k;
     }
 
-    /** The context, the pipelines of the two load kernels, the columns and the parameters a launch
-     *  binds, and where the staging and the offsets column place the run. */
+    /** The context, the pipelines of the load kernel and the sketch kernel, the columns and the
+     *  parameters a launch binds, and where the staging and the offsets column place the run. */
     traversal_context_t* context_ = nullptr;
     metal_pipeline_state_t pipelines_[2] = {};
     metal_buffer_t const* values_ = nullptr;
     metal_buffer_t const* offsets_ = nullptr;
     metal_buffer_t const* parameters_ = nullptr;
-    std::size_t stored_offsets_at_ = 0, saved_offsets_at_ = 0, span_word_at_ = 0;
+    std::size_t stored_offsets_at_ = 0, saved_offsets_at_ = 0;
+};
+
+/** One sketch phase as the kits' hook queues it ahead of the walks: an insert's values, which the
+ *  host wrote into the tape in place, or a search's queries in the staging, whose sketches land in
+ *  rows of their own, as the kits' sketch kernel reads them. */
+template <typename node_id_type_>
+struct metal_sketch_step {
+    using traversal_context_t = metal_traversal_context<metal_shared_allocator_t>;
+
+    /** The scalars the kits' sketch kernel reads: @c first_id and @c count name the batch, the
+     *  bytes of every sketch, and a search's @c queries_count, zero for an insert. */
+    metal_basic_arguments_t arguments {};
+
+    /** The tables a kit storing sketches derives them from, which its face sets. */
+    metal_buffer_t const* tables = nullptr;
+
+    /** Threadgroup bytes each simdgroup of the launch carves for the kits' sketches, zero for kits
+     *  needing none. */
+    u32_t warp_scratch_bytes = 0;
+
+    /**
+     *  @brief Commits the kits' @p kernel over the batch's values on the context's stream.
+     *
+     *  @par Statuses:
+     *  - @c device_k The launch could not be encoded.
+     */
+    status_t launch_kits(vram_kernel_t kernel) const noexcept {
+        metal_launch_t launch {context_->api(), context_->stream(),
+                               pipelines_[metal_basic_load_position(kernel)].pipeline};
+        if (!launch) return status_code_t::device_k;
+        launch.bind_bytes(&arguments, sizeof(arguments), metal_basic_arguments_buffer_k);
+        launch.bind(*values_, metal_basic_values_buffer_k);
+        launch.bind(*offsets_, metal_basic_offsets_buffer_k, offsets_at_);
+        if (sketches_) launch.bind(*sketches_, metal_basic_query_sketches_buffer_k, sketches_at_);
+        if (tables) launch.bind(*tables, metal_basic_sketch_tables_buffer_k);
+        // Metal takes threadgroup memory in 16-byte lines, and a kit carving none still binds one.
+        std::size_t const scratch_bytes = metal_simdgroups_k * std::size_t {warp_scratch_bytes};
+        metal_send<void>(*launch.api, launch.encoder, "setThreadgroupMemoryLength:atIndex:",
+                         round_up_to_multiple<std::size_t>(max_of<std::size_t>(scratch_bytes, 16), 16),
+                         std::size_t {0});
+        std::size_t const groups = divide_round_up<std::size_t>(arguments.count, metal_threadgroup_threads_k);
+        return context_->submit_(launch, max_of<std::size_t>(groups, 1), metal_threadgroup_threads_k);
+    }
+
+  private:
+    template <typename, typename, typename, typename>
+    friend struct vram_apple_graph;
+
+    /** The context, the pipelines of the load kernel and the sketch kernel, the columns a launch
+     *  binds, and where the offsets and a search's sketch rows start in theirs. */
+    traversal_context_t* context_ = nullptr;
+    metal_pipeline_state_t pipelines_[2] = {};
+    metal_buffer_t const* values_ = nullptr;
+    metal_buffer_t const* offsets_ = nullptr;
+    metal_buffer_t const* sketches_ = nullptr;
+    std::size_t offsets_at_ = 0, sketches_at_ = 0;
 };
 
 /** Kits whose selector needs a breadth of at least @c build_breadth_k candidates per build walk. */
@@ -354,13 +416,19 @@ concept a_kit_set_with_build_breadth = requires { kits_type_::build_breadth_k; }
  *  A modality's face owns one as a member and forwards its verbs. Its MSL is written over 32-bit
  *  node IDs, so a graph over any other width answers @c unsupported_k at its first @c reserve.
  *
+ *  The kits name @c canonical_rungs_count_k kit rungs, narrowest first, their builders on the first
+ *  @c build_rungs_count_k of them, one where they build by sketches and every one otherwise;
+ *  @c metal_sources_k, the MSL pieces to splice, and @c metal_kit_name_k, the MSL kit type the
+ *  walks instantiate over; by the role scoring, @c rung_serving_ values of a length,
+ *  @c lanes_per_entry_ of a rung, and the @c span_bytes_ one value prepares into, from its length
+ *  alone where a load names no bytes; @c upload_parameters_ and @c parameters_, the buffer its
+ *  kernels read; its codec, @c saved_bytes_, @c save_value_, @c stored_bytes_ and
+ *  @c queue_load_values_; where they store sketches, @c sketch_bytes apiece; and, where they build
+ *  by sketches, @c queue_sketches_, writing the sketches of an insert's values or of a search's
+ *  queries on the device. Such kits seed every search by a walk over the sketches.
+ *
  *  @tparam node_id_type_ The node IDs of the neighbors matrix, the walks and the matches.
- *  @tparam kits_type_ The face's kits, held as a member: @c rungs_k kit rungs, narrowest first;
- *      @c metal_sources_k, the MSL pieces to splice, and @c metal_kit_name_k, the MSL kit type the
- *      walks instantiate over; @c rung_serving_ nodes of a length, @c lanes_per_entry_ of a rung,
- *      the @c span_bytes_ one value prepares into and the bound any loaded value of a length takes;
- *      @c upload_parameters_ and @c parameters_, the buffer its kernels read; and its codec,
- *      @c saved_bytes_, @c save_value_, @c stored_bytes_ and @c queue_load_values_.
+ *  @tparam kits_type_ The face's kits, held as a member.
  *  @tparam key_type_ The caller-visible identity of every node, trivially copyable.
  *  @tparam key_hash_type_ The key map's hash of a key.
  */
@@ -369,6 +437,9 @@ template <typename node_id_type_, typename kits_type_, typename key_type_ = uuid
 struct vram_apple_graph {
     using traversal_context_t = metal_traversal_context<metal_shared_allocator_t>;
     using node_id_t = node_id_type_;
+
+    /** Neighbor rows another graph hands @ref adopt_links, in memory host and device share. */
+    using links_view_t = links_view<node_id_t>;
     using key_t = key_type_;
     using distance_t = distance_t;
     using candidates_count_t = u32_t;
@@ -387,6 +458,17 @@ struct vram_apple_graph {
 
     /** The strongest @c synchronization_t contract this design honors; nothing routes on it. */
     inline static constexpr synchronization_t synchronization_ceiling_k = synchronization_t::concurrent_k;
+
+    /** Whether the kits build by sketches, which then seed every search. */
+    inline static constexpr bool sketching_k = requires(kits_type_ const& kits, metal_sketch_step<node_id_t> step) {
+        kits.queue_sketches_(step);
+    };
+
+    /** Whether the kits keep a sketch of a fixed width in front of every stored value. */
+    inline static constexpr bool sized_sketches_k = requires(kits_type_ const& kits) { kits.sketch_bytes(); };
+
+    /** Whether the kits carve shared memory for every warp of a launch. */
+    inline static constexpr bool warp_scratch_k = requires(kits_type_& kits) { kits.warp_scratch_bytes_(); };
 
     /** Pins the graph to the storage allocator's device, its kits scoring under @p kernel where
      *  they cover several metrics, and keeps its host keys and key map on @p keys_allocator; the
@@ -455,6 +537,7 @@ struct vram_apple_graph {
 
     /** The face's kits, which a face configures before the first @c reserve freezes them. */
     kits_type_& kits() noexcept { return kits_; }
+    kits_type_ const& kits() const noexcept { return kits_; }
 
     /** Every node's key on the host, and every key's nodes; readers pass the watermark they
      *  acquired. */
@@ -800,14 +883,15 @@ struct vram_apple_graph {
 
         // Walks prepare stored nodes as much as the batch's, so the rung and spans cover both.
         std::size_t longest = longest_value_;
-        u32_t const span_bytes = static_cast<u32_t>(max_of(span_bytes_, span_bytes_of_(tape, longest)));
-        std::size_t const rung = kits_.rung_serving_(longest);
-        if (rung == kits_type_::rungs_k) return refuse(status_code_t::unsupported_k);
+        u32_t const span_bytes = static_cast<u32_t>(
+            max_of(span_bytes_, span_bytes_of_(score_role_t::build_k, tape, longest)));
+        std::size_t const rung = kits_.rung_serving_(score_role_t::build_k, longest);
+        if (rung == kits_type_::canonical_rungs_count_k) return refuse(status_code_t::unsupported_k);
         std::size_t const batch_bytes = tape.offsets[entries] - tape.offsets[0];
         std::size_t const total_nodes = first_id + entries;
 
         // Every carve and growth precedes the first commit, so a refusal publishes nothing.
-        build_shape_t const shape = build_shape_(config.expansion_factor, span_bytes);
+        build_shape_t const shape = build_shape_(config.expansion_factor, span_bytes, rung);
         std::size_t const waves = insert_waves_(first_id, total_nodes);
         std::size_t const links_bytes = (total_nodes + 2 * entries * connectivity()) * sizeof(node_id_t);
         std::size_t const touched_at = round_up_to_multiple<std::size_t>(links_bytes, sizeof(u64_t));
@@ -820,7 +904,7 @@ struct vram_apple_graph {
             failed(staged))
             return refuse(staged);
         metal_basic_arguments_t arguments = arguments_();
-        u32_t const blocks = device_.multiprocessor_count * resident_blocks_(rung, vram_kernel_t::insert_k, 0);
+        u32_t const blocks = build_blocks_(shape);
         if (status_t const sized = shape_arena_(context, arguments, shape.arena_shape, blocks, 2 * entries);
             failed(sized))
             return refuse(sized);
@@ -835,6 +919,17 @@ struct vram_apple_graph {
         u64_t* const starts = value_starts_();
         for (std::size_t offset = 0; offset != entries; ++offset)
             starts[first_id + offset + 1] = tape_bytes_ + (tape.offsets[offset + 1] - tape.offsets[0]);
+        // The kits derive what the written values still lack on the device, ahead of the walks.
+        metal_sketch_step<node_id_t> step;
+        step.arguments = arguments;
+        step.arguments.first_id = static_cast<u32_t>(first_id);
+        step.arguments.count = static_cast<u32_t>(entries);
+        step.context_ = &context;
+        for (vram_kernel_t const kernel : metal_basic_load_kernels)
+            step.pipelines_[metal_basic_load_position(kernel)] = kits_pipeline_(0, kernel, 0);
+        step.values_ = &values_tape_, step.offsets_ = &offsets_column_;
+        if constexpr (sketching_k)
+            if (status_t const queued = kits_.queue_sketches_(step); failed(queued)) return refuse(queued);
         // Every chain starts empty, and each back-link launch empties the ones it merged.
         byte_t* const staging = context.staging_.host;
         std::memset(staging, 0xFF, total_nodes * sizeof(node_id_t));
@@ -843,7 +938,7 @@ struct vram_apple_graph {
 
         arguments.span_bytes = span_bytes;
         arguments.expansion = shape.expansion;
-        status_t const launched = launch_insert_(arguments, shape, first_id, total_nodes, rung, blocks, touched_at,
+        status_t const launched = launch_insert_(arguments, shape, first_id, total_nodes, blocks, touched_at,
                                                  counters_at, context);
         // A failure after a commit is kept, as the committed nodes stay claimed.
         if (failed(launched)) return failed(status()) ? expected<insert_result_t> {{}, launched} : refuse(launched);
@@ -882,6 +977,9 @@ struct vram_apple_graph {
 
         /** Matches reported per query. */
         candidates_count_t count = 10;
+
+        /** How the nodes are reached: a walk, or an exact scan of every published one. */
+        traversal_t traversal = traversal_t::walk_k;
     };
 
     /** Telemetry of one @c search() batch. */
@@ -889,6 +987,9 @@ struct vram_apple_graph {
         std::size_t count = 0;
         std::size_t visited_members = 0;
         std::size_t computed_distances = 0;
+
+        /** Distances the seeding walks scored by sketch, apart from @c computed_distances. */
+        std::size_t computed_distances_in_seeding = 0;
         std::size_t restarts = 0;
         std::size_t tail_compactions = 0;
         std::size_t tail_dropped = 0;
@@ -899,6 +1000,7 @@ struct vram_apple_graph {
             count += other.count;
             visited_members += other.visited_members;
             computed_distances += other.computed_distances;
+            computed_distances_in_seeding += other.computed_distances_in_seeding;
             restarts += other.restarts;
             tail_compactions += other.tail_compactions;
             tail_dropped += other.tail_dropped;
@@ -944,27 +1046,64 @@ struct vram_apple_graph {
             result_distances.extent(0) != queries_count || result_distances.extent(1) < config.count)
             return {{}, status_code_t::config_mismatch_k};
         std::size_t longest = 0;
-        u32_t const span_bytes = static_cast<u32_t>(span_bytes_of_(queries, longest));
-        std::size_t const rung = kits_.rung_serving_(longest);
-        if (rung == kits_type_::rungs_k) return {{}, status_code_t::unsupported_k};
+        u32_t const span_bytes = static_cast<u32_t>(span_bytes_of_(score_role_t::search_k, queries, longest));
+        std::size_t const rung = kits_.rung_serving_(score_role_t::search_k, longest);
+        if (rung == kits_type_::canonical_rungs_count_k) return {{}, status_code_t::unsupported_k};
 
-        // The staging holds the queries' bytes from a word boundary, their offsets, the outputs.
+        // A scan keeps no candidates past its matches and seeds nothing.
+        bool const scanning = config.traversal == traversal_t::scan_k;
+        if (scanning) config.expansion_factor = config.count;
+        vram_kernel_t const ranking_kernel = scanning ? vram_kernel_t::scan_k : vram_kernel_t::search_k;
+
+        // The staging holds the queries' bytes from a word boundary, their offsets, the outputs,
+        // and where the kits sketch, the seeds and the sketch of every query and the seeding
+        // walk's counter block; a scan's ranges and their finished counts follow.
+        metal_basic_arguments_t search_arguments = arguments_(), seed_arguments = arguments_();
         std::size_t const batch_bytes = queries.offsets[queries_count] - queries.offsets[0];
         std::size_t const results_count = queries_count * config.count;
+        std::size_t const seeds_count = scanning ? 0 : seeds_count_();
         std::size_t const offsets_at = round_up_to_multiple<std::size_t>(batch_bytes + tape_margin_k, sizeof(u64_t));
         std::size_t const ids_at = offsets_at + (queries_count + 1) * sizeof(u64_t);
         std::size_t const distances_at = round_up_to_multiple<std::size_t>(ids_at + results_count * sizeof(node_id_t),
                                                                            sizeof(u64_t));
+        std::size_t const seeds_at = round_up_to_multiple<std::size_t>(
+            distances_at + results_count * sizeof(distance_t), sizeof(u64_t));
+        std::size_t const sketches_at = round_up_to_multiple<std::size_t>(
+            seeds_at + queries_count * seeds_count * sizeof(node_id_t), sizeof(u64_t));
+        std::size_t const seed_counters_at = round_up_to_multiple<std::size_t>(
+            sketches_at + queries_count * search_arguments.sketch_bytes, sizeof(u64_t));
+        walk_launch_t searching = walk_launch_(rung, span_bytes, ranking_kernel, queries_count, config);
+        std::size_t const ranges = scanning ? scan_ranges_(searching, rung, queries_count, visible, config.count) : 0;
+        if (scanning)
+            searching.blocks = walk_blocks_(queries_count * ranges, rung, ranking_kernel, searching.slots,
+                                            searching.walkers);
+        std::size_t const range_matches_at = round_up_to_multiple<std::size_t>(
+            seed_counters_at + (seeds_count ? metal_counters_bytes_k : 0), sizeof(u64_t));
+        std::size_t const finished_ranges_at = range_matches_at + queries_count * ranges * config.count * sizeof(u64_t);
         bool fresh = false;
-        if (status_t const staged = context.ensure_(context.staging_, distances_at + results_count * sizeof(distance_t),
-                                                    fresh);
+        if (status_t const staged = context.ensure_(
+                context.staging_, finished_ranges_at + (scanning ? queries_count * sizeof(u32_t) : 0), fresh);
             failed(staged))
             return {{}, staged};
-        u32_t const slots = walk_slots_(config);
-        gpu_arena_shape_t const arena_shape = walk_arena_shape_(config, span_bytes);
-        u32_t const blocks = walk_blocks_(queries_count, rung, slots);
-        metal_basic_arguments_t arguments = arguments_();
-        if (status_t const sized = shape_arena_(context, arguments, arena_shape, blocks, queries_count); failed(sized))
+        // Seeding walks score sketches, which kits building by them compile on their first rung.
+        walk_launch_t seeding;
+        if constexpr (sketching_k)
+            if (!scanning) seeding = walk_launch_(0, 0, vram_kernel_t::seed_k, queries_count, config);
+        // Both walks fit the arena before either takes its epochs, so the second never moves it.
+        if (status_t const sized = context.ensure_(context.arena_,
+                                                   max_of(searching.arena_bytes(), seeding.arena_bytes()), fresh);
+            failed(sized))
+            return {{}, sized};
+        // A seeded query walks twice, to seed and to search, each walk under an epoch of its own.
+        if constexpr (sketching_k)
+            if (!scanning)
+                if (status_t const sized = shape_arena_(context, seed_arguments, seeding.arena_shape, seeding.blocks,
+                                                        queries_count);
+                    failed(sized))
+                    return {{}, sized};
+        if (status_t const sized = shape_arena_(context, search_arguments, searching.arena_shape, searching.blocks,
+                                                queries_count);
+            failed(sized))
             return {{}, sized};
         byte_t* const staging = context.staging_.host;
         std::memcpy(staging, queries.elements + queries.offsets[0], batch_bytes);
@@ -973,32 +1112,71 @@ struct vram_apple_graph {
         for (std::size_t query = 0; query <= queries_count; ++query)
             staged_offsets[query] = queries.offsets[query] - queries.offsets[0];
         std::memset(context.counters_.host, 0, context.counters_.bytes);
+        if (seeds_count) std::memset(staging + seed_counters_at, 0, metal_counters_bytes_k);
+        if (scanning) std::memset(staging + finished_ranges_at, 0, queries_count * sizeof(u32_t));
 
         node_id_t* const ids = reinterpret_cast<node_id_t*>(staging + ids_at);
         distance_t* const distances = reinterpret_cast<distance_t*>(staging + distances_at);
-        if (visible) {
-            arguments.queries_count = static_cast<u32_t>(queries_count);
-            arguments.sampling_bound = static_cast<u32_t>(visible);
-            arguments.span_bytes = span_bytes;
-            arguments.expansion = walk_expansion_(config);
-            arguments.selection_nodes = walk_selection_nodes_(arguments.expansion, slots);
-            arguments.concurrent_walks = device_.multiprocessor_count *
-                                         resident_blocks_(rung, vram_kernel_t::search_k, slots) *
-                                         walkers_per_block_(rung);
-            arguments.filling_nodes = filling_nodes<u32_t>(arguments.expansion, static_cast<u32_t>(connectivity()));
-            arguments.count = config.count;
+        // Each walk counts into its own words, as nothing on a stream zeroes one between two
+        // command buffers: the search into the context's counters, its seeding walk into a staged
+        // block of counters.
+        auto const launch_walk = [&](metal_basic_arguments_t launched, walk_launch_t const& walk, std::size_t walk_rung,
+                                     u32_t walk_span_bytes, vram_kernel_t kernel, metal_buffer_t const& counters,
+                                     std::size_t counters_at) noexcept -> status_t {
+            launched.queries_count = static_cast<u32_t>(queries_count);
+            launched.sampling_bound = static_cast<u32_t>(visible);
+            launched.span_bytes = walk_span_bytes;
+            launched.expansion = walk_expansion_(config);
+            launched.selection_nodes = walk_selection_nodes_(launched.expansion, walk.slots);
+            launched.concurrent_walks = device_.multiprocessor_count * resident_blocks_(walk_rung, kernel, walk.slots) *
+                                        walk.walkers;
+            launched.filling_nodes = filling_nodes<u32_t>(launched.expansion, static_cast<u32_t>(connectivity()));
+            launched.count = config.count;
+            launched.seeds_count = static_cast<u32_t>(seeds_count);
+            launched.ranges = static_cast<u32_t>(ranges);
             metal_launch_t launch {context.api(), context.stream(),
-                                   kits_pipeline_(rung, vram_kernel_t::search_k, slots).pipeline};
-            if (!launch) return {{}, status_code_t::device_k};
-            bind_kit_storage_(launch, arguments, context);
+                                   kits_pipeline_(walk_rung, kernel, walk.slots).pipeline};
+            if (!launch) return status_code_t::device_k;
+            bind_kit_storage_(launch, launched, context);
+            launch.bind(counters, metal_basic_counters_buffer_k, counters_at);
+            launch.bind(context.arena_, metal_basic_arena_buffer_k);
             launch.bind(context.staging_, metal_basic_staging_buffer_k);
             launch.bind(context.staging_, metal_basic_query_offsets_buffer_k, offsets_at);
             launch.bind(context.staging_, metal_basic_ids_buffer_k, ids_at);
             launch.bind(context.staging_, metal_basic_distances_buffer_k, distances_at);
-            if (status_t const submitted = context.submit_(launch, blocks, metal_threadgroup_threads_k);
-                failed(submitted))
-                return {{}, submitted};
+            if (seeds_count) {
+                launch.bind(context.staging_, metal_basic_seed_ids_buffer_k, seeds_at);
+                launch.bind(context.staging_, metal_basic_query_sketches_buffer_k, sketches_at);
+            }
+            if (ranges) {
+                launch.bind(context.staging_, metal_basic_range_matches_buffer_k, range_matches_at);
+                launch.bind(context.staging_, metal_basic_finished_ranges_buffer_k, finished_ranges_at);
+            }
+            return context.submit_(launch, walk.blocks, metal_threadgroup_threads_k);
+        };
+        if constexpr (sketching_k)
+            if (visible && !scanning) {
+                metal_sketch_step<node_id_t> step;
+                step.arguments = arguments_();
+                step.arguments.count = step.arguments.queries_count = static_cast<u32_t>(queries_count);
+                step.context_ = &context;
+                for (vram_kernel_t const kernel : metal_basic_load_kernels)
+                    step.pipelines_[metal_basic_load_position(kernel)] = kits_pipeline_(0, kernel, 0);
+                step.values_ = &context.staging_, step.offsets_ = &context.staging_, step.sketches_ = &context.staging_;
+                step.offsets_at_ = offsets_at, step.sketches_at_ = sketches_at;
+                if (status_t const queued = kits_.queue_sketches_(step); failed(queued)) return {{}, queued};
+                if (status_t const launched = launch_walk(seed_arguments, seeding, 0, 0, vram_kernel_t::seed_k,
+                                                          context.staging_, seed_counters_at);
+                    failed(launched))
+                    return {{}, launched};
+            }
+        if (visible) {
+            if (status_t const launched = launch_walk(search_arguments, searching, rung, span_bytes, ranking_kernel,
+                                                      context.counters_, 0);
+                failed(launched))
+                return {{}, launched};
             if (status_t const drained = context.wait(); failed(drained)) return {{}, drained};
+            if (seeds_count) fold_counters_(context, staging + seed_counters_at, 1);
         }
         // An empty graph matches nothing: every rank is a sentinel.
         else
@@ -1013,7 +1191,8 @@ struct vram_apple_graph {
         search_result_t result;
         result.count = config.count;
         result.visited_members = spent.hops;
-        result.computed_distances = spent.scored;
+        result.computed_distances = spent.scored + spent.sketched;
+        result.computed_distances_in_seeding = spent.sketched;
         result.restarts = spent.restarts;
         result.tail_compactions = spent.tail_compactions;
         result.tail_dropped = spent.tail_dropped;
@@ -1034,6 +1213,10 @@ struct vram_apple_graph {
          *  neighborhood's entries, each the mean stored value; zero takes the device's, and no more
          *  than the device's is ever taken. */
         std::size_t cache_bytes = 0;
+
+        /** Width of the walks a round's reach takes for islands; zero derives twice the
+         *  connectivity. */
+        candidates_count_t expansion_factor = 0;
     };
 
     /** A reshard's knobs, as the RAM tower names them: its rounds', the most entries a sharded
@@ -1071,19 +1254,38 @@ struct vram_apple_graph {
         std::size_t hubs = 0, runs = 0, groups = 0;
     };
 
+    /** Everything one building pass derives from its requested expansion, once: the kit rung, the
+     *  span its values prepare into, the walk's breadth and register rung, the candidates its
+     *  selection and a back-link round hold, and the arena slice keeping the scratch of both. */
+    struct build_shape_t {
+        std::size_t rung = 0;
+        u32_t span_bytes = 0;
+        u32_t expansion = 0, candidate_slots = 0, walk_selection_nodes = 0, reselection_nodes = 0;
+        u32_t scratch_bytes = 0;
+        gpu_arena_shape_t arena_shape {};
+    };
+
     /** Where a health check and a round keep each column in a context's round buffer, in bytes, as
      *  dense Apple lays them out: the counters; the depths both ways, the in-link and shallower
      *  in-link counts, and the reached, reaching-root, two-ways and changed bits; then the islands'
      *  columns, which the round's alias: each entry's neighborhood, the entries in neighborhood
      *  order, their starts with room for splits, a gather's hubs, its runs, the entries before each
-     *  run, and one gather's or restitch's scratch slice per simdgroup. */
+     *  run, and one gather's or restitch's scratch slice per simdgroup; past the island nodes, the
+     *  reach's chains alias the rest. */
     struct round_layout_t {
         std::size_t counters = 0, depths_from_root = 0, depths_to_root = 0, in_links = 0, shallower_in_links = 0;
         std::size_t reached = 0, reaches_root = 0, two_ways_to_root = 0, changed = 0;
         std::size_t island_nodes = 0, island_components = 0, island_labels = 0, island_parents = 0;
         std::size_t island_entries = 0, island_roles = 0;
         std::size_t entry_neighborhoods = 0, neighborhood_entries = 0, neighborhood_offsets = 0, hub_nodes = 0;
-        std::size_t runs = 0, run_items = 0, stitch = 0, bytes = 0;
+        std::size_t runs = 0, run_items = 0, stitch = 0, reach = 0, bytes = 0;
+    };
+
+    /** Where a reach keeps its chains, in bytes from the round layout's @c reach : every node's
+     *  head, the picks and the touched nodes of its widest wave, a touched word per wave, then a
+     *  counter block per launch, two a wave; and their bytes. */
+    struct reach_layout_t {
+        std::size_t heads = 0, next = 0, touched_ids = 0, touched_words = 0, counters = 0, bytes = 0;
     };
 
     /** One part of a cut as the host assigns it: its nodes, those given slots so far, its value
@@ -1431,8 +1633,10 @@ struct vram_apple_graph {
      *  cache-sized set of hubs by seeded bijection, gathers every entry into the neighborhood of
      *  its nearest hub, and again inside every neighborhood over its capacity among hubs drawn from
      *  its own entries, then restitches each neighborhood through the kits; the closing health
-     *  check from the same root decides the verdict. The hubs are drawn and the entries ordered by
-     *  neighborhood on the host over unified memory at the barriers. Planning made every
+     *  check from the same root decides the verdict. The reach then re-selects every island node by
+     *  walks over the whole graph, its picks back-linked, and checks again; what is left unreached
+     *  heals again, checked again, while that shrinks. The hubs are drawn and the entries ordered
+     *  by neighborhood on the host over unified memory at the barriers. Planning made every
      *  allocation, so no phase allocates. A plan @ref plan_refine opened holds the claim word
      *  closed for its life, so batches answer @c contended_k meanwhile while searches run.
      */
@@ -1445,17 +1649,19 @@ struct vram_apple_graph {
         refine_plan_t(refine_plan_t&& other) noexcept
             : health(other.health), index_(std::exchange(other.index_, nullptr)),
               claim_(std::exchange(other.claim_, claim_t::caller_reopens_k)), shape_(other.shape_),
-              neighborhoods_(other.neighborhoods_), runs_(other.runs_), gathered_(other.gathered_),
-              round_seed_(other.round_seed_), swept_after_(other.swept_after_), phase_(other.phase_),
-              status_(other.status_), tally_(other.tally_) {}
+              reach_shape_(other.reach_shape_), neighborhoods_(other.neighborhoods_), runs_(other.runs_),
+              hubs_(other.hubs_), gathered_(other.gathered_), reached_rows_(other.reached_rows_),
+              islands_left_(other.islands_left_), reach_left_(other.reach_left_), round_seed_(other.round_seed_),
+              swept_after_(other.swept_after_), phase_(other.phase_), status_(other.status_), tally_(other.tally_) {}
         refine_plan_t& operator=(refine_plan_t&& other) noexcept {
             if (this == &other) return *this;
             if (claim_ == claim_t::plan_reopens_k) index_->reopen_();
             health = other.health, index_ = std::exchange(other.index_, nullptr);
             claim_ = std::exchange(other.claim_, claim_t::caller_reopens_k), shape_ = other.shape_;
-            neighborhoods_ = other.neighborhoods_, runs_ = other.runs_, gathered_ = other.gathered_;
-            round_seed_ = other.round_seed_, swept_after_ = other.swept_after_, phase_ = other.phase_;
-            status_ = other.status_, tally_ = other.tally_;
+            reach_shape_ = other.reach_shape_, neighborhoods_ = other.neighborhoods_, runs_ = other.runs_;
+            hubs_ = other.hubs_, gathered_ = other.gathered_, reached_rows_ = other.reached_rows_;
+            islands_left_ = other.islands_left_, reach_left_ = other.reach_left_, round_seed_ = other.round_seed_;
+            swept_after_ = other.swept_after_, phase_ = other.phase_, status_ = other.status_, tally_ = other.tally_;
             return *this;
         }
         refine_plan_t(refine_plan_t const&) = delete;
@@ -1484,14 +1690,18 @@ struct vram_apple_graph {
             case phase_t::heal_k: status_ = index_->queue_heal_(health, context); break;
             case phase_t::gather_k: status_ = index_->queue_gather_(*this, context); break;
             case phase_t::restitch_k: status_ = index_->queue_restitch_(*this, context); break;
+            case phase_t::reach_k: status_ = index_->queue_reach_(*this, context); break;
             default: break;
             }
             return status_;
         }
 
-        /** Sleeps until the committed phase finished on @p context. */
+        /** Sleeps until the committed phase finished on @p context; after the reach, folds its
+         *  launches' counters into the context's and takes the rows it changed. */
         status_t wait(traversal_context_t& context) noexcept {
             if (index_ && succeeded(status_) && phase_ != phase_t::done_k) status_ = context.wait();
+            if (index_ && succeeded(status_) && phase_ == phase_t::reach_k)
+                tally_.changed_nodes += index_->fold_reach_(*this, context);
             return status_;
         }
 
@@ -1505,6 +1715,13 @@ struct vram_apple_graph {
             switch (phase_) {
             case phase_t::heal_k:
                 tally_.islands_reconnected += words[metal_round_healed_k];
+                // A closing check zeroed what the opening heal and the restitch counted, so a
+                // closing heal adds its rows, and is checked.
+                if (swept_after_ != phase_t::none_k) {
+                    tally_.changed_nodes += words[metal_round_changed_k];
+                    verify_(phase_t::heal_k);
+                    break;
+                }
                 tally_.changed_nodes = words[metal_round_changed_k];
                 // A round bound after a reshard's stop heals and verifies alone.
                 if (tally_.verdict == refine_verdict_t::stopped_k) verify_(phase_t::restitch_k);
@@ -1522,6 +1739,10 @@ struct vram_apple_graph {
                 tally_.dropped_links += metal_tally(words, metal_round_dropped_k);
                 verify_(phase_t::restitch_k);
                 break;
+            case phase_t::reach_k:
+                tally_.reselected_nodes += reached_rows_;
+                verify_(phase_t::reach_k);
+                break;
             default: break;
             }
             return succeeded(status_) && phase_ != phase_t::done_k;
@@ -1530,7 +1751,8 @@ struct vram_apple_graph {
         /** Skips what is left of the round's phase in hand: an opening health check, or a heal not
          *  yet run, ends the round with nothing written; a hubs draw, a gather or a restitch sends
          *  the round to the closing health check; the closing check runs on, and its verdict reads
-         *  stopped, whatever it measures. */
+         *  stopped, whatever it measures; a closing heal or a reach not yet run concludes the round
+         *  from the last check. */
         void stop() noexcept {
             if (!rounding()) return;
             tally_.verdict = refine_verdict_t::stopped_k;
@@ -1539,9 +1761,10 @@ struct vram_apple_graph {
                 if (swept_after_ == phase_t::none_k) phase_ = phase_t::done_k;
                 break;
             case phase_t::heal_k:
-                tally_.reachability = tally_.opening;
-                phase_ = phase_t::done_k;
+                if (swept_after_ != phase_t::none_k) close_round_();
+                else tally_.reachability = tally_.opening, phase_ = phase_t::done_k;
                 break;
+            case phase_t::reach_k: close_round_(); break;
             case phase_t::hubs_k:
             case phase_t::gather_k:
             case phase_t::restitch_k: verify_(phase_t::restitch_k); break;
@@ -1551,15 +1774,14 @@ struct vram_apple_graph {
 
         /** Whether the plan runs a round, whose every barrier a caller's progress hears. */
         bool rounding() const noexcept {
-            if (phase_ == phase_t::health_k)
-                return swept_after_ == phase_t::none_k || swept_after_ == phase_t::restitch_k;
-            return phase_ >= phase_t::heal_k && phase_ <= phase_t::restitch_k;
+            if (phase_ == phase_t::health_k) return swept_in_round_();
+            return phase_ >= phase_t::heal_k && phase_ <= phase_t::reach_k;
         }
 
         /** The phase the plan is in. */
         phase_t phase() const noexcept { return phase_; }
 
-        /** The position of the round's phase in hand among its six; zero outside a round's
+        /** The position of the round's phase in hand among its seven; zero outside a round's
          *  phases. */
         std::size_t ordinal() const noexcept { return rounding() ? round_ordinal(phase_, swept_after_) : 0; }
 
@@ -1567,11 +1789,12 @@ struct vram_apple_graph {
         std::size_t completed() const noexcept { return phase_ == phase_t::health_k ? health.swept() : total(); }
 
         /** Units of the round's phase in hand in all: islands healed, hubs drawn, entries one
-         *  gather files, or entries re-stitched. */
+         *  gather files, entries re-stitched, or rows reached. */
         std::size_t total() const noexcept {
             switch (phase_) {
             case phase_t::health_k: return 2 * std::size_t {health.visible};
             case phase_t::heal_k: return health.islands();
+            case phase_t::reach_k: return reached_rows_;
             case phase_t::hubs_k: return round_first_hubs(health.visible, shape_.hubs_per_draw, shape_.capacity);
             case phase_t::gather_k: return gathered_;
             case phase_t::restitch_k: return health.visible;
@@ -1582,8 +1805,7 @@ struct vram_apple_graph {
         /** Opens the next round once one ended, from the root the closing check kept; a no-op
          *  mid-round. */
         void next_round() noexcept {
-            if (!index_ || phase_ != phase_t::done_k || failed(status_)) return;
-            if (swept_after_ != phase_t::none_k && swept_after_ != phase_t::restitch_k) return;
+            if (!index_ || phase_ != phase_t::done_k || failed(status_) || !swept_in_round_()) return;
             tally_ = {};
             verify_(phase_t::none_k);
         }
@@ -1621,6 +1843,13 @@ struct vram_apple_graph {
             phase_ = phase_t::health_k;
         }
 
+        /** Whether the health check in hand is one of the round's: the opening one, or a closing
+         *  one after the restitch, the reach or a heal. */
+        bool swept_in_round_() const noexcept {
+            return swept_after_ == phase_t::none_k || swept_after_ == phase_t::restitch_k ||
+                   swept_after_ == phase_t::reach_k || swept_after_ == phase_t::heal_k;
+        }
+
         /** Turns the plan onto a fresh round over @p index 's published entries, which the round
          *  buffer at @p columns laid out as @p layout must span; with no entry, the plan ends at
          *  once, as nothing needs a round. */
@@ -1633,8 +1862,9 @@ struct vram_apple_graph {
             phase_ = health.visible ? phase_t::health_k : phase_t::done_k;
         }
 
-        /** Takes in a converged check: opens the round after the opening one, concludes it after
-         *  the closing one; answers whether a phase follows. */
+        /** Takes in a converged check: opens the round after the opening one, heals or reaches what
+         *  a closing one left unreached while that shrinks, and concludes it otherwise; answers
+         *  whether a phase follows. */
         bool converge_() noexcept {
             auto const [reachability, status] = health.finish();
             if (failed(status)) {
@@ -1643,9 +1873,33 @@ struct vram_apple_graph {
                 return false;
             }
             tally_.reachability = reachability;
-            if (swept_after_ == phase_t::none_k) open_round_(reachability);
-            else phase_ = phase_t::done_k, tally_.verdict = concluded_verdict(tally_);
-            return phase_ != phase_t::done_k;
+            if (swept_after_ == phase_t::none_k) {
+                open_round_(reachability);
+                return phase_ != phase_t::done_k;
+            }
+            // What the restitch left unreached heals with no distance while that shrinks, and what
+            // the heals leave is reached by walks, again while that shrinks.
+            std::size_t const left = health.islands();
+            bool const going = tally_.verdict != refine_verdict_t::stopped_k;
+            if (going && left && left < islands_left_) {
+                islands_left_ = left;
+                phase_ = phase_t::heal_k;
+                return true;
+            }
+            if (going && left && left < reach_left_) {
+                reach_left_ = reached_rows_ = left;
+                phase_ = phase_t::reach_k;
+                return true;
+            }
+            close_round_();
+            return false;
+        }
+
+        /** Concludes the round once its last health check converged: stopped as the caller left it,
+         *  converged when it changed no entry's link set, improved otherwise. */
+        void close_round_() noexcept {
+            phase_ = phase_t::done_k;
+            tally_.verdict = concluded_verdict(tally_);
         }
 
         /** Takes in the opening check: seeds the round's draws from what it measured, starts the
@@ -1659,6 +1913,7 @@ struct vram_apple_graph {
                          mix_bits(opening.unlinked ^ mix_bits(opening.underlinked ^ opening.depth_from_root))));
             std::memset(health.template column<byte_t>(health.layout.changed), 0,
                         divide_round_up<std::size_t>(health.visible, 32) * sizeof(u32_t));
+            islands_left_ = reach_left_ = (std::numeric_limits<std::size_t>::max)();
             phase_ = health.visible ? phase_t::heal_k : phase_t::done_k;
         }
 
@@ -1726,9 +1981,23 @@ struct vram_apple_graph {
         /** The round's sizes, as RAM names them. */
         round_shape_t shape_ {};
 
+        /** How the reach's walks and back-links launch, derived at planning. */
+        build_shape_t reach_shape_ {};
+
         /** Neighborhoods the order holds, zero before the first gather's; the runs, the hubs and
          *  the entries the next gather takes. */
         std::size_t neighborhoods_ = 0, runs_ = 0, hubs_ = 0, gathered_ = 0;
+
+        /** Island nodes the round's reach walks, taken as it opens. */
+        std::size_t reached_rows_ = 0;
+
+        /** Islands the last check that opened a closing heal found, which the next check must
+         *  shrink to open another. */
+        std::size_t islands_left_ = 0;
+
+        /** Islands the heals left when the last reach opened, which the heals after it must shrink
+         *  to open another. */
+        std::size_t reach_left_ = 0;
 
         /** The seed of the round's draws. */
         u64_t round_seed_ = 0;
@@ -1835,7 +2104,7 @@ struct vram_apple_graph {
         /** The phase the plan is in: a move's, then the bound target's round's. */
         phase_t phase() const noexcept { return moving() ? moves_ : rounds_.phase(); }
 
-        /** Where the round's phase sits among its six, and its units done and in all; none in the
+        /** Where the round's phase sits among its seven, and its units done and in all; none in the
          *  moves. */
         std::size_t ordinal() const noexcept { return moving() ? 0 : rounds_.ordinal(); }
         std::size_t completed() const noexcept { return moving() ? 0 : rounds_.completed(); }
@@ -1887,7 +2156,8 @@ struct vram_apple_graph {
                 return false;
             }
             vram_apple_graph& target = *targets_[refined_targets_];
-            round_layout_t const layout = target.round_layout_(target.size(), rounds_.shape_);
+            round_layout_t const layout = target.round_layout_(target.size(), rounds_.shape_,
+                                                               target.lay_out_reach_(rounds_.shape_.entries).bytes);
             rounds_.bind_(target, layout, round_columns_);
             if (folded_targets_ && targets_tally_.verdict == refine_verdict_t::stopped_k)
                 rounds_.tally_.verdict = refine_verdict_t::stopped_k;
@@ -1985,9 +2255,11 @@ struct vram_apple_graph {
         plan.index_ = this, plan.claim_ = claim_t::plan_reopens_k;
         std::size_t const entries = size();
         plan.shape_ = round_shape_(entries, mean_value_bytes_(), config.cache_bytes);
-        round_layout_t const layout = round_layout_(entries, plan.shape_);
+        round_layout_t const layout = round_layout_(entries, plan.shape_, lay_out_reach_(entries).bytes);
         // A refused plan keeps the claim word to reopen it, and its status to refuse every phase.
-        if (status_t const carved = carve_round_(context, layout.bytes); failed(carved)) {
+        status_t carved = carve_round_(context, layout.bytes);
+        if (succeeded(carved)) carved = carve_reach_(plan, context, reach_walks_(config, longest_value_, span_bytes_));
+        if (failed(carved)) {
             plan.status_ = carved;
             return {std::move(plan), carved};
         }
@@ -2359,10 +2631,9 @@ struct vram_apple_graph {
                 step.saved_offsets = saved_.value_width ? nullptr : saved_.value_offsets.data() + first;
                 step.stored = index.values_tape_.host + stored_offsets_[first];
                 step.stored_offsets = starts + base + first;
-                step.span_bytes = &span_bytes_;
                 step.context_ = &context_;
-                step.pipelines_[0] = index.kits_pipeline_(0, vram_kernel_t::load_values_k, 0);
-                step.pipelines_[1] = index.kits_pipeline_(0, vram_kernel_t::size_spans_k, 0);
+                for (vram_kernel_t const kernel : metal_basic_load_kernels)
+                    step.pipelines_[metal_basic_load_position(kernel)] = index.kits_pipeline_(0, kernel, 0);
                 step.values_ = &index.values_tape_, step.offsets_ = &index.offsets_column_;
                 step.parameters_ = index.parameters_buffer_();
                 step.stored_offsets_at_ = (base + first) * sizeof(u64_t);
@@ -2371,8 +2642,6 @@ struct vram_apple_graph {
                 // A run drains before its staging takes the next one; a run nothing launched on
                 // finishes at once.
                 if (failed(context_.wait())) return status_code_t::device_k;
-                byte_t const* const span_word = context_.staging_.host + step.span_word_at_;
-                span_bytes_ = max_of(span_bytes_, static_cast<std::size_t>(*reinterpret_cast<u64_t const*>(span_word)));
                 for (node_id_t node = first; node != bound; ++node)
                     index.keyed_.assign(
                         static_cast<node_id_t>(base + node),
@@ -2443,7 +2712,7 @@ struct vram_apple_graph {
          *  the plan outlives the context it was planned on. */
         traversal_context_t context_;
 
-        /** The longest appended node and the widest span the run hooks counted. */
+        /** The longest appended node and the widest span its length bounds. */
         std::size_t longest_ = 0;
         std::size_t span_bytes_ = 0;
 
@@ -2508,7 +2777,8 @@ struct vram_apple_graph {
             plan.stored_offsets_[node + 1] = plan.stored_offsets_[node] + stored_bytes;
             plan.longest_ = max_of<std::size_t>(plan.longest_, stored_bytes);
         }
-        if (entries && kits_.rung_serving_(max_of(plan.longest_, longest_value_)) == kits_type_::rungs_k)
+        if (entries && kits_.rung_serving_(score_role_t::build_k, max_of(plan.longest_, longest_value_)) ==
+                           kits_type_::canonical_rungs_count_k)
             return {std::move(plan), status_code_t::unsupported_k};
 
         auto const [base, claim_status] = claim_(entries);
@@ -2520,7 +2790,7 @@ struct vram_apple_graph {
             return {std::move(plan), mapped};
         for (u64_t& offset : plan.stored_offsets_) offset += tape_bytes_;
         plan.saved_ = saved;
-        plan.span_bytes_ = kits_.span_bytes_(plan.longest_);
+        plan.span_bytes_ = kits_.span_bytes_(score_role_t::build_k, nullptr, plan.longest_);
         return {std::move(plan), status_code_t::success_k};
     }
 
@@ -2538,31 +2808,46 @@ struct vram_apple_graph {
         return plan.finish();
     }
 
-#pragma endregion Checkpoints
-
     /**
-     *  @brief The pipeline of the kits' kernel @p host_name, outside the rungs the host builds at
-     *      the first @c reserve: built in the kits' own library on first use, then kept by the
-     *      device's registry. What a face's own launches encode with.
+     *  @brief Replaces every row's neighbors with the row of the same node in @p links, as the
+     *      NVIDIA graph does, written on the host through the shared neighbors matrix as a load
+     *      widens its rows; @p context rides along as on every other vendor.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k No @c reserve bound the device yet.
-     *  - @c unsupported_k The kits' library exports no such kernel.
+     *  - @c uninitialized_k No @c reserve froze the connectivity yet.
+     *  - @c config_mismatch_k The @p links hold other than one row per node.
+     *  - @c contended_k A batch, a load or a plan in flight.
+     *  - @c malformed_k A ragged row names an ID past the nodes, or a row keeps more neighbors than
+     *    its connectivity allows.
      */
-    expected<metal_pipeline_state_t> kits_pipeline_named_(char const* host_name) const noexcept {
-        metal_context_t* const gpu = context();
-        kernel_tables<metal_module_t>* const kernels = allocator_.kernels();
-        char const* const source = metal_basic_source_of<kits_type_>();
-        if (!connectivity() || !gpu || !kernels || !source) return {{}, status_code_t::uninitialized_k};
-        auto const [state, status] = kernels->pipeline(*gpu->api, gpu->device, source, host_name);
-        return {state, failed(status) ? status_code_t::unsupported_k : status_code_t::success_k};
+    status_t adopt_links(links_view_t links, [[maybe_unused]] traversal_context_t& context) noexcept {
+        std::size_t const connectivity = this->connectivity(), nodes = size();
+        if (!connectivity) return status_code_t::uninitialized_k;
+        if (!links.shaped_for(nodes)) return status_code_t::config_mismatch_k;
+        if (status_t const closed = close_(); failed(closed)) return closed;
+        status_t adopted = status_code_t::success_k;
+        for (std::size_t node = 0; node != nodes; ++node) {
+            node_id_t* const row = neighbor_rows_() + node * connectivity;
+            std::size_t kept = 0;
+            for (node_id_t const neighbor : links.row(node)) {
+                if (links.degree && static_cast<std::size_t>(neighbor) >= nodes) continue;
+                if (static_cast<std::size_t>(neighbor) >= nodes || kept == connectivity) {
+                    adopted = status_code_t::malformed_k;
+                    continue;
+                }
+                row[kept++] = neighbor;
+            }
+            for (std::size_t slot = kept; slot != connectivity; ++slot)
+                row[slot] = (std::numeric_limits<node_id_t>::max)();
+            if (!kept) row[0] = static_cast<node_id_t>(node);
+        }
+        reopen_();
+        return adopted;
     }
 
-    /** The shared buffers a face's own launches bind: the values tape, the offsets column, the
-     *  neighbors matrix, and the kits' parameters or the tape standing in for none. */
-    metal_buffer_t const& values_buffer_() const noexcept { return values_tape_; }
-    metal_buffer_t const& offsets_buffer_() const noexcept { return offsets_column_; }
-    metal_buffer_t const& neighbors_buffer_() const noexcept { return neighbors_matrix_; }
+#pragma endregion Checkpoints
+
+    /** The shared buffer the kits' parameters bind from, the tape standing in for none. */
     metal_buffer_t const* parameters_buffer_() const noexcept {
         metal_buffer_t const& parameters = kits_.parameters_();
         return parameters ? &parameters : &values_tape_;
@@ -2599,6 +2884,7 @@ struct vram_apple_graph {
         metal_basic_arguments_t arguments {};
         arguments.connectivity = static_cast<u32_t>(connectivity());
         arguments.metric = static_cast<u32_t>(kernel_);
+        if constexpr (sized_sketches_k) arguments.sketch_bytes = static_cast<u32_t>(kits_.sketch_bytes());
         return arguments;
     }
 
@@ -2620,10 +2906,12 @@ struct vram_apple_graph {
         return graph_pipelines_[static_cast<std::size_t>(kernel)];
     }
 
-    /** Walkers one threadgroup hosts on the kit rung @p rung: a simdgroup each when a lane scores
-     *  a node alone, one walking the whole threadgroup otherwise. */
-    static u32_t walkers_per_block_(std::size_t rung) noexcept {
-        return rung < kits_type_::rungs_k && kits_type_::lanes_per_entry_(rung) > 1 ? 1u : metal_simdgroups_k;
+    /** Walkers one threadgroup hosts for @p role on the kit rung @p rung: a simdgroup each when a
+     *  lane scores a node alone, one walking the whole threadgroup otherwise. */
+    static u32_t walkers_per_block_(score_role_t role, std::size_t rung) noexcept {
+        return rung < kits_type_::canonical_rungs_count_k && kits_type_::lanes_per_entry_(role, rung) > 1
+                   ? 1u
+                   : metal_simdgroups_k;
     }
 
     /** Threadgroups of the kits' @p kernel resident per GPU core on kit rung @p rung and register
@@ -2633,15 +2921,57 @@ struct vram_apple_graph {
         return max_of<u32_t>(kits_pipeline_(rung, kernel, slots).max_threads / metal_threadgroup_threads_k, 1u);
     }
 
-    /** Threadgroups a walk over @p queries launches on the kit rung @p rung and the register rung
-     *  @p slots: a walker per query up to the grid the device runs at once. */
-    u32_t walk_blocks_(std::size_t queries, std::size_t rung, u32_t slots) const noexcept {
+    /** Threadgroups a walk of @p kernel over @p queries launches on the kit rung @p rung and the
+     *  register rung @p slots, @p walkers to a threadgroup: a walker per query up to the grid the
+     *  device runs at once. */
+    u32_t walk_blocks_(std::size_t queries, std::size_t rung, vram_kernel_t kernel, u32_t slots,
+                       u32_t walkers) const noexcept {
         return static_cast<u32_t>(max_of<std::size_t>(
-            min_of<std::size_t>(
-                divide_round_up<std::size_t>(queries, walkers_per_block_(rung)),
-                std::size_t {device_.multiprocessor_count} * resident_blocks_(rung, vram_kernel_t::search_k, slots)),
+            min_of<std::size_t>(divide_round_up<std::size_t>(queries, walkers),
+                                std::size_t {device_.multiprocessor_count} * resident_blocks_(rung, kernel, slots)),
             1));
     }
+
+    /** One walk launch over a batch of queries: each walker's arena slice, its register rung, the
+     *  walkers a threadgroup hosts and its grid. */
+    struct walk_launch_t {
+        gpu_arena_shape_t arena_shape {};
+        u32_t slots = 0, walkers = 0, blocks = 0;
+
+        /** Bytes of the arena its grid carves, a slice per simdgroup, as @ref shape_arena_ carves
+         *  it. */
+        std::size_t arena_bytes() const noexcept {
+            return std::size_t {blocks} * metal_simdgroups_k * arena_shape.template slice_bytes<u32_t>();
+        }
+    };
+
+    /** How a walk of @p kernel over @p queries queries under @p config runs on kit rung @p rung,
+     *  each query preparing into @p span_bytes. */
+    walk_launch_t walk_launch_(std::size_t rung, u32_t span_bytes, vram_kernel_t kernel, std::size_t queries,
+                               search_config_t config) const noexcept {
+        walk_launch_t launch;
+        launch.arena_shape = walk_arena_shape_(config, span_bytes);
+        launch.slots = walk_slots_(config);
+        launch.walkers = walkers_per_block_(vram_kernel_role(kernel), rung);
+        launch.blocks = walk_blocks_(queries, rung, kernel, launch.slots, launch.walkers);
+        return launch;
+    }
+
+    /** Ranges a scan of @p queries queries keeping @p count matches on kit rung @p rung splits
+     *  @p visible nodes into under @p launch: as many as fill every walker the device keeps
+     *  resident, each range holding at least a round of two simdgroup-widths and its matches. */
+    std::size_t scan_ranges_(walk_launch_t const& launch, std::size_t rung, std::size_t queries, std::size_t visible,
+                             std::size_t count) const noexcept {
+        std::size_t const resident = std::size_t {device_.multiprocessor_count} *
+                                     resident_blocks_(rung, vram_kernel_t::scan_k, launch.slots) * launch.walkers;
+        std::size_t const widest = max_of<std::size_t>(
+            visible / max_of<std::size_t>(2 * metal_simdgroup_width_k, count), 1);
+        return min_of(divide_round_up(resident, queries), widest);
+    }
+
+    /** Seeds a search walk scores first per query: one landmark batch, the connectivity, where the
+     *  kits sketch, and none otherwise. */
+    std::size_t seeds_count_() const noexcept { return sketching_k ? connectivity() : 0; }
 
     /** Which frontier a walk keeps: a register rung, or the arena's past the ladder. */
     enum class frontier_kind_t : u32_t { register_ladder_k, wide_arena_k };
@@ -2677,20 +3007,13 @@ struct vram_apple_graph {
             round_up_to_multiple<std::size_t>(2 * span_bytes + ids_bytes + selection_nodes * candidate_bytes, 16));
     }
 
-    /** Everything one building pass derives from its requested expansion, once: the walk's breadth
-     *  and register rung, the candidates its selection and a back-link round hold, the scratch both
-     *  keep in the arena slice, and that slice. */
-    struct build_shape_t {
-        u32_t expansion = 0, candidate_slots = 0, walk_selection_nodes = 0, reselection_nodes = 0;
-        u32_t scratch_bytes = 0;
-        gpu_arena_shape_t arena_shape {};
-    };
-
     /** The shape of a building pass requesting @p expansion_factor over nodes preparing into
-     *  @p span_bytes; the scratch always rides the arena, since threadgroup memory would bound how
-     *  wide a value may grow. */
-    build_shape_t build_shape_(u32_t expansion_factor, u32_t span_bytes) const noexcept {
+     *  @p span_bytes on the kit rung @p rung; the scratch always rides the arena, since threadgroup
+     *  memory would bound how wide a value may grow. */
+    build_shape_t build_shape_(u32_t expansion_factor, u32_t span_bytes, std::size_t rung) const noexcept {
         build_shape_t shape;
+        shape.rung = rung;
+        shape.span_bytes = span_bytes;
         shape.expansion = build_expansion_(expansion_factor);
         shape.candidate_slots = gpu_candidate_slots(shape.expansion, wave_lanes());
         shape.walk_selection_nodes = walk_selection_nodes_(shape.expansion, shape.candidate_slots);
@@ -2737,14 +3060,14 @@ struct vram_apple_graph {
                                 build_scratch_bytes_(span_bytes, selection_nodes));
     }
 
-    /** The widest span any node of @p tape prepares into, raising @p longest to the longest value
-     *  among them. */
-    std::size_t span_bytes_of_(tape_view<byte_t const> tape, std::size_t& longest) const noexcept {
+    /** The widest span any node of @p tape prepares into for @p role, raising @p longest to the
+     *  longest value among them. */
+    std::size_t span_bytes_of_(score_role_t role, tape_view<byte_t const> tape, std::size_t& longest) const noexcept {
         std::size_t widest = 0;
         for (std::size_t node = 0; node != tape.size(); ++node) {
             auto const entry = tape[node];
             longest = max_of(longest, entry.size());
-            widest = max_of(widest, kits_.span_bytes_(entry.data(), entry.size()));
+            widest = max_of(widest, kits_.span_bytes_(role, entry.data(), entry.size()));
         }
         return widest;
     }
@@ -2806,8 +3129,8 @@ struct vram_apple_graph {
      *  after any commit is kept, as the committed nodes stay claimed.
      */
     status_t launch_insert_(metal_basic_arguments_t const& arguments, build_shape_t const& shape, std::size_t first_id,
-                            std::size_t end_id, std::size_t rung, u32_t blocks, std::size_t touched_at,
-                            std::size_t counters_at, traversal_context_t& context) noexcept {
+                            std::size_t end_id, u32_t blocks, std::size_t touched_at, std::size_t counters_at,
+                            traversal_context_t& context) noexcept {
         std::size_t const entries = end_id - first_id, row_ids = connectivity();
         std::size_t const next_at = end_id * sizeof(node_id_t);
         std::size_t const touched_ids_at = next_at + entries * row_ids * sizeof(node_id_t);
@@ -2824,21 +3147,10 @@ struct vram_apple_graph {
                                              {vram_kernel_t::back_link_k, vram_kernel_t::refine_k}};
         auto const commit = [&](vram_kernel_t kernel, metal_basic_arguments_t const& wave,
                                 std::size_t walk) noexcept -> status_t {
-            bool const walks = kernel != vram_kernel_t::back_link_k;
-            metal_basic_arguments_t launched = wave;
-            launched.selection_nodes = walks ? shape.walk_selection_nodes : shape.reselection_nodes;
-            metal_launch_t launch {context.api(), context.stream(),
-                                   kits_pipeline_(rung, kernel, walks ? shape.candidate_slots : 0).pipeline};
-            if (!launch) return status_code_t::device_k;
-            bind_kit_storage_(launch, launched, context);
-            launch.bind(context.staging_, metal_basic_counters_buffer_k,
-                        counters_at + launch_index++ * metal_counters_bytes_k);
-            launch.bind(context.arena_, metal_basic_arena_buffer_k);
-            launch.bind(context.staging_, metal_basic_link_heads_buffer_k);
-            launch.bind(context.staging_, metal_basic_link_next_buffer_k, next_at);
-            launch.bind(context.staging_, metal_basic_touched_ids_buffer_k, touched_ids_at);
-            launch.bind(context.staging_, metal_basic_touched_count_buffer_k, touched_at + walk * sizeof(u32_t));
-            return context.submit_(launch, blocks, metal_threadgroup_threads_k);
+            return commit_build_(kernel, wave, shape, blocks, context.staging_,
+                                 {0, next_at, touched_ids_at, touched_at + walk * sizeof(u32_t),
+                                  counters_at + launch_index++ * metal_counters_bytes_k, 0},
+                                 context);
         };
         std::size_t wave = 0;
         for (std::size_t wave_first = first_id; wave_first != end_id; ++wave) {
@@ -2861,15 +3173,45 @@ struct vram_apple_graph {
         return status_code_t::success_k;
     }
 
+    /** Where a build launch finds its chains in the buffer holding them: the heads, the next
+     *  links, the touched nodes, its touched word and its counter block, then the IDs a reach's
+     *  wave lists, which a wave walking its own IDs never reads. */
+    struct build_offsets_t {
+        std::size_t heads_at = 0, next_at = 0, touched_ids_at = 0, touched_word_at = 0, counters_at = 0, listed_at = 0;
+    };
+
+    /** Commits one launch of the kit's build @p kernel over @p wave under @p shape across
+     *  @p blocks threadgroups, its chains at @p offsets in @p chains. */
+    status_t commit_build_(vram_kernel_t kernel, metal_basic_arguments_t const& wave, build_shape_t const& shape,
+                           u32_t blocks, metal_buffer_t const& chains, build_offsets_t offsets,
+                           traversal_context_t& context) noexcept {
+        bool const walks = kernel != vram_kernel_t::back_link_k;
+        metal_basic_arguments_t launched = wave;
+        launched.selection_nodes = walks ? shape.walk_selection_nodes : shape.reselection_nodes;
+        metal_launch_t launch {context.api(), context.stream(),
+                               kits_pipeline_(shape.rung, kernel, walks ? shape.candidate_slots : 0).pipeline};
+        if (!launch) return status_code_t::device_k;
+        bind_kit_storage_(launch, launched, context);
+        launch.bind(chains, metal_basic_counters_buffer_k, offsets.counters_at);
+        launch.bind(context.arena_, metal_basic_arena_buffer_k);
+        launch.bind(chains, metal_basic_link_heads_buffer_k, offsets.heads_at);
+        launch.bind(chains, metal_basic_link_next_buffer_k, offsets.next_at);
+        launch.bind(chains, metal_basic_touched_ids_buffer_k, offsets.touched_ids_at);
+        launch.bind(chains, metal_basic_touched_count_buffer_k, offsets.touched_word_at);
+        launch.bind(chains, metal_basic_listed_buffer_k, offsets.listed_at);
+        return context.submit_(launch, blocks, metal_threadgroup_threads_k);
+    }
+
     /** Folds the telemetry of @p launches counter blocks at @p blocks into @p context 's counters,
      *  which @c spent reads: every tally its low word carrying into its high one. */
     static void fold_counters_(traversal_context_t& context, byte_t const* blocks, std::size_t launches) noexcept {
         u32_t* const into = metal_words(context.counters_);
         for (std::size_t launch = 0; launch != launches; ++launch) {
             u32_t const* const words = reinterpret_cast<u32_t const*>(blocks + launch * metal_counters_bytes_k);
-            for (u32_t const tally : {metal_hops_k, metal_scored_k, metal_restarts_k, metal_lock_attempts_k,
-                                      metal_lock_skips_k, metal_reselections_k, metal_locked_drops_k,
-                                      metal_saturations_k, metal_tail_compactions_k, metal_tail_dropped_k}) {
+            for (u32_t const tally :
+                 {metal_hops_k, metal_scored_k, metal_restarts_k, metal_lock_attempts_k, metal_lock_skips_k,
+                  metal_reselections_k, metal_locked_drops_k, metal_saturations_k, metal_tail_compactions_k,
+                  metal_tail_dropped_k, metal_sketched_k}) {
                 u64_t const sum = metal_tally(into, tally) + metal_tally(words, tally);
                 into[tally] = static_cast<u32_t>(sum), into[tally + 1] = static_cast<u32_t>(sum >> 32);
             }
@@ -2919,8 +3261,15 @@ struct vram_apple_graph {
             into = state;
             return status_code_t::success_k;
         };
-        for (std::size_t rung = 0; rung != kits_type_::rungs_k; ++rung)
+        // A search builds on every kit rung, a builder on the kits' build rungs, and a seeding walk
+        // on the first rung of kits building by sketches alone.
+        for (std::size_t rung = 0; rung != kits_type_::canonical_rungs_count_k; ++rung)
             for (metal_basic_rung_t const instantiated : metal_basic_rungs) {
+                bool const compiled = instantiated.kernel == vram_kernel_t::seed_k
+                                          ? sketching_k && rung == 0
+                                          : vram_kernel_role(instantiated.kernel) == score_role_t::search_k ||
+                                                rung < kits_type_::build_rungs_count_k;
+                if (!compiled) continue;
                 metal_basic_kernel_symbol(symbol, rung, instantiated);
                 if (status_t const built = build(kits_pipelines_[rung][static_cast<std::size_t>(instantiated.kernel)]
                                                                 [gpu_rung_index(instantiated.slots)]);
@@ -2941,6 +3290,9 @@ struct vram_apple_graph {
         auto const [specs, status] = metal_device_specs_t::query(*gpu, device_.ordinal);
         if (failed(status)) return status;
         device_ = specs;
+        if constexpr (warp_scratch_k)
+            if (metal_simdgroups_k * kits_.warp_scratch_bytes_() > device_.shared_memory_per_block_bytes)
+                return status_code_t::config_mismatch_k;
         std::size_t const row_bytes = config.connectivity * sizeof(node_id_t);
         std::size_t const budget_bytes = min_of(device_.working_set_bytes, device_.max_buffer_bytes);
         std::size_t const ceiling_nodes = min_of(
@@ -3050,7 +3402,8 @@ struct vram_apple_graph {
     /** The kit rung a round's gather and restitch score on: the one serving the longest stored
      *  value. */
     std::size_t round_rung_() const noexcept {
-        return min_of(kits_.rung_serving_(longest_value_), kits_type_::rungs_k - 1);
+        return min_of(kits_.rung_serving_(score_role_t::build_k, longest_value_),
+                      kits_type_::canonical_rungs_count_k - 1);
     }
 
     /** Candidates a restitch's selection caches: a live row and a row of mates, twice over. */
@@ -3089,9 +3442,39 @@ struct vram_apple_graph {
         return shape;
     }
 
+    /** The most rows one wave of a reach over @p rows rows walks: the widest the admission rule
+     *  cuts from them, a share of the rows below its first and never under the ramp's floor. */
+    static std::size_t reach_wave_rows_(std::size_t rows) noexcept {
+        return min_of<std::size_t>(
+            rows, max_of<std::size_t>(rows >> vram_basic_admission_share_log2_k, vram_admission_ramp_floor_k));
+    }
+
+    /** Lays the chains of a reach over @p entries entries out, every one on a 16-byte boundary: as
+     *  many waves as an insert of that many IDs takes, which bounds a reach over fewer rows. */
+    reach_layout_t lay_out_reach_(std::size_t entries) const noexcept {
+        std::size_t const picks = reach_wave_rows_(entries) * connectivity();
+        std::size_t const waves = insert_waves_(0, entries);
+        std::size_t offset = 0;
+        auto carve = [&](std::size_t bytes) noexcept {
+            std::size_t const at = offset;
+            offset = round_up_to_multiple<std::size_t>(offset + bytes, 16);
+            return at;
+        };
+        reach_layout_t layout;
+        layout.heads = carve(entries * sizeof(node_id_t));
+        layout.next = carve(picks * sizeof(node_id_t));
+        layout.touched_ids = carve(min_of(entries, picks) * sizeof(node_id_t));
+        layout.touched_words = carve(waves * sizeof(u32_t));
+        layout.counters = carve(2 * waves * metal_counters_bytes_k);
+        layout.bytes = offset;
+        return layout;
+    }
+
     /** The round buffer's layout over @p entries entries for a round of @p shape, or for a lone
-     *  check's zeros, every column on a 16-byte boundary, as dense Apple carves it. */
-    round_layout_t round_layout_(std::size_t entries, round_shape_t const& shape) const noexcept {
+     *  check's zeros, every column on a 16-byte boundary, as dense Apple carves it, with room for
+     *  @p reach_bytes of a reach's chains past the island nodes. */
+    round_layout_t round_layout_(std::size_t entries, round_shape_t const& shape,
+                                 std::size_t reach_bytes = 0) const noexcept {
         std::size_t offset = 0;
         auto carve = [&](std::size_t bytes) noexcept {
             std::size_t const at = offset;
@@ -3119,6 +3502,7 @@ struct vram_apple_graph {
         layout.island_entries = carve(2 * ids);
         layout.island_roles = carve(ids);
         std::size_t const islands_bytes = offset;
+        layout.reach = layout.island_components;
         offset = aliased;
         layout.entry_neighborhoods = carve(entries * sizeof(u16_t));
         layout.neighborhood_entries = carve(ids);
@@ -3128,7 +3512,7 @@ struct vram_apple_graph {
         layout.runs = carve(shape.runs * sizeof(vram_neighborhood_run_t));
         layout.run_items = carve((shape.runs + 1) * sizeof(u32_t));
         layout.stitch = carve(shape.groups * metal_simdgroups_k * round_slice_bytes_());
-        layout.bytes = max_of(offset, islands_bytes);
+        layout.bytes = max_of(max_of(offset, islands_bytes), layout.reach + reach_bytes);
         return layout;
     }
 
@@ -3139,6 +3523,30 @@ struct vram_apple_graph {
         if (status_t const grown = context.ensure_(context.round_, bytes, fresh); failed(grown)) return grown;
         std::memset(context.counters_.host, 0, context.counters_.bytes);
         return status_code_t::success_k;
+    }
+
+    /** How a round's reach under @p config walks and back-links values of @p longest bytes at most,
+     *  preparing into @p span_bytes, on the kit rung serving them. */
+    build_shape_t reach_walks_(refine_config_t config, std::size_t longest, std::size_t span_bytes) const noexcept {
+        std::size_t const rung = min_of(kits_.rung_serving_(score_role_t::build_k, longest),
+                                        kits_type_::canonical_rungs_count_k - 1);
+        return build_shape_(static_cast<u32_t>(config.expansion_factor), static_cast<u32_t>(span_bytes), rung);
+    }
+
+    /** Threadgroups a building pass of @p shape spreads over: as many as the device keeps
+     *  resident. */
+    u32_t build_blocks_(build_shape_t const& shape) const noexcept {
+        return device_.multiprocessor_count * resident_blocks_(shape.rung, vram_kernel_t::insert_k, 0);
+    }
+
+    /** Keeps @p reach in @p plan and grows @p context 's arena to its walks' slices, so no reach
+     *  allocates. */
+    status_t carve_reach_(refine_plan_t& plan, traversal_context_t& context,
+                          build_shape_t const& reach) const noexcept {
+        plan.reach_shape_ = reach;
+        std::size_t const slices = std::size_t {build_blocks_(reach)} * metal_simdgroups_k;
+        bool fresh = false;
+        return context.ensure_(context.arena_, slices * reach.arena_shape.template slice_bytes<u32_t>(), fresh);
     }
 
     /** One column of the round buffer and the slot it binds at. */
@@ -3263,6 +3671,70 @@ struct vram_apple_graph {
     }
 
     /**
+     *  @brief Commits the round's reach on @p context 's stream: refine-only waves of the insert's
+     *      admission rule, each re-selection followed by a back-link over every node it picked.
+     *
+     *  The waves walk @p plan 's island nodes, straight from the closing check's columns, valid
+     *  until the next gather, and thread their chains over the rest of the round's region, dead
+     *  until the next check, each launch counting into its own block there. Only those blocks
+     *  count the rows the reach changed, as no re-selection writes the changed bits or the counter
+     *  words of the round.
+     */
+    status_t queue_reach_(refine_plan_t const& plan, traversal_context_t& context) noexcept {
+        build_shape_t const& shape = plan.reach_shape_;
+        std::size_t const rows = plan.reached_rows_;
+        round_layout_t const& layout = plan.health.layout;
+        reach_layout_t const chains = lay_out_reach_(plan.shape_.entries);
+        u32_t const blocks = build_blocks_(shape);
+        metal_basic_arguments_t arguments = arguments_();
+        if (status_t const sized = shape_arena_(context, arguments, shape.arena_shape, blocks, rows); failed(sized))
+            return sized;
+        arguments.span_bytes = shape.span_bytes;
+        arguments.expansion = shape.expansion;
+        arguments.sampling_bound = plan.health.visible;
+        arguments.listed = 1;
+        // Every chain starts empty, and each back-link launch empties the ones it merged.
+        byte_t* const reach = plan.health.template column<byte_t>(layout.reach);
+        std::memset(reach + chains.heads, 0xFF, plan.health.visible * sizeof(node_id_t));
+        std::memset(reach + chains.touched_words, 0, chains.bytes - chains.touched_words);
+        std::size_t wave = 0;
+        for (std::size_t wave_first = 0; wave_first != rows; ++wave) {
+            std::size_t const wave_end = static_cast<std::size_t>(
+                vram_admission_wave_end(wave_first, rows, vram_basic_admission_share_log2_k));
+            metal_basic_arguments_t launched = arguments;
+            launched.first_id = static_cast<u32_t>(wave_first);
+            launched.end_id = static_cast<u32_t>(wave_end);
+            launched.epoch_base = arguments.epoch_base + static_cast<u32_t>(wave_first);
+            for (vram_kernel_t const kernel : {vram_kernel_t::refine_k, vram_kernel_t::back_link_k}) {
+                std::size_t const launch = 2 * wave + (kernel == vram_kernel_t::back_link_k);
+                build_offsets_t const offsets {layout.reach + chains.heads,
+                                               layout.reach + chains.next,
+                                               layout.reach + chains.touched_ids,
+                                               layout.reach + chains.touched_words + wave * sizeof(u32_t),
+                                               layout.reach + chains.counters + launch * metal_counters_bytes_k,
+                                               layout.island_nodes + wave_first * sizeof(node_id_t)};
+                if (status_t const committed = commit_build_(kernel, launched, shape, blocks, context.round_, offsets,
+                                                             context);
+                    failed(committed))
+                    return committed;
+            }
+            wave_first = wave_end;
+        }
+        return status_code_t::success_k;
+    }
+
+    /** Folds the counter blocks of @p plan 's finished reach into @p context 's counters, which
+     *  @c spent reads, answering the rows the reach changed. */
+    std::size_t fold_reach_(refine_plan_t const& plan, traversal_context_t& context) const noexcept {
+        reach_layout_t const chains = lay_out_reach_(plan.shape_.entries);
+        byte_t const* const blocks = plan.health.template column<byte_t>(plan.health.layout.reach) + chains.counters;
+        u32_t const* const words = metal_words(context.counters_);
+        u32_t const before = words[metal_changed_k];
+        fold_counters_(context, blocks, 2 * insert_waves_(0, plan.reached_rows_));
+        return words[metal_changed_k] - before;
+    }
+
+    /**
      *  @brief Binds @p plan to a gather of every source of @p sources other than this graph: copies
      *      their nodes past the watermark on the host, files their keys, publishes them, and
      *      empties those sources, then opens the round over every node.
@@ -3313,8 +3785,10 @@ struct vram_apple_graph {
             entries, entries ? max_of<std::size_t>(divide_round_up(tape_bytes_ + moved_bytes, entries), 1) : 1,
             config.refine.cache_bytes);
         span_bytes_ = span_bytes;
-        round_layout_t const layout = round_layout_(entries, shape);
+        round_layout_t const layout = round_layout_(entries, shape, lay_out_reach_(entries).bytes);
         status_t packed = carve_round_(context, layout.bytes);
+        if (succeeded(packed))
+            packed = carve_reach_(plan.rounds_, context, reach_walks_(config.refine, longest, span_bytes));
         if (succeeded(packed)) packed = grow_nodes_(entries);
         if (succeeded(packed)) packed = map_bytes_(tape_bytes_ + moved_bytes + tape_margin_k);
         if (failed(packed)) {
@@ -3406,8 +3880,13 @@ struct vram_apple_graph {
             if (status_t const grown = part->grow_nodes_(split.part_capacity); failed(grown)) return grown;
         }
         round_shape_t const shape = round_shape_(split.part_capacity, mean_value_bytes_(), config.refine.cache_bytes);
-        round_layout_t const layout = round_layout_(split.part_capacity, shape);
+        round_layout_t const layout = round_layout_(split.part_capacity, shape,
+                                                    lay_out_reach_(split.part_capacity).bytes);
         if (status_t const carved = carve_round_(context, layout.bytes); failed(carved)) return carved;
+        if (status_t const carved = carve_reach_(plan.rounds_, context,
+                                                 reach_walks_(config.refine, longest_value_, span_bytes_));
+            failed(carved))
+            return carved;
         plan.rounds_.shape_ = shape;
         plan.round_layout_ = layout, plan.round_columns_ = context.round_.host;
         // An empty source leaves every target empty, so no round binds.
@@ -3610,8 +4089,8 @@ struct vram_apple_graph {
 
     /** Every kits' kernel's pipeline per kit rung and candidate rung, and every graph kernel's,
      *  owned by the device's registry. */
-    metal_pipeline_state_t kits_pipelines_[kits_type_::rungs_k][static_cast<std::size_t>(vram_kernel_t::count_k)]
-                                          [gpu_rungs_per_kernel_k] = {};
+    metal_pipeline_state_t kits_pipelines_[kits_type_::canonical_rungs_count_k][static_cast<std::size_t>(
+        vram_kernel_t::count_k)][gpu_rungs_per_kernel_k] = {};
     metal_pipeline_state_t graph_pipelines_[static_cast<std::size_t>(vram_kernel_t::count_k)] = {};
 
     /** Every node's key, assigned by its claim's holder, and the key map that holder files them in

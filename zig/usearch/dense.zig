@@ -215,6 +215,9 @@ pub const DenseTraversalStats = extern struct {
     restarts: usize = 0,
     /// Hint keys no shard held an entry under; zero unless a search was handed hints.
     missing_hints: usize = 0,
+    /// Of the distances computed, the sketch distances a sequence search's seeding walk spent; zero
+    /// for every other walk.
+    seeding_distances: usize = 0,
 };
 
 /// One reachability audit: the population it judged, and how much of it a search reaches.

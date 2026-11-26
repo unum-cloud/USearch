@@ -446,23 +446,29 @@ print(library.version_name(), library.capabilities_available())
 
 ## Sequence Indexes
 
-A `SequenceIndex` searches byte strings, UTF-8 text, DNA, RNA and proteins under edit distances and alignments.
+A `SequenceIndex` searches proteins under alignment, DNA and RNA under shifted overlap, and UTF-8 text under window containment.
 Its sequences cross as a `TapeView`, the Apache Arrow `Binary` layout of bytes end to end around one more offset than entries: a `Tape` packs separate entries, and `TapeView.of` wraps the two runs of an Arrow column as they are.
 
 ```mojo
-var index = SequenceIndex.init_ram(library, SequenceOptions(SequenceMetric.LEVENSHTEIN_UTF8))
+var index = SequenceIndex.init_ram(library, SequenceOptions(SequenceMetric.UTF8_CONTAINMENT))
 var words = Tape[DType.uint8]()
-for word in ["kitten", "sitting", "mitten"]:
+for word in ["The quick brown fox", "A lazy dog", "Pack my box"]:
     words.append(word)
 index.insert([Key(integer=1), Key(integer=2), Key(integer=3)], words.view())
 
 var query = Tape[DType.uint8]()
-query.append("sittin")
+query.append("BROWN FOX")
 var matches = index.search(query.view(), 1, arena)
-print(matches.query_keys(0)[0], matches.query_distances(0)[0])  # 2, one edit away
+print(matches.query_keys(0)[0], matches.query_distances(0)[0])  # 1, whatever the case
 ```
 
-`SequenceMetric.NEEDLEMAN_WUNSCH` takes `SequenceWeights`, a 256 × 256 substitution matrix with a gap cost, and `SequenceMetric.OVERLAP` takes `window_widths`; every load and view names the weights again, since no checkpoint records them.
+The metric is `SequenceMetric.PROTEIN_ALIGNMENT`, `DNA_OVERLAP` or `UTF8_CONTAINMENT`.
+Each metric stores a sequence folded, so `get` returns the stored form rather than the inserted bytes: packed class codes for a protein, one class code a byte for DNA, and case-folded UTF-8 for text.
+Optional `SequenceCosts` give 256 × 256 similarities between raw bytes and a gap cost in place of the metric's own, and a containment refuses them.
+`SequenceOptions.sketch_bytes` sets the bytes of the sketch in front of each stored sequence, a multiple of four, where zero takes the metric's default of 512 for protein alignment and UTF-8 containment.
+A DNA overlap keeps no sketch and refuses any.
+Text folds its case inside the engine, so inputs are raw bytes and there is nothing to pack.
+A checkpoint records the costs, so loads and views take none.
 `get` writes a key's sequences into an arena as `TapeEntries`, and `count` reports a key's entries with their total and largest byte lengths.
 The verbs come from `SequenceVerbs`, and the receivers, reports and plans work as the dense ones do: `refine` and `sequence_reshard` take a `SequenceRefinePlan` or a `SequenceReshardPlan` and answer a `DenseRefineReport`.
 

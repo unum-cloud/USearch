@@ -51,6 +51,7 @@ export interface CompiledStats {
   computedDistances: number;
   restarts: number;
   missingHints: number;
+  seedingDistances: number;
 }
 
 /** One reachability audit. */
@@ -421,10 +422,12 @@ interface CompiledBasicIndexConstructor<Index, Metadata> {
   reshardPlanFinish(...arguments_: [...On, plan: ArrayBuffer]): CompiledRefineReport | CompiledDeferred;
 }
 
-/** The metric and connectivity a sequence checkpoint froze. */
+/** The metric and geometry a sequence checkpoint froze. */
 export interface CompiledSequenceMetadata {
   metric: string;
   connectivity: number;
+  classes: number;
+  sketchBytes: number;
 }
 
 /** A sequence index's frozen metadata and current counters. */
@@ -468,8 +471,8 @@ export interface CompiledSequenceIndex extends CompiledBasicIndex<
   get(...arguments_: [...On, key: Uint8Array, arena: CompiledArena]): CompiledTape | CompiledDeferred;
 }
 
-/** The weights an alignment kind scores with, as they cross. */
-type CompiledWeights = [substitutionMatrix: Int8Array | undefined, gap: number | undefined];
+/** The costs a sequence index is initialized with, as they cross. */
+type CompiledCosts = [similarities: Int8Array | undefined, gap: number | undefined];
 
 /** The sequence index class. */
 export interface CompiledSequenceIndexConstructor extends CompiledBasicIndexConstructor<
@@ -479,9 +482,9 @@ export interface CompiledSequenceIndexConstructor extends CompiledBasicIndexCons
   initRam(
     metric: string,
     ...arguments_: [
-      ...CompiledWeights,
-      windowWidths: number[] | undefined,
+      ...CompiledCosts,
       connectivity: number | undefined,
+      sketchBytes: number | undefined,
       valuesPerKey: number | undefined,
       memoryDomains: number[] | undefined,
       cpuClassCeiling: string | undefined,
@@ -490,26 +493,25 @@ export interface CompiledSequenceIndexConstructor extends CompiledBasicIndexCons
   initVram(
     metric: string,
     ...arguments_: [
-      ...CompiledWeights,
-      windowWidths: number[] | undefined,
+      ...CompiledCosts,
       connectivity: number | undefined,
+      sketchBytes: number | undefined,
       valuesPerKey: number | undefined,
       devices: number[] | undefined,
       gpuClassCeiling: string | undefined,
     ]
   ): CompiledSequenceIndex;
-  loadRam(...arguments_: [path: string, ...CompiledLoad, ...CompiledWeights]): CompiledSequenceIndex;
-  loadVram(...arguments_: [path: string, ...CompiledLoad, ...CompiledWeights]): CompiledSequenceIndex;
-  loadRamBuffer(...arguments_: [buffer: ArrayBufferView, ...CompiledLoad, ...CompiledWeights]): CompiledSequenceIndex;
-  loadVramBuffer(...arguments_: [buffer: ArrayBufferView, ...CompiledLoad, ...CompiledWeights]): CompiledSequenceIndex;
-  viewRam(path: string, cpuClassCeiling: string | undefined, ...weights: CompiledWeights): CompiledSequenceIndex;
+  loadRam(...arguments_: [path: string, ...CompiledLoad]): CompiledSequenceIndex;
+  loadVram(...arguments_: [path: string, ...CompiledLoad]): CompiledSequenceIndex;
+  loadRamBuffer(...arguments_: [buffer: ArrayBufferView, ...CompiledLoad]): CompiledSequenceIndex;
+  loadVramBuffer(...arguments_: [buffer: ArrayBufferView, ...CompiledLoad]): CompiledSequenceIndex;
+  viewRam(path: string, cpuClassCeiling: string | undefined): CompiledSequenceIndex;
   viewNvme(
     ...arguments_: [
       path: string,
       executor: CompiledExecutor | undefined,
       paths: string[] | undefined,
       cpuClassCeiling: string | undefined,
-      ...CompiledWeights,
     ]
   ): CompiledSequenceIndex;
 }

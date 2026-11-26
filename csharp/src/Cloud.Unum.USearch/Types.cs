@@ -1664,7 +1664,8 @@ internal unsafe struct CallOutputs
     public nuint Written;
     public nuint Required;
     public fixed ulong View[4];
-    public fixed ulong Report[33];
+    // The largest tenant is a refine's traversal stats beside its report: 5 + 29 words.
+    public fixed ulong Report[34];
 }
 
 /// <summary>

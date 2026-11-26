@@ -3,42 +3,32 @@
  *  @author Ash Vardanian
  *  @date October 14, 2026
  *  @brief The sequence search benchmark: a text file, one entry per line, built into one index of
- *      any residency through the C interface and judged against an exact Levenshtein, overlap or
- *      Needleman-Wunsch scan.
+ *      any residency through the C interface and judged against an exact scan of its score.
  *
  *  Queries are the file's last entries, kept out of the index, and a hit counts when its distance
  *  is within the exact k-th, so integer edit distances, where many entries tie, are not
  *  undercounted. An NVMe run builds in RAM, saves a checkpoint and searches a view of it.
- *  Needleman-Wunsch folds every byte into an alphabet's classes and packs the codes at ingest: DNA
- *  as A, C, G and T, anything else as T, under transition 1, transversion 2 and gap 2; proteins as
- *  BLOSUM62's 20 amino acids, B, Z, X and the stop, anything else as X, with gap 7, the linear gap
- *  score of 4 plus half the mean self-score; text already folded to a-z, the space, a digit as 0
- *  and anything else as a full stop, at unit costs. Searching under uniform costs reloads a RAM or
- *  NVMe index under unit costs over the same classes, judged against them.
+ *  A metric names what the entries are: proteins under BLOSUM62 with a gap of 7, DNA over A, C, G
+ *  and T on either strand under transition 1, transversion 2 and gap 2, or UTF-8 text, whose case
+ *  folds before its windows are counted. Costs of the caller's own replace the metric's.
  *
  *  @verbatim
  *  Flag             Default   Meaning
  *  --base-texts     required  Entries, one per line
- *  --window-widths  none      Window widths in bytes, which the overlap kind alone takes
- *  --metric         levenshtein  levenshtein, levenshtein-utf8, overlap or needleman-wunsch
- *  --alphabet       none      dna, protein or text, which Needleman-Wunsch alone takes
- *  --search-costs   alphabet  alphabet, or uniform to search a Needleman-Wunsch index under unit costs
- *  --weights        none      65,536 int8 similarities and an int8 gap cost replacing the alphabet's
- *  --classes        none      256 bytes, each byte's class code, replacing the alphabet's fold
+ *  --metric         required  protein-alignment, dna-overlap or utf8-containment
+ *  --costs          none      A file of 256x256 int8 similarities and an int8 gap cost, for the metric's own
  *  --query-targets  none      The base row each held-out query intends, one decimal per line
  *  --matches-output none      A file per search breadth, <path>.<breadth>, each query's matched base rows on a line
  *  @endverbatim
  */
-#include <cstdint> // `std::uint8_t` - the codes, `std::int8_t` - the alphabets' scores
-#include <cstdio>  // `std::remove` - the reloaded checkpoint, `std::fopen` - the matches output
-#include <cstring> // `std::memset`, `std::memcpy` - the unit scores' blank matrix, the weights
+#include <cstdio> // `std::fopen` - the matches output
 
-#include <array>       // `std::array` - the flags, the byte-to-class fold
+#include <array>       // `std::array` - the flags
+#include <optional>    // `std::optional` - the costs a metric reads
 #include <charconv>    // `std::from_chars` - the queries' intended rows
-#include <filesystem>  // `std::filesystem::temp_directory_path` - where a reloaded run saves
-#include <string>      // `std::string` - the matches output, the reloaded checkpoint
+#include <string>      // `std::string` - the matches output, the checkpoint
 #include <string_view> // `std::string_view`
-#include <vector>      // `std::vector` - the offsets, the similarities
+#include <vector>      // `std::vector` - the offsets
 
 #include "usearch/sequence_index.h"
 #include "usearch/utilities/blocking_files.hpp" // `mapped_file_t`
@@ -51,76 +41,40 @@ using namespace unum::usearch::tools;
 /** Runs the sequence search benchmark over the flags in @p argv. */
 int bench_sequence_index_search(int argc, char const* const* argv) {
     search_bench_settings_t search;
-    std::string_view base_texts_path, alphabet_name, search_costs = "alphabet", weights_path, classes_path,
-                                                     query_targets_path, matches_output_path;
-    counts_t window_widths {.minimum_size = 0};
+    std::string_view base_texts_path, costs_path, query_targets_path, matches_output_path;
+    count_t sketch_bytes {.minimum = 0};
     std::array<flag_t, 9> const shared = search_bench_flags(search);
     std::vector<flag_t> flags(shared.begin(), shared.end());
-    std::array<flag_t, 8> const own {{
+    std::array<flag_t, 5> const own {{
         {"--base-texts", "path", "entries, one per line", &base_texts_path},
-        {"--window-widths", "bytes", "window widths for the overlap kind, like 3,5", &window_widths},
-        {"--alphabet", "name", "dna, protein or text, which the needleman-wunsch kind alone takes", &alphabet_name},
-        {"--search-costs", "name", "alphabet, or uniform to search a needleman-wunsch index under unit costs",
-         &search_costs},
-        {"--weights", "path", "256x256 int8 similarities and an int8 gap cost replacing the alphabet's", &weights_path},
-        {"--classes", "path", "256 bytes, each byte's class code, replacing the alphabet's fold", &classes_path},
+        {"--costs", "path", "a file of 256x256 int8 similarities and an int8 gap cost, for the metric's own",
+         &costs_path},
         {"--query-targets", "path", "the base row each query intends, one per line, judged at rank 1 and top-k",
          &query_targets_path},
         {"--matches-output", "path", "a file per search breadth, <path>.<breadth>, each query's matched base rows",
          &matches_output_path},
+        {"--sketch-bytes", "bytes", "a multiple of four in front of each sequence; defaults to the metric's own",
+         &sketch_bytes},
     }};
     flags.insert(flags.end(), own.begin(), own.end());
     settings_t const settings = read_settings(argc, argv,
                                               "usearch_bench_sequence_index_search --base-texts <path> [flags]", flags);
     print(settings);
 
-    std::string_view const metric_name = search.metric_name.empty() ? "levenshtein" : search.metric_name;
     usearch_sequence_metric_t metric = usearch_sequence_metric_unknown_k;
-    if (usearch_sequence_metric_from_name(bytes_view(metric_name), &metric) != usearch_status_success_k)
-        return fmt::println(
-                   stderr,
-                   "--metric=\"{}\" does not parse, expected levenshtein, levenshtein-utf8, overlap, needleman-wunsch",
-                   metric_name),
+    if (usearch_sequence_metric_from_name(bytes_view(search.metric_name), &metric) != usearch_status_success_k)
+        return fmt::println(stderr,
+                            "--metric=\"{}\" does not parse, expected protein-alignment, dna-overlap, " //
+                            "utf8-containment",
+                            search.metric_name),
                1;
-    bool const aligned = metric == usearch_sequence_metric_needleman_wunsch_k;
-    alphabet_t alphabet = alphabet_of(alphabet_name, alphabet_costs_t::own_k);
-    alphabet_t searched_alphabet = alphabet_of(
-        alphabet_name, search_costs == "uniform" ? alphabet_costs_t::uniform_k : alphabet_costs_t::own_k);
-    if (!classes_path.empty()) {
-        auto [classes_file, classes_status] = util::mapped_file_t::read(classes_path);
-        if (failed(classes_status) || classes_file.view().size() != alphabet.codes.size() || !aligned)
-            return fmt::println(stderr, "--classes=\"{}\" must hold 256 bytes for needleman-wunsch", classes_path), 1;
-        std::memcpy(alphabet.codes.data(), classes_file.view().data(), alphabet.codes.size());
-        alphabet.classes = 0;
-        for (std::uint8_t const code : alphabet.codes)
-            if (code + 1u > alphabet.classes) alphabet.classes = code + 1u;
-        searched_alphabet.codes = alphabet.codes, searched_alphabet.classes = alphabet.classes;
-        if (search_costs == "uniform")
-            for (std::size_t code = 0; code != searched_alphabet.classes; ++code)
-                searched_alphabet.similarities[code * 256 + code] = 1;
-    }
-    if (!weights_path.empty()) {
-        if (!aligned) return fmt::println(stderr, "--weights=\"{}\" is for needleman-wunsch alone", weights_path), 1;
-        if (!read_weights(weights_path, alphabet)) return 1;
-        if (search_costs != "uniform") searched_alphabet = alphabet;
-    }
-    if (aligned != (alphabet.classes != 0))
-        return fmt::println(stderr, "--alphabet=\"{}\" must be dna, protein or text for needleman-wunsch alone",
-                            alphabet_name),
-               1;
-    bool const reloaded = search_costs == "uniform";
-    if (search_costs != "alphabet" &&
-        (!reloaded || !aligned || residencies_k[settings.residency.selected] == usearch_residency_vram_k))
-        return fmt::println(
-                   stderr, "--search-costs=\"{}\" must be alphabet, or uniform on a RAM or NVMe needleman-wunsch index",
-                   search_costs),
-               1;
-    usearch_sequence_weights_t const weights = alphabet.weights(), searched_weights = searched_alphabet.weights();
+    bool const named = !costs_path.empty();
+    std::optional<byte_costs_t> costs;
+    if (named && !(costs = read_costs(costs_path))) return 1;
+    usearch_sequence_costs_t const costs_view = costs ? costs->view() : usearch_sequence_costs_t {};
     auto [file, read_status] = util::mapped_file_t::read(base_texts_path);
     if (failed(read_status)) return fmt::println(stderr, "--base-texts=\"{}\" could not be read", base_texts_path), 1;
-    byte_tape_t tape = lines_of(file.view());
-    // The index reads the packed codes alone.
-    if (aligned) tape = packed_codes_of(tape, alphabet);
+    byte_tape_t const tape = lines_of(file.view());
     if (tape.size() <= search.queries.value)
         return fmt::println(stderr, "The file holds {} entries, too few to hold out {} queries", tape.size(),
                             search.queries.value),
@@ -129,9 +83,7 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
     std::size_t const base_count = search.max_base_entries.value
                                        ? util::min_of(search.max_base_entries.value, query_first)
                                        : query_first;
-    if (aligned)
-        fmt::println("- Alphabet: {} · {} classes · {} bytes packed · searched under {} costs", alphabet_name,
-                     alphabet.classes, tape.bytes.size(), search_costs);
+    if (named) fmt::println("- Costs: {}", costs_path);
 
     // The base row each held-out query intends, judged by key at rank 1 and among the top-k.
     std::vector<util::u64_t> query_targets;
@@ -181,25 +133,12 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
                      static_cast<double>(task_kept) / query_targets.size(), query_targets.size());
     };
 
-    sequence_geometry_t const geometry {{metric, search.connectivity.value},
-                                        aligned ? &weights : nullptr,
-                                        window_widths.view()};
-    sequence_geometry_t const served {{metric, search.connectivity.value},
-                                      aligned ? &searched_weights : nullptr,
-                                      window_widths.view()};
-    // A search under other costs reloads the checkpoint under them.
-    std::string const checkpoint =
-        !settings.checkpoint.empty() ? std::string(settings.checkpoint)
-        : reloaded ? (std::filesystem::temp_directory_path() / "usearch-bench-sequence-reloaded.safegraphs").string()
-                   : std::string();
+    sequence_geometry_t const geometry {{metric, search.connectivity.value, 0, sketch_bytes.value},
+                                        named ? &costs_view : nullptr};
     usearch_tape_view_t const entries = tape.view();
-    int const exit_code = run_search_bench<sequence_verbs_t>(settings, search, geometry, served, entries, base_count,
-                                                             sequence_verbs_t::slice(entries, query_first),
-                                                             search.queries.value, checkpoint, judge_task);
-    if (reloaded && settings.checkpoint.empty())
-        for (sz::string_t const& stale : files_starting_with(checkpoint.substr(0, checkpoint.rfind(".safegraphs"))))
-            std::remove(stale.c_str());
-    return exit_code;
+    return run_search_bench<sequence_verbs_t>(settings, search, geometry, geometry, entries, base_count,
+                                              sequence_verbs_t::slice(entries, query_first), search.queries.value,
+                                              settings.checkpoint, judge_task);
 }
 
 } // namespace unum::usearch::bench

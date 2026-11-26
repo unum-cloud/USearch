@@ -1,8 +1,8 @@
 """Similarity search over variable-length sequences: the index, its receivers, and its cursor.
 
-Text, DNA, RNA and proteins arrive as a `TapeView` of bytes, every sequence end to end between
-Apache Arrow offsets, and score under Levenshtein over bytes or UTF-8 code points, Needleman-Wunsch
-with a substitution matrix and a gap cost, or the overlap of fixed-width windows.
+Proteins, DNA, RNA and UTF-8 text arrive as a `TapeView` of bytes, every sequence end to end between
+Apache Arrow offsets, and score under a protein alignment, a DNA overlap or a UTF-8 containment, each
+under its own costs or the `SequenceCosts` an index is given.
 
 The verbs mirror the dense ones, and so do the receivers: verbs on the index run on the calling
 thread, `index.on(executor)` blocks on that executor, and `index.deferred(executor)` submits there
@@ -73,6 +73,7 @@ from usearch.types import (
     RamOptions,
     RowsViewArguments,
     ScalarKind,
+    Status,
     Traversal,
     Unwritten,
     Verb,
@@ -87,109 +88,135 @@ from usearch.types import (
 
 @fieldwise_init
 struct SequenceMetric(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
-    """The sequence scoring kinds - `usearch_sequence_metric_t`. `Library.sequence_metric_name` spells
-    each one as the engine does."""
+    """The sequence metrics - `usearch_sequence_metric_t`: what the sequences are, the form they are stored
+    in, and the score ranking them. Every metric stores a sequence folded, and a get returns the stored
+    form, never the bytes an insertion passed. `Library.sequence_metric_name` spells each one as the engine
+    does."""
 
     var code: c_int
     """The raw `usearch_sequence_metric_t` value the ABI exchanges."""
     comptime UNKNOWN = Self(0)
-    """No kind named - an unset field, refused by every constructor."""
-    comptime LEVENSHTEIN_BYTES = Self(1)
-    """Single-byte insertions, deletions and substitutions, each costing one."""
-    comptime LEVENSHTEIN_UTF8 = Self(2)
-    """The same edits over decoded code points, so an accented character costs one edit."""
-    comptime NEEDLEMAN_WUNSCH = Self(3)
-    """Global alignment under a substitution matrix and a linear gap cost."""
-    comptime OVERLAP = Self(4)
-    """The share of the larger set of fixed-width windows the other side misses."""
+    """No metric named - an unset field, refused by every constructor."""
+    comptime PROTEIN_ALIGNMENT = Self(1)
+    """Global alignment of proteins with linear gaps: BLOSUM62 with a gap of 7 over the 20 amino acids, B, Z,
+    X and the stop in either case, any other byte as X, unless the index names its own costs. A stored
+    sequence reads back as its class codes, five bits apiece, little-endian behind one byte counting the
+    slots the last bytes leave unused."""
+    comptime DNA_OVERLAP = Self(2)
+    """Shifted overlap of DNA or RNA: the cost of aligning two sequences where one slides over the other, at
+    the shift most windows of 12 and 19 symbols vote for, on either strand. Bytes fold into the classes of
+    A, C, G and T in either case, U read as T and any other byte as T. A stored sequence reads back as its
+    class codes, one byte apiece."""
+    comptime UTF8_CONTAINMENT = Self(3)
+    """Window containment of UTF-8 text: the share of the query's distinct windows of 5 and 8 bytes the
+    stored side lacks, whatever the case. Text is case-folded before it is stored or scored, which may
+    lengthen it up to three times, and a stored text reads back folded. Takes no costs."""
 
 
 @fieldwise_init
-struct SequenceWeightsArguments(ImplicitlyCopyable, TrivialRegisterPassable):
-    """`usearch_sequence_weights_t`."""
+struct SequenceCostsArguments(ImplicitlyCopyable):
+    """`usearch_sequence_costs_t`."""
 
-    var substitution_matrix: Address
+    var similarities: Address
     var gap: Int8
 
 
-@fieldwise_init
-struct SequenceWeights[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
-    """The substitution matrix and gap cost Needleman-Wunsch scores with - `usearch_sequence_weights_t`.
+struct SequenceCosts[similarities_origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
+    """How alike two bytes are and the cost of leaving one unaligned - `usearch_sequence_costs_t` - where an
+    index scores by other costs than its metric's own.
+
+    Similarities fold bytes sharing their rows and columns into at most 32 classes; a DNA overlap needs
+    costs folding bytes into exactly four classes holding A, C, G and T apart. A checkpoint records the
+    costs, so loads and views take none.
 
     Parameters:
-        origin: The viewed matrix, named so it outlives every call these weights cross.
+        similarities_origin: The viewed similarities, named so they outlive every call they cross.
     """
 
-    var substitution_matrix: Span[Int8, Self.origin]
-    """Row-major 256x256 signed similarities over the byte alphabet."""
+    var similarities: Span[Int8, Self.similarities_origin]
+    """Row-major 256x256 signed similarities between raw bytes."""
     var gap: Int8
     """Cost of one unaligned symbol."""
 
-    def arguments(self) -> SequenceWeightsArguments:
-        """The weights as the engine reads them, their view erased.
+    def __init__(out self, similarities: Span[Int8, Self.similarities_origin], gap: Int8):
+        """Describes costs.
+
+        Args:
+            similarities: Row-major 256x256 signed similarities between raw bytes.
+            gap: Cost of one unaligned symbol.
+        """
+        self.similarities = similarities
+        self.gap = gap
+
+    def arguments(self) raises Error -> SequenceCostsArguments:
+        """The costs as the engine reads them, their view erased.
 
         Returns:
-            The matrix's first score and the gap cost.
+            The first similarity and the gap cost.
+
+        Raises:
+            `Error` with `SHAPE_MISMATCH` for similarities other than 256x256.
         """
-        return SequenceWeightsArguments(Int(self.substitution_matrix.unsafe_ptr()), self.gap)
+        # The table crosses as a pointer with no count, so only this side can see one short.
+        if len(self.similarities) != 256 * 256:
+            raise Error(Status.SHAPE_MISMATCH, "SequenceCosts.similarities")
+        return SequenceCostsArguments(Int(self.similarities.unsafe_ptr()), self.gap)
 
 
 @fieldwise_init
-struct SequenceOptions[weights_origin: ImmOrigin = ImmUntrackedOrigin, widths_origin: ImmOrigin = ImmUntrackedOrigin](
-    ImplicitlyCopyable
-):
-    """The kind an empty index freezes - what `usearch_sequence_init_ram_t` and
+struct SequenceOptions[similarities_origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
+    """The metric an empty index freezes - what `usearch_sequence_init_ram_t` and
     `usearch_sequence_init_vram_t` share, without the placement each names its own way.
 
     Parameters:
-        weights_origin: The viewed substitution matrix, inferred where weights are named.
-        widths_origin: The viewed window widths, inferred where any are named.
+        similarities_origin: The costs' viewed similarities, inferred where costs name them.
     """
 
     var metric: SequenceMetric
-    """The scoring kind."""
-    var weights: Optional[SequenceWeights[Self.weights_origin]]
-    """The weights Needleman-Wunsch needs; absent for every other kind, which refuses any."""
-    var window_widths: Span[c_size_t, Self.widths_origin]
-    """Window widths in bytes for the overlap kind, which needs one at least; every other kind refuses any."""
+    """What the sequences are and the score ranking them."""
+    var costs: Optional[SequenceCosts[Self.similarities_origin]]
+    """The optional costs; absent for the metric's own, and refused for `UTF8_CONTAINMENT`."""
     var connectivity: c_size_t
     """The connections-per-node bound; zero derives."""
+    var sketch_bytes: c_size_t
+    """Bytes of the sketch in front of each stored sequence, a multiple of four; zero takes the metric's default,
+    and `DNA_OVERLAP` keeps none and refuses any."""
     var values_per_key: c_size_t
     """Upper bound on entries sharing one key; zero is unbounded."""
 
     def __init__(
         out self,
-        metric: SequenceMetric = SequenceMetric.LEVENSHTEIN_BYTES,
-        weights: Optional[SequenceWeights[Self.weights_origin]] = Optional[SequenceWeights[Self.weights_origin]](),
-        window_widths: Span[c_size_t, Self.widths_origin] = Span[c_size_t, Self.widths_origin](),
+        metric: SequenceMetric = SequenceMetric.PROTEIN_ALIGNMENT,
+        costs: Optional[SequenceCosts[Self.similarities_origin]] = Optional[SequenceCosts[Self.similarities_origin]](),
         connectivity: Int = 0,
+        sketch_bytes: Int = 0,
         values_per_key: Int = 0,
     ):
-        """Describes an index by its kind, byte Levenshtein unless told otherwise.
+        """Describes an index by its metric, protein alignment unless told otherwise.
 
         Args:
-            metric: The scoring kind the graph is frozen under.
-            weights: The weights Needleman-Wunsch needs; absent for every other kind.
-            window_widths: Window widths in bytes for the overlap kind.
+            metric: The metric the graph is frozen under.
+            costs: The optional costs; absent for the metric's own.
             connectivity: The connections-per-node bound; zero derives.
+            sketch_bytes: Bytes of the sketch in front of each stored sequence; zero takes the metric's default.
             values_per_key: Upper bound on entries sharing one key; zero is unbounded.
         """
         self.metric = metric
-        self.weights = weights
-        self.window_widths = window_widths
+        self.costs = costs
         self.connectivity = c_size_t(connectivity)
+        self.sketch_bytes = c_size_t(sketch_bytes)
         self.values_per_key = c_size_t(values_per_key)
 
 
-def _pass_weights[
-    origin: ImmOrigin
-](weights: Optional[SequenceWeights[origin]], slot: Pointer[SequenceWeightsArguments, MutAnyOrigin]) -> Optional[
-    Pointer[SequenceWeightsArguments, ImmUntrackedOrigin]
-]:
-    """Writes optional weights into `slot`, which outlives the call, and answers the pointer the engine reads."""
-    if case .Some(named) = weights:
+def _pass_costs[
+    similarities_origin: ImmOrigin
+](
+    costs: Optional[SequenceCosts[similarities_origin]], slot: Pointer[SequenceCostsArguments, MutAnyOrigin]
+) raises Error -> Optional[Pointer[SequenceCostsArguments, ImmUntrackedOrigin]]:
+    """Writes optional costs into `slot`, which outlives the call, and answers the pointer the engine reads."""
+    if case .Some(named) = costs:
         slot[] = named.arguments()
-        return Pointer[SequenceWeightsArguments, ImmUntrackedOrigin](unsafe_from_address=Int(slot))
+        return Pointer[SequenceCostsArguments, ImmUntrackedOrigin](unsafe_from_address=Int(slot))
     return None
 
 
@@ -201,11 +228,17 @@ struct SequenceMetadata(Defaultable, ImplicitlyCopyable):
     """The scoring kind the checkpoint scores with."""
     var connectivity: c_size_t
     """Connections per node the graph was built with."""
+    var classes: c_size_t
+    """Classes the recorded costs folded bytes into; zero for a containment."""
+    var sketch_bytes: c_size_t
+    """Bytes of the sketch in front of each stored sequence; zero when the metric keeps none."""
 
     def __init__(out self):
         """Names no kind, so an unwritten slot reads as an unanswered probe."""
         self.metric = SequenceMetric.UNKNOWN
         self.connectivity = c_size_t(0)
+        self.classes = c_size_t(0)
+        self.sketch_bytes = c_size_t(0)
 
 
 @fieldwise_init
@@ -435,10 +468,9 @@ struct SequenceInitRamArguments(ImplicitlyCopyable):
     var index: Pointer[Address, MutUntrackedOrigin]
     var outcome: Pointer[Outcome, MutUntrackedOrigin]
     var metric: SequenceMetric
-    var weights: Optional[Pointer[SequenceWeightsArguments, ImmUntrackedOrigin]]
-    var window_widths: Optional[Pointer[c_size_t, ImmUntrackedOrigin]]
-    var window_widths_count: c_size_t
+    var costs: Optional[Pointer[SequenceCostsArguments, ImmUntrackedOrigin]]
     var connectivity: c_size_t
+    var sketch_bytes: c_size_t
     var values_per_key: c_size_t
     var ram: RamOptions[ImmUntrackedOrigin]
 
@@ -450,10 +482,9 @@ struct SequenceInitVramArguments(ImplicitlyCopyable):
     var index: Pointer[Address, MutUntrackedOrigin]
     var outcome: Pointer[Outcome, MutUntrackedOrigin]
     var metric: SequenceMetric
-    var weights: Optional[Pointer[SequenceWeightsArguments, ImmUntrackedOrigin]]
-    var window_widths: Optional[Pointer[c_size_t, ImmUntrackedOrigin]]
-    var window_widths_count: c_size_t
+    var costs: Optional[Pointer[SequenceCostsArguments, ImmUntrackedOrigin]]
     var connectivity: c_size_t
+    var sketch_bytes: c_size_t
     var values_per_key: c_size_t
     var vram: VramOptions[ImmUntrackedOrigin]
 
@@ -468,8 +499,9 @@ struct SequenceLoadRamArguments(ImplicitlyCopyable):
     var completion: Completion
     var source: BytesView[ImmUntrackedOrigin]
     var ram: RamOptions[ImmUntrackedOrigin]
+    var connectivity: c_size_t
+    var sketch_bytes: c_size_t
     var values_per_key: c_size_t
-    var weights: Optional[Pointer[SequenceWeightsArguments, ImmUntrackedOrigin]]
     var progress: ProgressArguments
 
 
@@ -483,8 +515,9 @@ struct SequenceLoadVramArguments(ImplicitlyCopyable):
     var completion: Completion
     var source: BytesView[ImmUntrackedOrigin]
     var vram: VramOptions[ImmUntrackedOrigin]
+    var connectivity: c_size_t
+    var sketch_bytes: c_size_t
     var values_per_key: c_size_t
-    var weights: Optional[Pointer[SequenceWeightsArguments, ImmUntrackedOrigin]]
     var progress: ProgressArguments
 
 
@@ -495,7 +528,6 @@ struct SequenceViewRamArguments(ImplicitlyCopyable):
     var index: Pointer[Address, MutUntrackedOrigin]
     var outcome: Pointer[Outcome, MutUntrackedOrigin]
     var path: BytesView[ImmUntrackedOrigin]
-    var weights: Optional[Pointer[SequenceWeightsArguments, ImmUntrackedOrigin]]
     var ram: RamOptions[ImmUntrackedOrigin]
 
 
@@ -509,7 +541,7 @@ struct SequenceViewNvmeArguments(ImplicitlyCopyable):
     var completion: Completion
     var path: BytesView[ImmUntrackedOrigin]
     var nvme: NvmeOptions[ImmUntrackedOrigin]
-    var weights: Optional[Pointer[SequenceWeightsArguments, ImmUntrackedOrigin]]
+    var sketch_bytes: c_size_t
 
 
 @fieldwise_init
@@ -583,6 +615,7 @@ struct SequenceSearchArguments(ImplicitlyCopyable):
     var expansion_factor: c_size_t
     var traversal: Traversal
     var predicate: PredicateArguments
+    var hints: Optional[Pointer[MatchesViewArguments, ImmUntrackedOrigin]]
     var progress: ProgressArguments
     var stats: Optional[Pointer[DenseTraversalStats, MutUntrackedOrigin]]
 
@@ -1110,6 +1143,7 @@ struct _SequenceSearchCall[origin: MutOrigin](Call):
             c_size_t(self.expansion_factor),
             self.traversal,
             self.predicate,
+            None,
             self.progress,
             self.stats,
         }
@@ -1236,44 +1270,42 @@ struct SequenceIndex(Movable, SequenceVerbs):
 
     @staticmethod
     def init_ram[
-        weights_origin: ImmOrigin, widths_origin: ImmOrigin, ram_origin: ImmOrigin, //
+        similarities_origin: ImmOrigin, ram_origin: ImmOrigin, //
     ](
         library: Library,
-        options: SequenceOptions[weights_origin, widths_origin] = SequenceOptions(),
+        options: SequenceOptions[similarities_origin] = SequenceOptions(),
         ram: RamOptions[ram_origin] = RamOptions(),
     ) raises Error -> Self:
         """Initializes an empty, mutable index in host memory. Calls `usearch_sequence_init_ram`.
 
         Parameters:
-            weights_origin: The options' viewed substitution matrix, inferred from the argument.
-            widths_origin: The options' viewed window widths, inferred with it.
+            similarities_origin: The options' viewed similarities, inferred from the argument.
             ram_origin: The placement's viewed domain array, inferred from the argument.
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
-            options: The scoring kind and its parameters; read only during this call.
+            options: The metric and its costs; read only during this call.
             ram: The memory domains to place one shard on apiece.
 
         Returns:
             The new index.
 
         Raises:
-            `Error` with `CONFIG_MISMATCH` for weights or window widths the kind does not take.
+            `Error` with `CONFIG_MISMATCH` for costs no metric reads, or `SHAPE_MISMATCH` for a short table.
         """
         var created = stack_allocation[1, Address]()
         created[unsafe_offset=0] = NULL_ADDRESS
         var outcome = stack_allocation[1, Outcome]()
         outcome[unsafe_offset=0] = Outcome()
-        var weights = stack_allocation[1, SequenceWeightsArguments]()
+        var costs = stack_allocation[1, SequenceCostsArguments]()
         _cross(
             SequenceInitRamArguments(
                 created.unsafe_origin_cast[MutUntrackedOrigin](),
                 outcome.unsafe_origin_cast[MutUntrackedOrigin](),
                 options.metric,
-                _pass_weights(options.weights, weights.unsafe_origin_cast[MutAnyOrigin]()),
-                _pass_widths(options.window_widths),
-                c_size_t(len(options.window_widths)),
+                _pass_costs(options.costs, costs.unsafe_origin_cast[MutAnyOrigin]()),
                 options.connectivity,
+                options.sketch_bytes,
                 options.values_per_key,
                 ram.arguments(),
             ),
@@ -1284,22 +1316,21 @@ struct SequenceIndex(Movable, SequenceVerbs):
 
     @staticmethod
     def init_vram[
-        weights_origin: ImmOrigin, widths_origin: ImmOrigin, vram_origin: ImmOrigin, //
+        similarities_origin: ImmOrigin, vram_origin: ImmOrigin, //
     ](
         library: Library,
-        options: SequenceOptions[weights_origin, widths_origin] = SequenceOptions(),
+        options: SequenceOptions[similarities_origin] = SequenceOptions(),
         vram: VramOptions[vram_origin] = VramOptions(),
     ) raises Error -> Self:
         """Initializes an empty, mutable index in device memory. Calls `usearch_sequence_init_vram`.
 
         Parameters:
-            weights_origin: The options' viewed substitution matrix, inferred from the argument.
-            widths_origin: The options' viewed window widths, inferred with it.
+            similarities_origin: The options' viewed similarities, inferred from the argument.
             vram_origin: The placement's viewed ordinal array, inferred from the argument.
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
-            options: The scoring kind and its parameters; read only during this call.
+            options: The metric and its costs; read only during this call.
             vram: The device to place the index on.
 
         Returns:
@@ -1312,16 +1343,15 @@ struct SequenceIndex(Movable, SequenceVerbs):
         created[unsafe_offset=0] = NULL_ADDRESS
         var outcome = stack_allocation[1, Outcome]()
         outcome[unsafe_offset=0] = Outcome()
-        var weights = stack_allocation[1, SequenceWeightsArguments]()
+        var costs = stack_allocation[1, SequenceCostsArguments]()
         _cross(
             SequenceInitVramArguments(
                 created.unsafe_origin_cast[MutUntrackedOrigin](),
                 outcome.unsafe_origin_cast[MutUntrackedOrigin](),
                 options.metric,
-                _pass_weights(options.weights, weights.unsafe_origin_cast[MutAnyOrigin]()),
-                _pass_widths(options.window_widths),
-                c_size_t(len(options.window_widths)),
+                _pass_costs(options.costs, costs.unsafe_origin_cast[MutAnyOrigin]()),
                 options.connectivity,
+                options.sketch_bytes,
                 options.values_per_key,
                 vram.arguments(),
             ),
@@ -1332,27 +1362,24 @@ struct SequenceIndex(Movable, SequenceVerbs):
 
     @staticmethod
     def load_ram[
-        path_origin: ImmOrigin, ram_origin: ImmOrigin, weights_origin: ImmOrigin, //
+        path_origin: ImmOrigin, ram_origin: ImmOrigin, //
     ](
         executor: Executor,
         path: StringSlice[path_origin],
         ram: RamOptions[ram_origin] = RamOptions(),
         values_per_key: Int = 0,
-        weights: Optional[SequenceWeights[weights_origin]] = Optional[SequenceWeights[ImmUntrackedOrigin]](),
     ) raises Error -> Self:
         """Copies a checkpoint into a new, mutable index in host memory. Calls `usearch_sequence_load_ram`.
 
         Parameters:
             path_origin: The path bytes' origin, inferred from the argument.
             ram_origin: The placement's viewed domain array, inferred from the argument.
-            weights_origin: The viewed substitution matrix, inferred from the argument.
 
         Args:
             executor: The executor the read fans out over; it also supplies its queues.
             path: The manifest of a sharded checkpoint, or a single `.safegraphs` monolith.
             ram: The memory domains to place the parts on.
             values_per_key: Upper bound on entries sharing one key, which no checkpoint records.
-            weights: The weights a Needleman-Wunsch checkpoint scores with, which it does not hold.
 
         Returns:
             The new index; a failed load creates none.
@@ -1366,19 +1393,17 @@ struct SequenceIndex(Movable, SequenceVerbs):
             BytesView.of(path).arguments(),
             ram.arguments(),
             values_per_key,
-            weights,
             "usearch_sequence_load_ram",
         )
 
     @staticmethod
     def load_ram_buffer[
-        buffer_origin: ImmOrigin, ram_origin: ImmOrigin, weights_origin: ImmOrigin, //
+        buffer_origin: ImmOrigin, ram_origin: ImmOrigin, //
     ](
         executor: Executor,
         buffer: Span[UInt8, buffer_origin],
         ram: RamOptions[ram_origin] = RamOptions(),
         values_per_key: Int = 0,
-        weights: Optional[SequenceWeights[weights_origin]] = Optional[SequenceWeights[ImmUntrackedOrigin]](),
     ) raises Error -> Self:
         """Copies a monolith from a memory buffer into a new, mutable index in host memory.
         Calls `usearch_sequence_load_ram_buffer`.
@@ -1386,14 +1411,12 @@ struct SequenceIndex(Movable, SequenceVerbs):
         Parameters:
             buffer_origin: The source bytes' origin, inferred from the argument.
             ram_origin: The placement's viewed domain array, inferred from the argument.
-            weights_origin: The viewed substitution matrix, inferred from the argument.
 
         Args:
             executor: The executor the copy fans out over; it also supplies its queues.
             buffer: Source holding one serialized monolith.
             ram: The memory domains to place shards on; the monolith lands whole on the first.
             values_per_key: Upper bound on entries sharing one key, which no checkpoint records.
-            weights: The weights a Needleman-Wunsch monolith scores with, which it does not hold.
 
         Returns:
             The new index; a failed load creates none.
@@ -1407,20 +1430,16 @@ struct SequenceIndex(Movable, SequenceVerbs):
             BytesView.of(buffer).arguments(),
             ram.arguments(),
             values_per_key,
-            weights,
             "usearch_sequence_load_ram_buffer",
         )
 
     @staticmethod
-    def _load_ram[
-        weights_origin: ImmOrigin
-    ](
+    def _load_ram(
         executor: Executor,
         verb: SequenceLoadRam,
         source: BytesView[ImmUntrackedOrigin],
         ram: RamOptions[ImmUntrackedOrigin],
         values_per_key: Int,
-        weights: Optional[SequenceWeights[weights_origin]],
         detail: StaticString,
     ) raises Error -> Self:
         """The path and buffer forms share one argument layout, differing only in the verb."""
@@ -1428,7 +1447,6 @@ struct SequenceIndex(Movable, SequenceVerbs):
         created[unsafe_offset=0] = NULL_ADDRESS
         var outcome = stack_allocation[1, Outcome]()
         outcome[unsafe_offset=0] = Outcome()
-        var passed = stack_allocation[1, SequenceWeightsArguments]()
         _cross(
             SequenceLoadRamArguments(
                 created.unsafe_origin_cast[MutUntrackedOrigin](),
@@ -1437,8 +1455,9 @@ struct SequenceIndex(Movable, SequenceVerbs):
                 Completion.BLOCKING,
                 source,
                 ram,
+                c_size_t(0),
+                c_size_t(0),
                 c_size_t(values_per_key),
-                _pass_weights(weights, passed.unsafe_origin_cast[MutAnyOrigin]()),
                 ProgressArguments(),
             ),
             verb,
@@ -1448,27 +1467,24 @@ struct SequenceIndex(Movable, SequenceVerbs):
 
     @staticmethod
     def load_vram[
-        path_origin: ImmOrigin, vram_origin: ImmOrigin, weights_origin: ImmOrigin, //
+        path_origin: ImmOrigin, vram_origin: ImmOrigin, //
     ](
         executor: Executor,
         path: StringSlice[path_origin],
         vram: VramOptions[vram_origin] = VramOptions(),
         values_per_key: Int = 0,
-        weights: Optional[SequenceWeights[weights_origin]] = Optional[SequenceWeights[ImmUntrackedOrigin]](),
     ) raises Error -> Self:
         """Copies a checkpoint into a new, mutable index in device memory. Calls `usearch_sequence_load_vram`.
 
         Parameters:
             path_origin: The path bytes' origin, inferred from the argument.
             vram_origin: The placement's viewed ordinal array, inferred from the argument.
-            weights_origin: The viewed substitution matrix, inferred from the argument.
 
         Args:
             executor: The executor the upload runs on; it also supplies its queues.
             path: The manifest of a sharded checkpoint, or a single `.safegraphs` monolith.
             vram: The device to place the index on.
             values_per_key: Upper bound on entries sharing one key, which no checkpoint records.
-            weights: The weights a Needleman-Wunsch checkpoint scores with, which it does not hold.
 
         Returns:
             The new index; a failed load creates none.
@@ -1482,19 +1498,17 @@ struct SequenceIndex(Movable, SequenceVerbs):
             BytesView.of(path).arguments(),
             vram.arguments(),
             values_per_key,
-            weights,
             "usearch_sequence_load_vram",
         )
 
     @staticmethod
     def load_vram_buffer[
-        buffer_origin: ImmOrigin, vram_origin: ImmOrigin, weights_origin: ImmOrigin, //
+        buffer_origin: ImmOrigin, vram_origin: ImmOrigin, //
     ](
         executor: Executor,
         buffer: Span[UInt8, buffer_origin],
         vram: VramOptions[vram_origin] = VramOptions(),
         values_per_key: Int = 0,
-        weights: Optional[SequenceWeights[weights_origin]] = Optional[SequenceWeights[ImmUntrackedOrigin]](),
     ) raises Error -> Self:
         """Copies a monolith from a memory buffer into a new, mutable index in device memory.
         Calls `usearch_sequence_load_vram_buffer`.
@@ -1502,14 +1516,12 @@ struct SequenceIndex(Movable, SequenceVerbs):
         Parameters:
             buffer_origin: The source bytes' origin, inferred from the argument.
             vram_origin: The placement's viewed ordinal array, inferred from the argument.
-            weights_origin: The viewed substitution matrix, inferred from the argument.
 
         Args:
             executor: The executor the upload runs on; it also supplies its queues.
             buffer: Source holding one serialized monolith.
             vram: The device to place the index on.
             values_per_key: Upper bound on entries sharing one key, which no checkpoint records.
-            weights: The weights a Needleman-Wunsch monolith scores with, which it does not hold.
 
         Returns:
             The new index; a failed load creates none.
@@ -1523,20 +1535,16 @@ struct SequenceIndex(Movable, SequenceVerbs):
             BytesView.of(buffer).arguments(),
             vram.arguments(),
             values_per_key,
-            weights,
             "usearch_sequence_load_vram_buffer",
         )
 
     @staticmethod
-    def _load_vram[
-        weights_origin: ImmOrigin
-    ](
+    def _load_vram(
         executor: Executor,
         verb: SequenceLoadVram,
         source: BytesView[ImmUntrackedOrigin],
         vram: VramOptions[ImmUntrackedOrigin],
         values_per_key: Int,
-        weights: Optional[SequenceWeights[weights_origin]],
         detail: StaticString,
     ) raises Error -> Self:
         """The path and buffer forms share one argument layout, differing only in the verb."""
@@ -1544,7 +1552,6 @@ struct SequenceIndex(Movable, SequenceVerbs):
         created[unsafe_offset=0] = NULL_ADDRESS
         var outcome = stack_allocation[1, Outcome]()
         outcome[unsafe_offset=0] = Outcome()
-        var passed = stack_allocation[1, SequenceWeightsArguments]()
         _cross(
             SequenceLoadVramArguments(
                 created.unsafe_origin_cast[MutUntrackedOrigin](),
@@ -1553,8 +1560,9 @@ struct SequenceIndex(Movable, SequenceVerbs):
                 Completion.BLOCKING,
                 source,
                 vram,
+                c_size_t(0),
+                c_size_t(0),
                 c_size_t(values_per_key),
-                _pass_weights(weights, passed.unsafe_origin_cast[MutAnyOrigin]()),
                 ProgressArguments(),
             ),
             verb,
@@ -1564,23 +1572,20 @@ struct SequenceIndex(Movable, SequenceVerbs):
 
     @staticmethod
     def view_ram[
-        path_origin: ImmOrigin, weights_origin: ImmOrigin, //
+        path_origin: ImmOrigin, //
     ](
         library: Library,
         path: StringSlice[path_origin],
-        weights: Optional[SequenceWeights[weights_origin]] = Optional[SequenceWeights[ImmUntrackedOrigin]](),
     ) raises Error -> Self:
         """Serves a checkpoint in place through a memory mapping, as a read-only index.
         Calls `usearch_sequence_view_ram`.
 
         Parameters:
             path_origin: The path bytes' origin, inferred from the argument.
-            weights_origin: The viewed substitution matrix, inferred from the argument.
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
             path: The manifest of a sharded checkpoint, or a single `.safegraphs` monolith.
-            weights: The weights a Needleman-Wunsch checkpoint scores with, which it does not hold.
 
         Returns:
             The read-only index.
@@ -1592,13 +1597,11 @@ struct SequenceIndex(Movable, SequenceVerbs):
         created[unsafe_offset=0] = NULL_ADDRESS
         var outcome = stack_allocation[1, Outcome]()
         outcome[unsafe_offset=0] = Outcome()
-        var passed = stack_allocation[1, SequenceWeightsArguments]()
         _cross(
             SequenceViewRamArguments(
                 created.unsafe_origin_cast[MutUntrackedOrigin](),
                 outcome.unsafe_origin_cast[MutUntrackedOrigin](),
                 BytesView.of(path).arguments(),
-                _pass_weights(weights, passed.unsafe_origin_cast[MutAnyOrigin]()),
                 RamOptions().arguments(),
             ),
             library.symbols().sequence_view_ram,
@@ -1608,12 +1611,11 @@ struct SequenceIndex(Movable, SequenceVerbs):
 
     @staticmethod
     def view_nvme[
-        path_origin: ImmOrigin, nvme_origin: ImmOrigin, weights_origin: ImmOrigin, //
+        path_origin: ImmOrigin, nvme_origin: ImmOrigin, //
     ](
         executor: Executor,
         path: StringSlice[path_origin],
         nvme: NvmeOptions[nvme_origin] = NvmeOptions(),
-        weights: Optional[SequenceWeights[weights_origin]] = Optional[SequenceWeights[ImmUntrackedOrigin]](),
     ) raises Error -> Self:
         """Serves a checkpoint in place from NVMe drives, read through the executor's rings.
         Calls `usearch_sequence_view_nvme`.
@@ -1621,13 +1623,11 @@ struct SequenceIndex(Movable, SequenceVerbs):
         Parameters:
             path_origin: The path bytes' origin, inferred from the argument.
             nvme_origin: The options' viewed path array, inferred from the argument.
-            weights_origin: The viewed substitution matrix, inferred from the argument.
 
         Args:
             executor: The NVMe executor whose rings read the checkpoint; it also supplies its queues.
             path: The manifest of a sharded checkpoint, or a single `.safegraphs` monolith.
             nvme: The devices the parts are served from; naming none serves each where it points.
-            weights: The weights a Needleman-Wunsch checkpoint scores with, which it does not hold.
 
         Returns:
             The read-only index.
@@ -1639,7 +1639,6 @@ struct SequenceIndex(Movable, SequenceVerbs):
         created[unsafe_offset=0] = NULL_ADDRESS
         var outcome = stack_allocation[1, Outcome]()
         outcome[unsafe_offset=0] = Outcome()
-        var passed = stack_allocation[1, SequenceWeightsArguments]()
         _cross(
             SequenceViewNvmeArguments(
                 created.unsafe_origin_cast[MutUntrackedOrigin](),
@@ -1648,7 +1647,7 @@ struct SequenceIndex(Movable, SequenceVerbs):
                 Completion.BLOCKING,
                 BytesView.of(path).arguments(),
                 nvme.arguments(),
-                _pass_weights(weights, passed.unsafe_origin_cast[MutAnyOrigin]()),
+                c_size_t(0),
             ),
             executor.library.symbols().sequence_view_nvme,
         )
@@ -1739,13 +1738,6 @@ struct SequenceIndex(Movable, SequenceVerbs):
         )
 
     # endregion Receivers
-
-
-def _pass_widths[origin: ImmOrigin](widths: Span[c_size_t, origin]) -> Optional[Pointer[c_size_t, ImmUntrackedOrigin]]:
-    """The first window width, or `None` for none, its view erased for the call it crosses."""
-    if len(widths) == 0:
-        return None
-    return widths.unsafe_ptr().unsafe_origin_cast[ImmUntrackedOrigin]()
 
 
 trait SequenceVerbs:

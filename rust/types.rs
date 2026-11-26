@@ -1866,10 +1866,12 @@ pub enum Phase {
     Gather = 8,
     /// A round re-stitching each neighborhood.
     Restitch = 9,
+    /// A round linking island entries by walks from the root.
+    Reach = 10,
     /// A round on NVMe rewriting each tile of links from what its restitch changed.
-    Write = 10,
+    Write = 11,
     /// The plan ended its round, and nothing more is pending.
-    Done = 11,
+    Done = 12,
 }
 
 impl Phase {
@@ -1885,8 +1887,9 @@ impl Phase {
             7 => Phase::Hubs,
             8 => Phase::Gather,
             9 => Phase::Restitch,
-            10 => Phase::Write,
-            11 => Phase::Done,
+            10 => Phase::Reach,
+            11 => Phase::Write,
+            12 => Phase::Done,
             _ => return None,
         };
         Some(phase)

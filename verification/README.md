@@ -8,6 +8,7 @@ Model checking for the index protocols: the gates, the watermarks, the capacity 
 - `basic_ram_index_rows.pml`: the basic index's rows under their lock word, behind the gate's shared and unique sides.
 - `basic_ram_index_back_link.pml`: the back-link re-selection on one full row, against `link` and `unlink`.
 - `basic_ram_index_steps.pml`: the basic load path, two steps' tally, then `finish` under the unique side.
+- `basic_vram_index_reach.pml`: the basic VRAM refine's reach on every vendor, listed re-selections and their back-links, then the heal.
 - `basic_ram_index_batches/`: a basic batch, placed serially or planned over steppers, on one index or across two shards, publishes whole.
 - `watermark_turn.pml`: the watermark turn every dense index takes once its rows are placed.
 - `dense_ram_index_watermark/`: the dense mono-index's publication protocol, with its keys, cursor, save, load and refinement.

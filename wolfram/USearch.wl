@@ -69,16 +69,16 @@ DenseMultiply::usage = "DenseMultiply[receiver, left, arena] approximates the sp
 DenseValues::usage = "DenseValues[receiver, keys, values] prepares immutable value rows, one per key, in the index's quantization, for DenseAttend, on a blocking receiver."
 DenseAttend::usage = "DenseAttend[receiver, queries, values, arena] folds softmax attention of the query heads over every key their graph walks score, reading each key's row from values, a DenseValues. \"HeadCount\" is how many query heads share one walk per token, dividing the query count; \"ExpansionFactor\" sets the breadth of the candidates the walk explores, 0 deriving it; and \"ScoreScale\" is the logit scale, conventionally the inverse square root of the head dimensionality, 0. deriving it from the index's geometry."
 
-SequenceInitRam::usage = "SequenceInitRam[metric] creates an empty, mutable sequence index in host memory, scoring by metric, \"levenshtein\" by default, or \"levenshtein-utf8\", \"needleman-wunsch\" or \"overlap\". \"SubstitutionMatrix\" is the 256 by 256 integer matrix Needleman-Wunsch scores with, None naming none, beside its \"Gap\" cost; \"WindowWidths\" lists the window widths overlap scores with; \"Connectivity\" bounds the connections per node, 0 deriving it; \"ValuesPerKey\" bounds the entries sharing one key, 0 leaving it unbounded; and \"MemoryDomains\" lists the NUMA nodes to place shards on, {} deriving every node the process may allocate on."
+SequenceInitRam::usage = "SequenceInitRam[metric] creates an empty, mutable sequence index in host memory, scoring by metric, \"protein-alignment\" by default, \"dna-overlap\" or \"utf8-containment\". Every metric stores a sequence folded, and SequenceGet returns the stored form: packed class codes for a protein, one class code a byte for DNA, case-folded UTF-8 for text. \"Similarities\" is the 256 by 256 integer matrix of scores between raw bytes, beside its \"Gap\" cost, replacing the metric's own costs, which None keeps and a containment refuses; \"Connectivity\" bounds the connections per node, 0 deriving it; \"SketchBytes\" sets the bytes of the sketch in front of each stored sequence, a multiple of four, 0 taking the metric's default and \"dna-overlap\" keeping none; \"ValuesPerKey\" bounds the entries sharing one key, 0 leaving it unbounded; and \"MemoryDomains\" lists the NUMA nodes to place shards on, {} deriving every node the process may allocate on."
 SequenceInitVram::usage = "SequenceInitVram[metric] creates an empty, mutable sequence index in device memory, taking the options of SequenceInitRam with \"Devices\", the device ordinals to place shards on, {} picking device zero, in place of \"MemoryDomains\"."
-SequenceLoadRam::usage = "SequenceLoadRam[path] copies a checkpoint into a new, mutable sequence index in host memory. \"Executor\" runs the call, None meaning the calling thread; \"MemoryDomains\" lists the NUMA nodes to place shards on; \"ValuesPerKey\" bounds the entries sharing one key; and \"SubstitutionMatrix\" and \"Gap\" name the weights again, since no checkpoint records them."
+SequenceLoadRam::usage = "SequenceLoadRam[path] copies a checkpoint into a new, mutable sequence index in host memory. \"Executor\" runs the call, None meaning the calling thread; \"MemoryDomains\" lists the NUMA nodes to place shards on; \"ValuesPerKey\" bounds the entries sharing one key. The checkpoint records the costs."
 SequenceLoadVram::usage = "SequenceLoadVram[path] copies a checkpoint into a new, mutable sequence index in device memory, taking the options of SequenceLoadRam with \"Devices\" in place of \"MemoryDomains\"."
 SequenceLoadRamBuffer::usage = "SequenceLoadRamBuffer[monolith] copies a checkpoint held in a ByteArray or a byte NumericArray into a new, mutable sequence index in host memory, taking the options of SequenceLoadRam."
 SequenceLoadVramBuffer::usage = "SequenceLoadVramBuffer[monolith] copies a checkpoint held in a ByteArray or a byte NumericArray into a new, mutable sequence index in device memory, taking the options of SequenceLoadVram."
-SequenceViewRam::usage = "SequenceViewRam[path] serves a checkpoint in place through a memory mapping, as a read-only sequence index, taking \"SubstitutionMatrix\" and \"Gap\" as SequenceLoadRam does."
-SequenceViewNvme::usage = "SequenceViewNvme[path] serves a checkpoint in place from NVMe drives as a read-only sequence index. \"Executor\" runs the call, None meaning the calling thread; \"Paths\" lists the devices or directories to serve shards from, {} leaving every shard where its manifest points; and \"SubstitutionMatrix\" and \"Gap\" name the weights as SequenceLoadRam does."
-SequenceMetadataRead::usage = "SequenceMetadataRead[path] reads a checkpoint's frozen \"Metric\" and \"Connectivity\" without loading it. \"Executor\" runs the call, None meaning the calling thread."
-SequenceMetadataReadBuffer::usage = "SequenceMetadataReadBuffer[monolith] reads the frozen metric and connectivity of a checkpoint held in a ByteArray or a byte NumericArray, taking the option of SequenceMetadataRead."
+SequenceViewRam::usage = "SequenceViewRam[path] serves a checkpoint in place through a memory mapping, as a read-only sequence index."
+SequenceViewNvme::usage = "SequenceViewNvme[path] serves a checkpoint in place from NVMe drives as a read-only sequence index. \"Executor\" runs the call, None meaning the calling thread; \"Paths\" lists the devices or directories to serve shards from, {} leaving every shard where its manifest points."
+SequenceMetadataRead::usage = "SequenceMetadataRead[path] reads a checkpoint's frozen \"Metric\", \"Connectivity\", \"Classes\", the classes its costs folded bytes into, 0 for a containment, and \"SketchBytes\", the bytes of the sketch in front of each stored sequence, without loading it. \"Executor\" runs the call, None meaning the calling thread."
+SequenceMetadataReadBuffer::usage = "SequenceMetadataReadBuffer[monolith] reads the frozen metric, connectivity and classes of a checkpoint held in a ByteArray or a byte NumericArray, taking the option of SequenceMetadataRead."
 SequenceReserve::usage = "SequenceReserve[receiver, entries, payloadBytes] grows the index ahead of incoming sequences to entries in total, the current ones included, holding payloadBytes bytes in all, 0 by default."
 SequenceClear::usage = "SequenceClear[receiver] erases every entry, keeping the reserved capacity and the frozen settings."
 SequenceInsert::usage = "SequenceInsert[receiver, keys, sequences] adds sequences, each a string read as its UTF-8 bytes, a ByteArray or a list of byte values, one per key. \"ExpansionFactor\" sets the breadth of the candidates the walk explores, 0 deriving it."
@@ -92,7 +92,7 @@ SequenceCount::usage = "SequenceCount[receiver, key] counts the \"Entries\" stor
 SequenceGet::usage = "SequenceGet[receiver, key, arena] retrieves every sequence stored under key, one ByteArray per entry."
 SequenceSave::usage = "SequenceSave[receiver, path] saves the index under path, as DenseSave does."
 SequenceSaveBuffer::usage = "SequenceSaveBuffer[receiver, arena] saves the index into arena, as DenseSaveBuffer does."
-SequenceDescribe::usage = "SequenceDescribe[receiver] reports the index's frozen metric and connectivity and its current counters."
+SequenceDescribe::usage = "SequenceDescribe[receiver] reports the index's frozen metric, connectivity, classes and sketch bytes and its current counters."
 
 ShapesInitRam::usage = "ShapesInitRam[metric, quantization] creates an empty, mutable shapes index in host memory, scoring by metric, \"chamfer\" by default, or \"hausdorff\", \"gromov-wasserstein\" or \"wasserstein-procrustes\", and storing quantization scalars, \"f32\" by default, or \"f16\". \"Points\" freezes every shape's point count, 0 leaving it free; \"Connectivity\" bounds the connections per node, 0 deriving it; \"ValuesPerKey\" bounds the entries sharing one key, 0 leaving it unbounded; and \"MemoryDomains\" lists the NUMA nodes to place shards on, {} deriving every node the process may allocate on."
 ShapesInitVram::usage = "ShapesInitVram[metric, quantization] creates an empty, mutable shapes index in device memory, taking the options of ShapesInitRam with \"Devices\", the device ordinals to place shards on, {} picking device zero, in place of \"MemoryDomains\"."
@@ -165,7 +165,7 @@ receivingRows[name_String, before_List, after_List] := Quiet[<|
     LibraryFunction::overload]
 
 passed = {LibraryDataType[NumericArray], "Shared"};
-weights = Sequence["Boolean", {LibraryDataType[NumericArray], "Constant"}, Integer];
+costs = Sequence["Boolean", {LibraryDataType[NumericArray], "Constant"}, Integer];
 bytesTape = Sequence[passed, {Integer, 1, "Shared"}];
 pointsTape = Sequence[{Real, 2, "Shared"}, {Integer, 1, "Shared"}];
 observed = Sequence[{Real, 2, "Constant"}, {Integer, 2, "Constant"}];
@@ -214,16 +214,16 @@ denseMultiply = receivingRows["DenseMultiply", {}, {Integer, Integer, Integer}];
 denseValues = receivingRows["DenseValues", {passed}, {}];
 denseAttend = receivingRows["DenseAttend", {}, {passed, passed, "UTF8String", Integer, Integer, Integer, Integer, Real}];
 
-sequenceInitRam = verb["SequenceInitRam", {Integer, "UTF8String", weights, "DataStore", Integer, Integer, "DataStore"}];
-sequenceInitVram = verb["SequenceInitVram", {Integer, "UTF8String", weights, "DataStore", Integer, Integer, "DataStore"}];
-sequenceLoadRam = verb["SequenceLoadRam", {Integer, Integer, "UTF8String", "DataStore", Integer, weights}];
-sequenceLoadVram = verb["SequenceLoadVram", {Integer, Integer, "UTF8String", "DataStore", Integer, weights}];
+sequenceInitRam = verb["SequenceInitRam", {Integer, "UTF8String", costs, Integer, Integer, Integer, "DataStore"}];
+sequenceInitVram = verb["SequenceInitVram", {Integer, "UTF8String", costs, Integer, Integer, Integer, "DataStore"}];
+sequenceLoadRam = verb["SequenceLoadRam", {Integer, Integer, "UTF8String", "DataStore", Integer}];
+sequenceLoadVram = verb["SequenceLoadVram", {Integer, Integer, "UTF8String", "DataStore", Integer}];
 sequenceLoadRamBuffer =
-    verb["SequenceLoadRamBuffer", {Integer, Integer, LibraryDataType[NumericArray], "DataStore", Integer, weights}];
+    verb["SequenceLoadRamBuffer", {Integer, Integer, LibraryDataType[NumericArray], "DataStore", Integer}];
 sequenceLoadVramBuffer =
-    verb["SequenceLoadVramBuffer", {Integer, Integer, LibraryDataType[NumericArray], "DataStore", Integer, weights}];
-sequenceViewRam = verb["SequenceViewRam", {Integer, "UTF8String", weights}];
-sequenceViewNvme = verb["SequenceViewNvme", {Integer, Integer, "UTF8String", "DataStore", weights}];
+    verb["SequenceLoadVramBuffer", {Integer, Integer, LibraryDataType[NumericArray], "DataStore", Integer}];
+sequenceViewRam = verb["SequenceViewRam", {Integer, "UTF8String"}];
+sequenceViewNvme = verb["SequenceViewNvme", {Integer, Integer, "UTF8String", "DataStore"}];
 sequenceMetadataRead = verb["SequenceMetadataRead", {Integer, "UTF8String"}];
 sequenceMetadataReadBuffer = verb["SequenceMetadataReadBuffer", {Integer, LibraryDataType[NumericArray]}];
 sequenceReserve = receiving["SequenceReserve", {Integer, Integer}];
@@ -328,9 +328,10 @@ shapesTape[shapes_List] := {Developer`ToPackedArray[N[Replace[Join @@ shapes, {}
 (* A tensor holds no NaN, so a field no device recorded crosses as zero beside a mask marking it unrecorded. *)
 observations[fields_List] := {Developer`ToPackedArray[N[Replace[fields, field_ /; !NumericQ[field] -> 0, {2}]]],
     Developer`ToPackedArray[Boole[Map[NumericQ, fields, {2}]]]}
-(* A weightless kind still fills the matrix slot, which the library reads only when weights are named. *)
-weighting[None, gap_Integer] := Sequence[False, NumericArray[{0}, "Integer8"], gap]
-weighting[matrix_, gap_Integer] := Sequence[True, NumericArray[matrix, "Integer8"], gap]
+(* An absent table still fills its slot, which the library reads only when the table is named. *)
+givenTable[None, type_String] := Sequence[False, NumericArray[{0}, type]]
+givenTable[table_, type_String] := Sequence[True, NumericArray[table, type]]
+costsOf[similarities_, gap_Integer] := Sequence[givenTable[similarities, "Integer8"], gap]
 
 (* Outputs arrive under their C names, a nested audit as its own store; found matches split by each query's count,
    tapes by each entry's length, observations by their recorded mask, and a lone output stands alone. *)
@@ -518,43 +519,37 @@ DenseAttend[receiver : dense, queries : ({__List} | _NumericArray), DenseValues[
         {values["ValueKeys"], values["ValueRows"], values["Quantization"], values["Dimensions"], arena,
             OptionValue["HeadCount"], OptionValue["ExpansionFactor"], N[OptionValue["ScoreScale"]]}]
 
-Options[SequenceInitRam] = {"SubstitutionMatrix" -> None, "Gap" -> 0, "WindowWidths" -> {}, "Connectivity" -> 0,
-    "ValuesPerKey" -> 0, "MemoryDomains" -> {}};
-SequenceInitRam[metric_String : "levenshtein", OptionsPattern[]] := construct[SequenceIndex, sequenceInitRam,
-    {metric, weighting[OptionValue["SubstitutionMatrix"], OptionValue["Gap"]], store[OptionValue["WindowWidths"]],
-        OptionValue["Connectivity"], OptionValue["ValuesPerKey"], store[OptionValue["MemoryDomains"]]}]
-Options[SequenceInitVram] = {"SubstitutionMatrix" -> None, "Gap" -> 0, "WindowWidths" -> {}, "Connectivity" -> 0,
-    "ValuesPerKey" -> 0, "Devices" -> {}};
-SequenceInitVram[metric_String : "levenshtein", OptionsPattern[]] := construct[SequenceIndex, sequenceInitVram,
-    {metric, weighting[OptionValue["SubstitutionMatrix"], OptionValue["Gap"]], store[OptionValue["WindowWidths"]],
-        OptionValue["Connectivity"], OptionValue["ValuesPerKey"], store[OptionValue["Devices"]]}]
-Options[SequenceLoadRam] = {"Executor" -> None, "MemoryDomains" -> {}, "ValuesPerKey" -> 0,
-    "SubstitutionMatrix" -> None, "Gap" -> 0};
+Options[SequenceInitRam] = {"Similarities" -> None, "Gap" -> 0, "Connectivity" -> 0,
+    "SketchBytes" -> 0, "ValuesPerKey" -> 0, "MemoryDomains" -> {}};
+SequenceInitRam[metric_String : "protein-alignment", OptionsPattern[]] := construct[SequenceIndex, sequenceInitRam,
+    {metric, costsOf[OptionValue["Similarities"], OptionValue["Gap"]],
+        OptionValue["Connectivity"], OptionValue["SketchBytes"], OptionValue["ValuesPerKey"],
+        store[OptionValue["MemoryDomains"]]}]
+Options[SequenceInitVram] = {"Similarities" -> None, "Gap" -> 0, "Connectivity" -> 0,
+    "SketchBytes" -> 0, "ValuesPerKey" -> 0, "Devices" -> {}};
+SequenceInitVram[metric_String : "protein-alignment", OptionsPattern[]] := construct[SequenceIndex, sequenceInitVram,
+    {metric, costsOf[OptionValue["Similarities"], OptionValue["Gap"]],
+        OptionValue["Connectivity"], OptionValue["SketchBytes"], OptionValue["ValuesPerKey"],
+        store[OptionValue["Devices"]]}]
+Options[SequenceLoadRam] = {"Executor" -> None, "MemoryDomains" -> {}, "ValuesPerKey" -> 0};
 SequenceLoadRam[path_String, OptionsPattern[]] := construct[SequenceIndex, sequenceLoadRam,
-    {OptionValue["Executor"], path, store[OptionValue["MemoryDomains"]], OptionValue["ValuesPerKey"],
-        weighting[OptionValue["SubstitutionMatrix"], OptionValue["Gap"]]}]
-Options[SequenceLoadVram] = {"Executor" -> None, "Devices" -> {}, "ValuesPerKey" -> 0,
-    "SubstitutionMatrix" -> None, "Gap" -> 0};
+    {OptionValue["Executor"], path, store[OptionValue["MemoryDomains"]], OptionValue["ValuesPerKey"]}]
+Options[SequenceLoadVram] = {"Executor" -> None, "Devices" -> {}, "ValuesPerKey" -> 0};
 SequenceLoadVram[path_String, OptionsPattern[]] := construct[SequenceIndex, sequenceLoadVram,
-    {OptionValue["Executor"], path, store[OptionValue["Devices"]], OptionValue["ValuesPerKey"],
-        weighting[OptionValue["SubstitutionMatrix"], OptionValue["Gap"]]}]
+    {OptionValue["Executor"], path, store[OptionValue["Devices"]], OptionValue["ValuesPerKey"]}]
 Options[SequenceLoadRamBuffer] = Options[SequenceLoadRam];
 SequenceLoadRamBuffer[bytes : (_ByteArray | _NumericArray), OptionsPattern[]] :=
     construct[SequenceIndex, sequenceLoadRamBuffer, {OptionValue["Executor"], monolith[bytes],
-        store[OptionValue["MemoryDomains"]], OptionValue["ValuesPerKey"],
-        weighting[OptionValue["SubstitutionMatrix"], OptionValue["Gap"]]}]
+        store[OptionValue["MemoryDomains"]], OptionValue["ValuesPerKey"]}]
 Options[SequenceLoadVramBuffer] = Options[SequenceLoadVram];
 SequenceLoadVramBuffer[bytes : (_ByteArray | _NumericArray), OptionsPattern[]] :=
     construct[SequenceIndex, sequenceLoadVramBuffer, {OptionValue["Executor"], monolith[bytes],
-        store[OptionValue["Devices"]], OptionValue["ValuesPerKey"],
-        weighting[OptionValue["SubstitutionMatrix"], OptionValue["Gap"]]}]
-Options[SequenceViewRam] = {"SubstitutionMatrix" -> None, "Gap" -> 0};
-SequenceViewRam[path_String, OptionsPattern[]] := construct[SequenceIndex, sequenceViewRam,
-    {path, weighting[OptionValue["SubstitutionMatrix"], OptionValue["Gap"]]}]
-Options[SequenceViewNvme] = {"Executor" -> None, "Paths" -> {}, "SubstitutionMatrix" -> None, "Gap" -> 0};
+        store[OptionValue["Devices"]], OptionValue["ValuesPerKey"]}]
+Options[SequenceViewRam] = {};
+SequenceViewRam[path_String, OptionsPattern[]] := construct[SequenceIndex, sequenceViewRam, {path}]
+Options[SequenceViewNvme] = {"Executor" -> None, "Paths" -> {}};
 SequenceViewNvme[path_String, OptionsPattern[]] := construct[SequenceIndex, sequenceViewNvme,
-    {OptionValue["Executor"], path, store[OptionValue["Paths"]],
-        weighting[OptionValue["SubstitutionMatrix"], OptionValue["Gap"]]}]
+    {OptionValue["Executor"], path, store[OptionValue["Paths"]]}]
 Options[SequenceMetadataRead] = {"Executor" -> None};
 SequenceMetadataRead[path_String, OptionsPattern[]] := call[sequenceMetadataRead, {OptionValue["Executor"], path}]
 Options[SequenceMetadataReadBuffer] = {"Executor" -> None};

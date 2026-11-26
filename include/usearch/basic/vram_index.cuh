@@ -10,11 +10,14 @@
  *  and on the node-ID type its views hold, and walks over the dense design's frontiers, visited
  *  set, slot-0 neighbor protocol, selection spans and telemetry. A basic kit prepares a stored
  *  entry as a query once per walk, into a span of the walking warp's scratch, and scores whole
- *  entries, which a schedule hands it: a lane each in place, or the vendor's wider split, so the
- *  bodies only name an entry per lane and read back its distance. A schedule scores on one rung of
- *  its kit, the Myers words of a Levenshtein kit's queries, or zero for a kit scoring every entry
- *  alike, and the view names the kernel kind a kit covering several metrics picks among, as dense
- *  views do.
+ *  entries, which a schedule hands it: a lane each in place, a group of lanes each in turns, or the
+ *  vendor's wider split, so the bodies only name an entry per lane and read back its distance. A
+ *  kit storing a sketch in front of every sequence builds by it, the view naming its bytes: its
+ *  builders read the stored sketch in place as their query and score a lane to an entry, while its
+ *  searches walk by the query's sketch first and then prepare and score the sequence behind it,
+ *  seeded with that walk's nearest nodes. A schedule scores on one rung of its kit, the rows a lane
+ *  of an alignment kit holds, or zero for a kit scoring every entry alike, and the view names the
+ *  kernel kind a kit covering several metrics picks among, as dense views do.
  *
  *  Insertion publishes forward neighbor rows alone. A back-link re-selection costs a full diversity
  *  pass of distances, far past any lock budget for the costly kits, so each admission wave's
@@ -31,7 +34,7 @@
 
 #include <concepts>    // `std::same_as` - the kit concept's verbs
 #include <limits>      // `std::numeric_limits` - an unbounded radius, the node-ID type's sentinel
-#include <type_traits> // `std::is_same_v` - a round's 32-bit IDs
+#include <type_traits> // `std::is_same_v`, `std::conditional_t` - a round's 32-bit IDs, a role's query
 
 #include <numkong/capabilities.h> // `nk_kernel_kind_t` - the views hold the kernel kind
 
@@ -47,58 +50,144 @@ struct vram_entry_t {
     u32_t bytes;
 };
 
+/** The distances a paired scorer returns, one per entry. */
+struct vram_distance_pair_t {
+    distance_t first;
+    distance_t second;
+};
+
 /** What a basic VRAM kit binds: one modality's distance on one GPU generation, with the warp policy
  *  its walks shuffle through, the scan kit its prefix sums run on, and the selector its nodes keep
- *  neighbors by. @c prepare lays an entry out as a query in a span, every lane of the warp taking
- *  part, from the entry alone or, for a kit with runtime parameters, from the storage's
- *  @c parameters too, which @ref unum::usearch::basic::vram_prepare tells apart; @c lower_bound
- *  answers a lower bound from the two entries' headers alone. Its @c score runs on its lanes per
- *  entry, every one of them returning the distance, exact within the radius and above it past:
- *  @c lanes_per_entry_k of them and a plain @c score, or, for a kit whose split follows a rung,
- *  @c lanes_per_row of the rung and a @c score templated on it, which
+ *  neighbors by. @c canonical_prepare lays an entry out as a query in a span, every lane of the
+ *  warp taking part, from the entry alone or, for a kit with runtime parameters, from the storage's
+ *  @c parameters too, which @ref unum::usearch::basic::vram_prepare tells apart;
+ *  @c canonical_lower_bound answers a lower bound from the two entries' headers alone. Its
+ *  @c canonical_distance runs on its lanes per entry, every one of them returning the distance,
+ *  exact within the radius and above it past: @c canonical_lanes_per_entry_k of them and a plain
+ *  @c canonical_distance, or, for a kit whose split follows a rung, @c canonical_lanes_per_entry of
+ *  the rung and a @c canonical_distance templated on it, which
  *  @ref unum::usearch::basic::vram_lanes_per_entry and @ref unum::usearch::basic::vram_score tell
  *  apart. A round's entries have no order: results go by slot, and ties break by node ID. */
 template <typename kit_>
-concept a_vram_basic_kit = requires(typename kit_::query_t const& query, vram_entry_t entry, byte_t* span,
+concept a_vram_basic_kit = requires(typename kit_::canonical_query_t const& query, vram_entry_t entry, byte_t* span,
                                     byte_t const* parameters, nk_kernel_kind_t kernel, u32_t lane) {
     typename kit_::warp_t;
     typename kit_::scan_t;
-    typename kit_::query_t;
+    typename kit_::canonical_query_t;
     typename kit_::selector_t;
     requires requires {
-        { kit_::prepare(entry, span, lane) } -> std::same_as<typename kit_::query_t>;
+        { kit_::canonical_prepare(entry, span, lane) } -> std::same_as<typename kit_::canonical_query_t>;
     } || requires {
-        { kit_::prepare(parameters, entry, span, lane) } -> std::same_as<typename kit_::query_t>;
+        { kit_::canonical_prepare(parameters, entry, span, lane) } -> std::same_as<typename kit_::canonical_query_t>;
     };
-    { kit_::lower_bound(kernel, query, entry) } -> std::same_as<distance_t>;
+    { kit_::canonical_lower_bound(kernel, query, entry) } -> std::same_as<distance_t>;
 };
 
-/** Lays @p entry out as @p kit_ 's query in @p span, handing a kit with runtime parameters the
+/** A kit whose @c canonical_prepare reads its runtime parameters beside the entry it lays out. */
+template <typename kit_>
+concept a_parameter_preparing_kit = requires(byte_t const* parameters, vram_entry_t entry, byte_t* span, u32_t lane) {
+    kit_::canonical_prepare(parameters, entry, span, lane);
+};
+
+/** A kit whose builders score a sketch stored in front of every sequence, as many bytes as the view
+ *  names: its @c sketch_distance scores two of them, symmetric and exact, one lane to a pair. A kit
+ *  naming @c sketch_tables_t without a distance stores the same closed form and builds by the
+ *  canonical score alone. */
+template <typename kit_>
+concept a_vram_sketching_kit = requires(byte_t const* sketch, u32_t bytes, u32_t lane) {
+    { kit_::sketch_distance(sketch, sketch, bytes, lane) } -> std::same_as<distance_t>;
+};
+
+/** A kit that closes every stored value to a word behind the gap its sketch takes. */
+template <typename kit_>
+concept a_vram_kit_closing_values = requires { typename kit_::sketch_tables_t; };
+
+/** Whether @p role_ scores @p kit_ by its sketches: a builder's, for a kit building by them. */
+template <a_vram_basic_kit kit_, score_role_t role_>
+constexpr bool vram_scores_by_sketch() noexcept {
+    return role_ == score_role_t::build_k && a_vram_sketching_kit<kit_>;
+}
+
+/** A builder's query under a kit building by sketches: the stored sketch, read in place. */
+struct vram_sketch_query_t {
+    byte_t const* sketch;
+};
+
+/** The query @p role_ walks @p kit_ with: the stored sketch for a builder of a kit building by
+ *  sketches, the kit's canonical query otherwise. */
+template <a_vram_basic_kit kit_, score_role_t role_>
+using vram_query =
+    std::conditional_t<vram_scores_by_sketch<kit_, role_>(), vram_sketch_query_t, typename kit_::canonical_query_t>;
+
+/** The part of the stored value at @b [first,end) of @p values that @p role_ reads under @p kit_,
+ *  behind a sketch of @p sketch_bytes: the sketch for a builder of a kit building by sketches, the
+ *  sequence otherwise, which for a kit closing its values ends before the closing padding, whose
+ *  length its closing byte counts. */
+template <typename kit_, score_role_t role_>
+__device__ __forceinline__ vram_entry_t vram_part(byte_t const* values, u64_t first, u64_t end,
+                                                  u32_t sketch_bytes) noexcept {
+    if constexpr (!a_vram_kit_closing_values<kit_>) return {values + first, static_cast<u32_t>(end - first)};
+    else if constexpr (role_ == score_role_t::build_k && a_vram_sketching_kit<kit_>)
+        return {values + first, sketch_bytes};
+    else {
+        u32_t const closing = static_cast<u32_t>(values[end - 1]);
+        return {values + first + sketch_bytes, static_cast<u32_t>(end - first) - sketch_bytes - closing};
+    }
+}
+
+/** Lays @p entry, the part @p role_ reads, out as the query @p role_ walks @p kit_ with: the sketch
+ *  as it is, or the kit's canonical query in @p span, handing a kit with runtime parameters the
  *  ones at @p parameters; every lane of the warp calls it. */
-template <a_vram_basic_kit kit_>
-__device__ __forceinline__ typename kit_::query_t vram_prepare(byte_t const* parameters, vram_entry_t entry,
-                                                               byte_t* span, u32_t lane) noexcept {
-    if constexpr (requires { kit_::prepare(parameters, entry, span, lane); })
-        return kit_::prepare(parameters, entry, span, lane);
-    else return kit_::prepare(entry, span, lane);
+template <a_vram_basic_kit kit_, score_role_t role_>
+__device__ __forceinline__ vram_query<kit_, role_> vram_prepare(byte_t const* parameters, vram_entry_t entry,
+                                                                byte_t* span, u32_t lane) noexcept {
+    if constexpr (vram_scores_by_sketch<kit_, role_>()) return {entry.data};
+    else if constexpr (a_parameter_preparing_kit<kit_>) return kit_::canonical_prepare(parameters, entry, span, lane);
+    else return kit_::canonical_prepare(entry, span, lane);
 }
 
-/** Lanes @p kit_ scores one entry with on @p rung_: its @c lanes_per_entry_k at rung zero, its
- *  @c lanes_per_row of the rung past it. */
-template <a_vram_basic_kit kit_, u32_t rung_>
+/** Lanes @p kit_ scores one entry with for @p role_ on @p rung_: one for a sketch, its
+ *  @c canonical_lanes_per_entry_k at rung zero, and past it what its @c canonical_lanes_per_entry
+ *  answers for the rung. */
+template <a_vram_basic_kit kit_, score_role_t role_, u32_t rung_>
 constexpr u32_t vram_lanes_per_entry() noexcept {
-    if constexpr (rung_ == 0) return kit_::lanes_per_entry_k;
-    else return kit_::lanes_per_row(rung_);
+    if constexpr (vram_scores_by_sketch<kit_, role_>()) return 1;
+    else if constexpr (rung_ == 0) return kit_::canonical_lanes_per_entry_k;
+    else return kit_::canonical_lanes_per_entry(rung_);
 }
 
-/** The distance @p kit_ scores on @p rung_ under @p kernel from @p query to @p entry, exact within
- *  @p radius; every lane of the entry's group calls it. */
-template <a_vram_basic_kit kit_, u32_t rung_>
-__device__ __forceinline__ distance_t vram_score(nk_kernel_kind_t kernel, typename kit_::query_t const& query,
-                                                 vram_entry_t entry, distance_t radius, u32_t lane) noexcept {
-    if constexpr (rung_ == 0) return kit_::score(kernel, query, entry, radius, lane);
-    else return kit_::template score<rung_>(kernel, query, entry, radius, lane);
+/** The lower bound @p kit_ answers for @p role_ under @p kernel from @p query to @p entry: none
+ *  for a sketch, which always scores. */
+template <a_vram_basic_kit kit_, score_role_t role_>
+__device__ __forceinline__ distance_t vram_lower_bound(nk_kernel_kind_t kernel, vram_query<kit_, role_> const& query,
+                                                       vram_entry_t entry) noexcept {
+    if constexpr (vram_scores_by_sketch<kit_, role_>()) return 0;
+    else return kit_::canonical_lower_bound(kernel, query, entry);
 }
+
+/** The distance @p kit_ scores for @p role_ on @p rung_ under @p kernel from @p query to @p entry,
+ *  exact within @p radius, and at any radius for a sketch; every lane of the group scoring the
+ *  entry calls it. */
+template <a_vram_basic_kit kit_, score_role_t role_, u32_t rung_>
+__device__ __forceinline__ distance_t vram_score(nk_kernel_kind_t kernel, vram_query<kit_, role_> const& query,
+                                                 vram_entry_t entry, distance_t radius, u32_t lane) noexcept {
+    if constexpr (vram_scores_by_sketch<kit_, role_>())
+        return kit_::sketch_distance(query.sketch, entry.data, entry.bytes, lane);
+    else if constexpr (rung_ == 0) return kit_::canonical_distance(kernel, query, entry, radius, lane);
+    else return kit_::template canonical_distance<rung_>(kernel, query, entry, radius, lane);
+}
+
+/** A kit that scores two entries on @p rung_ in one pass of its whole warp, each as its
+ *  @c canonical_distance would under its own radius, for a @p role_ scoring canonically. */
+template <typename kit_, score_role_t role_, u32_t rung_>
+concept a_vram_paired_kit =
+    requires(nk_kernel_kind_t kernel, typename kit_::canonical_query_t const& query, vram_entry_t entry,
+             distance_t radius, u32_t lane) {
+        {
+            kit_::template canonical_distance_pair<rung_>(kernel, query, entry, entry, radius, radius, lane)
+        } -> std::same_as<vram_distance_pair_t>;
+    } &&
+    vram_lanes_per_entry<kit_, role_, rung_>() == kit_::warp_t::width_k && !vram_scores_by_sketch<kit_, role_>();
 
 /** Typed view over a basic index's device storage: the values tape, its entry offsets, and the
  *  fixed-capacity neighbors matrix of @p node_id_type_ IDs. */
@@ -125,10 +214,27 @@ struct vram_ragged_view {
     /** The kit's runtime parameters, as its face laid them out; null for a kit taking none. */
     byte_t const* parameters;
 
-    __device__ __forceinline__ vram_entry_t entry(node_id_type_ node_id) const noexcept {
-        u64_t const first = offsets[node_id];
-        return {values + first, static_cast<u32_t>(offsets[node_id + 1] - first)};
+    /** Bytes of the sketch in front of every stored value; zero for a kit storing none. */
+    u32_t sketch_bytes;
+
+    /** Bytes the stored value of @p node_id takes whole: the order a round splits by, which a
+     *  sketch of one size leaves as the sequences' own. */
+    __device__ __forceinline__ u32_t stored_bytes(node_id_type_ node_id) const noexcept {
+        return static_cast<u32_t>(offsets[node_id + 1] - offsets[node_id]);
     }
+
+    /** The sequence of @p node_id as @p kit_ stores it. */
+    template <typename kit_>
+    __device__ __forceinline__ vram_entry_t canonical_entry(node_id_type_ node_id) const noexcept {
+        return vram_part<kit_, score_role_t::search_k>(values, offsets[node_id], offsets[node_id + 1], sketch_bytes);
+    }
+
+    /** The part of @p node_id 's stored value that @p role_ reads under @p kit_. */
+    template <typename kit_, score_role_t role_>
+    __device__ __forceinline__ vram_entry_t scored(node_id_type_ node_id) const noexcept {
+        return vram_part<kit_, role_>(values, offsets[node_id], offsets[node_id + 1], sketch_bytes);
+    }
+
     __device__ __forceinline__ node_id_type_* neighbors_for(node_id_type_ node_id) const noexcept {
         return vram_row(neighbors, node_id, connectivity);
     }
@@ -165,6 +271,10 @@ struct vram_build_view {
      *  within @b [first_id,end_id). */
     node_id_type_ first_id;
 
+    /** The IDs a re-selection walks by assigned offset, from the launch's first; null walks
+     *  @b [first_id,end_id). */
+    node_id_type_ const* listed;
+
     /** The traversal arena every warp carves its slice from, and the shape of one slice. */
     byte_t* arena;
     vram_arena_shape_t arena_shape;
@@ -184,7 +294,7 @@ struct vram_build_view {
     u32_t* assigned_nodes;
 
     /** Each node's last pick a walker of the launch made, @b [nodes], unknown for none; pick
-     *  @b p is walker @c first_id + p / connectivity, its slot p % connectivity. */
+     *  @b p is the walker at offset p / connectivity, its slot p % connectivity. */
     node_id_type_* link_heads;
 
     /** The pick each pick was threaded before, @b [launch entries,connectivity]. */
@@ -207,6 +317,13 @@ struct vram_search_view {
     /** Query starts as the caller spelled them, @b [queries+1] from any origin. */
     u64_t const* query_offsets;
     u32_t queries_count;
+
+    /** The queries' sketches a seeding walk scores by, a sketch apart, and its nearest node IDs
+     *  per query, @b [queries,seeds_count], which a seeding walk writes and a search walk scores
+     *  first; null and zero for a search without seeds. */
+    byte_t const* query_sketches;
+    node_id_type_* seed_ids;
+    u32_t seeds_count;
 
     /** The watermark snapshotted at launch: landmarks are drawn below it and no neighbor at or past
      *  it is followed. */
@@ -244,6 +361,13 @@ struct vram_search_view {
     node_id_type_* result_ids;
     distance_t* result_distances;
     u32_t count;
+
+    /** The ranges a scan splits the nodes into for every query, zero for a walk; each range's
+     *  nearest @c count matches, @b [queries,ranges,count]; and per query the ranges finished,
+     *  zeroed per launch, so the last to finish merges them. */
+    u32_t ranges;
+    vram_scored_node<node_id_type_>* range_matches;
+    u32_t* finished_ranges;
 };
 
 /** Splits a round of @p count entries of @p ids, past a warp's width and up to two, by entry bytes
@@ -260,7 +384,7 @@ __device__ __forceinline__ void vram_split_by_bytes(vram_ragged_view<node_id_typ
     // Entries key by their bytes plus one, so the empty slots, keyed zero, sort below every entry.
     auto const keyed = [&](u32_t slot) noexcept {
         return slot < count
-                   ? scored_node_t::make(static_cast<distance_t>(storage.entry(ids[slot]).bytes) + 1, ids[slot])
+                   ? scored_node_t::make(static_cast<distance_t>(storage.stored_bytes(ids[slot])) + 1, ids[slot])
                    : scored_node_t::make(0, (std::numeric_limits<node_id_type_>::max)());
     };
     scored_node_t const descending = shuffle_xor<warp_t>(sort_lanes<warp_t>(keyed(lane), lane), width_k - 1);
@@ -274,37 +398,115 @@ __device__ __forceinline__ void vram_split_by_bytes(vram_ragged_view<node_id_typ
     split[1] = lane + empty < width_k ? rotated : scored_node_t::sentinel();
 }
 
-/** Scores each lane's entry in place on @p rung_ of @p kit_, the schedule of every kit whose lane
- *  scores an entry alone, so a warp walks one query by itself. */
-template <a_vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
-struct vram_lane_schedule {
-    inline static constexpr u32_t lanes_per_entry_k = 1;
+/** The distance from @p query to the entry @p node_id names on @p rung_ of @p kit_ for @p role_,
+ *  exact within @p radius: infinite for the sentinel, the lower bound past @p radius; an entry's
+ *  lanes share its ID, so every group takes one side of each branch whole. */
+template <a_vram_basic_kit kit_, score_role_t role_, u32_t rung_, typename node_id_type_>
+__device__ __forceinline__ distance_t vram_score_entry(vram_ragged_view<node_id_type_> const& storage,
+                                                       vram_query<kit_, role_> const& query, node_id_type_ node_id,
+                                                       distance_t radius, u32_t lane) noexcept {
+    if (node_id == (std::numeric_limits<node_id_type_>::max)()) return std::numeric_limits<distance_t>::infinity();
+    vram_entry_t const entry = storage.template scored<kit_, role_>(node_id);
+    distance_t const lower_bound = vram_lower_bound<kit_, role_>(storage.kernel, query, entry);
+    return lower_bound > radius ? lower_bound
+                                : vram_score<kit_, role_, rung_>(storage.kernel, query, entry, radius, lane);
+}
 
-    /** Nothing beside the walking warp's own spans. */
-    struct shared_t {};
+/** The distances from @p query to the entries @p first_id and @p second_id name on @p rung_ of
+ *  @p kit_ for @p role_, exact within @p radius as @ref vram_score scores them: infinite for the
+ *  sentinel, the lower bound past @p radius, and in one paired pass when both entries need scoring;
+ *  every lane of the warp calls it with the same IDs. */
+template <a_vram_basic_kit kit_, score_role_t role_, u32_t rung_, typename node_id_type_>
+    requires a_vram_paired_kit<kit_, role_, rung_>
+__device__ __forceinline__ vram_distance_pair_t vram_score_pair(vram_ragged_view<node_id_type_> const& storage,
+                                                                vram_query<kit_, role_> const& query,
+                                                                node_id_type_ first_id, node_id_type_ second_id,
+                                                                distance_t radius, u32_t lane) noexcept {
+    constexpr node_id_type_ sentinel_k = (std::numeric_limits<node_id_type_>::max)();
+    vram_entry_t const first = first_id == sentinel_k ? vram_entry_t {}
+                                                      : storage.template canonical_entry<kit_>(first_id);
+    vram_entry_t const second = second_id == sentinel_k ? vram_entry_t {}
+                                                        : storage.template canonical_entry<kit_>(second_id);
+    vram_distance_pair_t distances {
+        first_id == sentinel_k ? std::numeric_limits<distance_t>::infinity()
+                               : vram_lower_bound<kit_, role_>(storage.kernel, query, first),
+        second_id == sentinel_k ? std::numeric_limits<distance_t>::infinity()
+                                : vram_lower_bound<kit_, role_>(storage.kernel, query, second)};
+    // An unbounded radius holds the sentinel's infinity within it, so the ID decides.
+    bool const first_scored = first_id != sentinel_k && !(distances.first > radius);
+    bool const second_scored = second_id != sentinel_k && !(distances.second > radius);
+    if (first_scored && second_scored)
+        return kit_::template canonical_distance_pair<rung_>(storage.kernel, query, first, second, radius, radius,
+                                                             lane);
+    if (first_scored) distances.first = vram_score<kit_, role_, rung_>(storage.kernel, query, first, radius, lane);
+    if (second_scored) distances.second = vram_score<kit_, role_, rung_>(storage.kernel, query, second, radius, lane);
+    return distances;
+}
+
+/** What a lane schedule keeps in shared memory beside the walking warp's own spans: nothing, on
+ *  every rung. */
+struct vram_lane_round {};
+
+/** Scores each lane's entry on @p rung_ of @p kit_ for @p role_ with the walking warp alone, so a
+ *  warp walks one query by itself: in place when a lane scores an entry alone, in turns of two
+ *  neighbouring entries for a kit scoring a pair with the whole warp, and in turns of
+ *  @c entries_per_turn_k entries otherwise, @c lanes_per_entry_k lanes to each. */
+template <a_vram_basic_kit kit_, score_role_t role_, u32_t rung_, typename node_id_type_>
+struct vram_lane_schedule {
+    using warp_t = typename kit_::warp_t;
+    inline static constexpr score_role_t role_k = role_;
+    using query_t = vram_query<kit_, role_>;
+    inline static constexpr u32_t lanes_per_entry_k = vram_lanes_per_entry<kit_, role_, rung_>();
+
+    /** Entries the warp scores at once, a group of @c lanes_per_entry_k lanes each. */
+    inline static constexpr u32_t entries_per_turn_k = warp_t::width_k / lanes_per_entry_k;
+    static_assert(warp_t::width_k % lanes_per_entry_k == 0, "An entry's lanes split the warp evenly");
+
+    using shared_t = vram_lane_round;
 
     __device__ __forceinline__ explicit vram_lane_schedule(shared_t&) noexcept {}
 
     /** The distance from @p query to the entry this lane names, exact within @p radius; infinite
-     *  for the sentinel. Every lane of the warp calls it. */
-    __device__ __forceinline__ distance_t score(vram_ragged_view<node_id_type_> const& storage,
-                                                typename kit_::query_t const& query, node_id_type_ node_id,
-                                                distance_t radius, u32_t lane) const noexcept {
-        if (node_id == (std::numeric_limits<node_id_type_>::max)()) return std::numeric_limits<distance_t>::infinity();
-        vram_entry_t const entry = storage.entry(node_id);
-        distance_t const lower_bound = kit_::lower_bound(storage.kernel, query, entry);
-        return lower_bound > radius ? lower_bound : vram_score<kit_, rung_>(storage.kernel, query, entry, radius, lane);
+     *  for the sentinel. Every lane of the warp calls it, so its turns run with them all. */
+    __device__ __forceinline__ distance_t score(vram_ragged_view<node_id_type_> const& storage, query_t const& query,
+                                                node_id_type_ node_id, distance_t radius, u32_t lane) const noexcept {
+        if constexpr (lanes_per_entry_k == 1)
+            return vram_score_entry<kit_, role_, rung_>(storage, query, node_id, radius, lane);
+        else if constexpr (a_vram_paired_kit<kit_, role_, rung_>) {
+            // Neighbouring lanes hold entries alike in length once a round splits them by bytes.
+            distance_t distance = std::numeric_limits<distance_t>::infinity();
+#pragma unroll 1
+            for (u32_t first = 0; first != warp_t::width_k; first += 2) {
+                vram_distance_pair_t const turn = vram_score_pair<kit_, role_, rung_>(
+                    storage, query, warp_t::shuffle(node_id, first), warp_t::shuffle(node_id, first + 1), radius, lane);
+                if (lane == first) distance = turn.first;
+                if (lane == first + 1) distance = turn.second;
+            }
+            return distance;
+        }
+        else {
+            distance_t distance = std::numeric_limits<distance_t>::infinity();
+#pragma unroll 1
+            for (u32_t first = 0; first != warp_t::width_k; first += entries_per_turn_k) {
+                node_id_type_ const turn_id = warp_t::shuffle(node_id, first + lane / lanes_per_entry_k);
+                // Lanes outside the turn read any group's first lane and drop it.
+                distance_t const turn_distance = warp_t::shuffle(
+                    vram_score_entry<kit_, role_, rung_>(storage, query, turn_id, radius, lane),
+                    (lane - first) % entries_per_turn_k * lanes_per_entry_k);
+                if (lane - first < entries_per_turn_k) distance = turn_distance;
+            }
+            return distance;
+        }
     }
 
     /** Scores into @p scored a round of @p count entries of @p ids, past a warp's width and up to
      *  two:
      *  lane @c l scores the @c l -th longest entry and then the @c l -th shortest, so the warp's
      *  two passes cost its longest entry and the longest of the short ones. */
-    __device__ __forceinline__ void score_round(vram_ragged_view<node_id_type_> const& storage,
-                                                typename kit_::query_t const& query, node_id_type_ const* ids,
-                                                u32_t count, distance_t radius, u32_t lane,
+    __device__ __forceinline__ void score_round(vram_ragged_view<node_id_type_> const& storage, query_t const& query,
+                                                node_id_type_ const* ids, u32_t count, distance_t radius, u32_t lane,
                                                 vram_scored_node<node_id_type_> (&scored)[2]) const noexcept {
-        vram_split_by_bytes<typename kit_::warp_t>(storage, ids, count, lane, scored);
+        vram_split_by_bytes<warp_t>(storage, ids, count, lane, scored);
         for (vram_scored_node<node_id_type_>& entry : scored) {
             distance_t const distance = score(storage, query, entry.id(), radius, lane);
             if (!(entry == vram_scored_node<node_id_type_>::sentinel()))
@@ -376,7 +578,7 @@ __device__ __forceinline__ u32_t vram_sample_landmarks( //
  *  once. */
 template <a_vram_basic_kit kit_, typename schedule_, a_vram_frontier frontier_, typename node_id_type_>
 __device__ __forceinline__ void vram_score_into_frontier( //
-    vram_ragged_view<node_id_type_> const& storage, schedule_& schedule, typename kit_::query_t const& query,
+    vram_ragged_view<node_id_type_> const& storage, schedule_& schedule, typename schedule_::query_t const& query,
     node_id_type_ const* gathered_ids, u32_t gathered_count, vram_warp_context<frontier_>& context,
     u32_t lane) noexcept {
     using scored_node_t = vram_scored_node<node_id_type_>;
@@ -398,13 +600,31 @@ __device__ __forceinline__ void vram_score_into_frontier( //
         lane < gathered_count ? scored_node_t::make(distance, node_id) : scored_node_t::sentinel(), lane);
 }
 
+/** Scores into the frontier the seeds the warp's lanes name, one each, the sentinel for none: the
+ *  ones the walk visited already drop, and the rest score as one gathered batch. */
+template <a_vram_basic_kit kit_, typename schedule_, a_vram_frontier frontier_, typename node_id_type_>
+__device__ __forceinline__ void vram_score_seeds( //
+    vram_ragged_view<node_id_type_> const& storage, schedule_& schedule, typename schedule_::query_t const& query,
+    node_id_type_ seed_id, vram_visited_set<typename kit_::warp_t, node_id_type_>& visited, node_id_type_* gathered_ids,
+    vram_warp_context<frontier_>& context, u32_t lane) noexcept {
+    using warp_t = typename kit_::warp_t;
+    bool const fresh = visited.test_and_set(seed_id, lane);
+    typename warp_t::mask_t const fresh_mask = warp_t::ballot(fresh);
+    if (fresh) gathered_ids[warp_t::count(fresh_mask & warp_t::below(lane))] = seed_id;
+    warp_t::sync();
+    u32_t const gathered_count = warp_t::count(fresh_mask);
+    if (gathered_count)
+        vram_score_into_frontier<kit_>(storage, schedule, query, gathered_ids, gathered_count, context, lane);
+    warp_t::sync();
+}
+
 /** Continues a greedy best-first walk toward @p query over whatever the frontier holds, as the
  *  dense walk does: landmarks from @b [sampling_first,sampling_bound), a transiently locked
  *  candidate held through one other expansion and dropped if still locked then, and no neighbor at
  *  or past @p first_invisible_id followed. Read-only on the graph. */
 template <a_vram_basic_kit kit_, typename schedule_, a_vram_frontier frontier_, typename node_id_type_>
 __device__ __forceinline__ void vram_search_ahead( //
-    vram_ragged_view<node_id_type_> const& storage, schedule_& schedule, typename kit_::query_t const& query,
+    vram_ragged_view<node_id_type_> const& storage, schedule_& schedule, typename schedule_::query_t const& query,
     node_id_type_ sampling_first, node_id_type_ sampling_bound, node_id_type_ first_invisible_id,
     vram_visited_set<typename kit_::warp_t, node_id_type_>& visited, node_id_type_* gathered_ids,
     vram_warp_context<frontier_>& context, u32_t lane) noexcept {
@@ -416,7 +636,8 @@ __device__ __forceinline__ void vram_search_ahead( //
     vram_telemetry_t& telemetry = context.telemetry;
     scored_node_t held = scored_node_t::sentinel();
     u32_t held_at_hop = 0, pending = 0;
-    bool seeding = true;
+    // Seeds already scored take the first random batch's place, as on RAM.
+    bool seeding = frontier.nearest() == scored_node_t::sentinel();
     auto const score = [&](u32_t count) noexcept {
         vram_score_into_frontier<kit_>(storage, schedule, query, gathered_ids, count, context, lane);
         return walk_demand_t::continue_k;
@@ -479,7 +700,7 @@ __device__ __forceinline__ void vram_search_ahead( //
  *  to @ref vram_search_ahead. */
 template <a_vram_basic_kit kit_, typename schedule_, a_vram_frontier frontier_, typename node_id_type_>
 __device__ __forceinline__ void vram_search_around( //
-    vram_ragged_view<node_id_type_> const& storage, schedule_& schedule, typename kit_::query_t const& query,
+    vram_ragged_view<node_id_type_> const& storage, schedule_& schedule, typename schedule_::query_t const& query,
     node_id_type_ sampling_bound, node_id_type_ first_invisible_id,
     vram_visited_set<typename kit_::warp_t, node_id_type_>& visited, node_id_type_* gathered_ids,
     vram_warp_context<frontier_>& context, u32_t lane) noexcept {
@@ -505,7 +726,7 @@ struct vram_keep_diverse_t {
      *  @p schedule, exiting each candidate on its first violation. */
     template <a_vram_basic_kit kit_, typename schedule_, typename node_id_type_>
     static __device__ __forceinline__ u32_t select( //
-        vram_ragged_view<node_id_type_> const& storage, schedule_& schedule, typename kit_::query_t const&,
+        vram_ragged_view<node_id_type_> const& storage, schedule_& schedule, typename schedule_::query_t const&,
         byte_t* pivot_span, node_id_type_ const* candidate_ids, f32_t const* candidate_distances,
         u32_t candidates_count, u32_t* kept_positions, vram_telemetry_t& telemetry, u32_t lane,
         bool refill = true) noexcept {
@@ -516,11 +737,12 @@ struct vram_keep_diverse_t {
         for (u32_t candidate_index = 0; candidate_index < candidates_count && kept_count < storage.connectivity;
              ++candidate_index) {
             f32_t const to_query = candidate_distances[candidate_index];
-            typename kit_::query_t const pivot = kept_count
-                                                     ? vram_prepare<kit_>(storage.parameters,
-                                                                          storage.entry(candidate_ids[candidate_index]),
-                                                                          pivot_span, lane)
-                                                     : typename kit_::query_t {};
+            typename schedule_::query_t const pivot =
+                kept_count ? vram_prepare<kit_, schedule_::role_k>(
+                                 storage.parameters,
+                                 storage.template scored<kit_, schedule_::role_k>(candidate_ids[candidate_index]),
+                                 pivot_span, lane)
+                           : typename schedule_::query_t {};
             bool diverse = true;
             for (u32_t base = 0; base < kept_count && diverse; base += warp_t::width_k) { // Warp-uniform bounds.
                 node_id_type_ const kept_id = base + lane < kept_count ? candidate_ids[kept_positions[base + lane]]
@@ -561,7 +783,7 @@ struct vram_keep_diverse_t {
 template <a_vram_basic_kit kit_, typename selector_, typename schedule_, a_vram_frontier frontier_,
           typename node_id_type_>
 __device__ __forceinline__ u32_t vram_select_neighbors( //
-    vram_ragged_view<node_id_type_> const& storage, schedule_& schedule, typename kit_::query_t const& query,
+    vram_ragged_view<node_id_type_> const& storage, schedule_& schedule, typename schedule_::query_t const& query,
     byte_t* pivot_span, u32_t selection_nodes, vram_selection_scratch<node_id_type_> selection,
     vram_warp_context<frontier_>& context, u32_t lane) noexcept {
 
@@ -589,16 +811,16 @@ __device__ __forceinline__ u32_t vram_select_neighbors( //
     return selected_count;
 }
 
-/** Threads the @p selected_count picks of @p node_id onto their targets' chains, listing each
- *  target the first time any walker of the launch picks it; the back-link launch behind merges them
- *  all. */
+/** Threads the @p selected_count picks of the walker at @p offset onto their targets' chains,
+ *  listing each target the first time any walker of the launch picks it; the back-link launch
+ *  behind merges them all. */
 template <typename warp_type_, typename node_id_type_>
-__device__ __forceinline__ void vram_thread_back_links(vram_build_view<node_id_type_> const& view,
-                                                       node_id_type_ node_id, node_id_type_ const* selected_ids,
-                                                       u32_t selected_count, u32_t lane) noexcept {
+__device__ __forceinline__ void vram_thread_back_links(vram_build_view<node_id_type_> const& view, u32_t offset,
+                                                       node_id_type_ const* selected_ids, u32_t selected_count,
+                                                       u32_t lane) noexcept {
     for (u32_t slot = lane; slot < selected_count; slot += warp_type_::width_k) {
         node_id_type_ const target = selected_ids[slot];
-        node_id_type_ const pick = (node_id - view.first_id) * view.storage.connectivity + slot;
+        node_id_type_ const pick = offset * view.storage.connectivity + slot;
         node_id_type_ const previous = warp_type_::exchange_acquire(view.link_heads[target], pick);
         view.link_next[pick] = previous;
         if (previous == (std::numeric_limits<node_id_type_>::max)())
@@ -632,8 +854,10 @@ __device__ __forceinline__ void vram_insert_one( //
         warp_t::store_relaxed(storage.offsets[new_node_id], row_begin);
         warp_t::store_relaxed(storage.offsets[new_node_id + 1], row_end);
     }
-    typename kit_::query_t const query = vram_prepare<kit_>(
-        storage.parameters, {storage.values + row_begin, static_cast<u32_t>(row_end - row_begin)}, query_span, lane);
+    vram_query<kit_, score_role_t::build_k> const query = vram_prepare<kit_, score_role_t::build_k>(
+        storage.parameters,
+        vram_part<kit_, score_role_t::build_k>(storage.values, row_begin, row_end, storage.sketch_bytes), query_span,
+        lane);
 
     // A virgin index publishes an empty node instead of walking.
     if (new_node_id != 0)
@@ -651,7 +875,7 @@ __device__ __forceinline__ void vram_insert_one( //
     warp_t::sync();
     node_id_type_ const first_link = selected_count ? selection.selected_ids[0] : new_node_id;
     if (lane == 0) own_neighbors.unlock(first_link); // A self-loop encodes published-empty.
-    vram_thread_back_links<warp_t>(view, new_node_id, selection.selected_ids, selected_count, lane);
+    vram_thread_back_links<warp_t>(view, offset, selection.selected_ids, selected_count, lane);
 }
 
 /**
@@ -699,7 +923,8 @@ __device__ __forceinline__ void vram_back_link_one( //
         u32_t chained_end = live_count;
         if (lane == 0)
             for (; pick != unknown_k && chained_end != view.selection_nodes; pick = view.link_next[pick])
-                candidate_ids[chained_end++] = view.first_id + pick / connectivity;
+                candidate_ids[chained_end++] = view.listed ? view.listed[pick / connectivity]
+                                                           : view.first_id + pick / connectivity;
         chained_end = warp_t::shuffle(chained_end, 0);
         pick = warp_t::shuffle(pick, 0);
         warp_t::sync();
@@ -734,8 +959,8 @@ __device__ __forceinline__ void vram_back_link_one( //
             continue;
         }
 
-        typename kit_::query_t const query = vram_prepare<kit_>(storage.parameters, storage.entry(node_id), query_span,
-                                                                lane);
+        vram_query<kit_, score_role_t::build_k> const query = vram_prepare<kit_, score_role_t::build_k>(
+            storage.parameters, storage.template scored<kit_, score_role_t::build_k>(node_id), query_span, lane);
         vram_sorted_buffer<warp_t, node_id_type_> sorted_candidates {selection.scored_entries, 0, view.selection_nodes};
         for (u32_t slot_base = 0; slot_base < candidates_count; slot_base += warp_t::width_k) {
             u32_t const slot = slot_base + lane;
@@ -768,15 +993,16 @@ __device__ __forceinline__ void vram_back_link_one( //
     }
 }
 
-/** Re-selects the published row of @p node_id once its wave's back-links made the wave's nodes
- *  reachable from one another: walks from the row's own neighbors over every node below the view's
- *  sampling bound and selects again, threads the new picks, and rewrites the row in place, tail
- *  slots relaxed and slot 0 last with a release, so walks on other streams read either row. */
+/** Re-selects the published row of @p node_id, the walker at @p offset, once its wave's back-links
+ *  made the wave's nodes reachable from one another: walks from the row's own neighbors over every
+ *  node below the view's sampling bound and selects again, counts the row changed when it gains a
+ *  member, threads the new picks, and rewrites the row in place, tail slots relaxed and slot 0 last
+ *  with a release, so walks on other streams read either row. */
 template <a_vram_basic_kit kit_, typename selector_ = vram_keep_diverse_t, typename schedule_,
           a_vram_frontier frontier_,
           typename node_id_type_>
 __device__ __forceinline__ void vram_reselect_one( //
-    vram_build_view<node_id_type_> const& view, schedule_& schedule, node_id_type_ node_id,
+    vram_build_view<node_id_type_> const& view, schedule_& schedule, node_id_type_ node_id, u32_t offset,
     vram_visited_set<typename kit_::warp_t, node_id_type_>& visited, byte_t* query_span, byte_t* pivot_span,
     node_id_type_* gathered_ids, vram_selection_scratch<node_id_type_> selection, vram_warp_context<frontier_>& context,
     u32_t lane) noexcept {
@@ -784,8 +1010,8 @@ __device__ __forceinline__ void vram_reselect_one( //
     using warp_t = typename kit_::warp_t;
     constexpr node_id_type_ unknown_k = (std::numeric_limits<node_id_type_>::max)();
     vram_ragged_view<node_id_type_> const& storage = view.storage;
-    typename kit_::query_t const query = vram_prepare<kit_>(storage.parameters, storage.entry(node_id), query_span,
-                                                            lane);
+    vram_query<kit_, score_role_t::build_k> const query = vram_prepare<kit_, score_role_t::build_k>(
+        storage.parameters, storage.template scored<kit_, score_role_t::build_k>(node_id), query_span, lane);
     context.frontier.clear(lane);
     visited.test_and_set(node_id, lane);
 
@@ -796,43 +1022,54 @@ __device__ __forceinline__ void vram_reselect_one( //
         u32_t const slot = slot_base + lane;
         node_id_type_ const seed_id = slot < storage.connectivity ? own_neighbors.load_slot(slot) : unknown_k;
         bool const usable = seed_id < view.sampling_bound && seed_id != node_id;
-        bool const fresh = visited.test_and_set(usable ? seed_id : unknown_k, lane);
-        typename warp_t::mask_t const fresh_mask = warp_t::ballot(fresh);
-        u32_t const ordinal = warp_t::count(fresh_mask & warp_t::below(lane));
-        if (fresh) gathered_ids[ordinal] = seed_id;
-        warp_t::sync();
-        u32_t const gathered_count = warp_t::count(fresh_mask);
-        if (gathered_count)
-            vram_score_into_frontier<kit_>(storage, schedule, query, gathered_ids, gathered_count, context, lane);
-        warp_t::sync();
+        vram_score_seeds<kit_>(storage, schedule, query, usable ? seed_id : unknown_k, visited, gathered_ids, context,
+                               lane);
     }
     vram_search_ahead<kit_>(storage, schedule, query, node_id_type_ {0}, view.sampling_bound, view.sampling_bound,
                             visited, gathered_ids, context, lane);
 
     u32_t const selected_count = vram_select_neighbors<kit_, selector_>( //
         storage, schedule, query, pivot_span, view.selection_nodes, selection, context, lane);
+    bool gained = false;
+    for (u32_t slot = lane; slot < selected_count; slot += warp_t::width_k) {
+        node_id_type_ const picked = selection.selected_ids[slot];
+        bool held = false;
+        for (u32_t live_slot = 0; live_slot != storage.connectivity && !held; ++live_slot)
+            held = own_neighbors.load_slot(live_slot) == picked;
+        gained = gained || !held;
+    }
+    context.telemetry.changed_nodes += warp_t::any(gained) ? 1u : 0u;
     for (u32_t slot = lane; slot < storage.connectivity; slot += warp_t::width_k)
         if (slot) own_neighbors.store_slot(slot, slot < selected_count ? selection.selected_ids[slot] : unknown_k);
     warp_t::sync();
     if (lane == 0) own_neighbors.unlock(selected_count ? selection.selected_ids[0] : node_id);
-    vram_thread_back_links<warp_t>(view, node_id, selection.selected_ids, selected_count, lane);
+    vram_thread_back_links<warp_t>(view, offset, selection.selected_ids, selected_count, lane);
 }
 
-/** One query's full walk: prepares the query into its span, walks the graph, and writes its nearest
- *  @c count IDs and distances, ascending, sentinel IDs past the live prefix. Safe against
- *  concurrent insertions: the walk gates on every slot-0 word and never writes the graph. */
-template <a_vram_basic_kit kit_, typename schedule_, a_vram_frontier frontier_, typename node_id_type_>
+/** One query's full walk for @p role_: a search prepares the query into its span, scores its seeds
+ *  first where the view holds any, walks the graph, and writes its nearest @c count IDs and
+ *  distances, ascending, sentinel IDs past the live prefix; a seeding walk scores the query's
+ *  sketch and writes its nearest @c seeds_count IDs as the query's seeds. Safe against concurrent
+ *  insertions: the walk gates on every slot-0 word and never writes the graph. */
+template <a_vram_basic_kit kit_, score_role_t role_, typename schedule_, a_vram_frontier frontier_,
+          typename node_id_type_>
 __device__ __forceinline__ void vram_walk_one( //
     vram_search_view<node_id_type_> const& view, schedule_& schedule, u32_t query_index, byte_t* query_span,
     vram_visited_set<typename kit_::warp_t, node_id_type_>& visited, frontier_ frontier, node_id_type_* gathered_ids,
     u32_t lane) noexcept {
 
     using warp_t = typename kit_::warp_t;
+    using scored_node_t = vram_scored_node<node_id_type_>;
+    constexpr node_id_type_ unknown_k = (std::numeric_limits<node_id_type_>::max)();
     u64_t const origin = view.query_offsets[0];
     u64_t const first = view.query_offsets[query_index] - origin;
-    vram_entry_t const query_entry {view.queries + first,
-                                    static_cast<u32_t>(view.query_offsets[query_index + 1] - origin - first)};
-    typename kit_::query_t const query = vram_prepare<kit_>(view.storage.parameters, query_entry, query_span, lane);
+    vram_entry_t query_entry {view.queries + first,
+                              static_cast<u32_t>(view.query_offsets[query_index + 1] - origin - first)};
+    if constexpr (vram_scores_by_sketch<kit_, role_>())
+        query_entry = {view.query_sketches + std::size_t {query_index} * view.storage.sketch_bytes,
+                       view.storage.sketch_bytes};
+    vram_query<kit_, role_> const query = vram_prepare<kit_, role_>(view.storage.parameters, query_entry, query_span,
+                                                                    lane);
 
     vram_warp_context<frontier_> context;
     context.frontier = frontier;
@@ -841,21 +1078,122 @@ __device__ __forceinline__ void vram_walk_one( //
     u32_t live = lane == 0 ? warp_t::fetch_add_relaxed(*view.live_walks, 1u) + 1 : 0;
     live = warp_t::shuffle(live, 0);
     context.walk_width = walk_width(view.concurrent_walks, live, view.queries_count - query_index, view.filling_nodes);
-    vram_search_around<kit_>(view.storage, schedule, query, view.sampling_bound, view.sampling_bound, visited,
-                             gathered_ids, context, lane);
+    context.frontier.clear(lane);
+    if constexpr (role_ == score_role_t::search_k) {
+        node_id_type_ const* const seeds = vram_row(view.seed_ids, query_index, view.seeds_count);
+        for (u32_t slot_base = 0; slot_base < view.seeds_count; slot_base += warp_t::width_k) {
+            u32_t const slot = slot_base + lane;
+            node_id_type_ const seed_id = slot < view.seeds_count ? seeds[slot] : unknown_k;
+            vram_score_seeds<kit_>(view.storage, schedule, query, seed_id < view.sampling_bound ? seed_id : unknown_k,
+                                   visited, gathered_ids, context, lane);
+        }
+    }
+    vram_search_ahead<kit_>(view.storage, schedule, query, node_id_type_ {0}, view.sampling_bound, view.sampling_bound,
+                            visited, gathered_ids, context, lane);
     if (lane == 0) warp_t::fetch_sub_relaxed(*view.live_walks, 1u);
 
     // The rank extraction shuffles, so every lane participates and only in-range ones store.
-    node_id_type_* const ids_row = vram_row(view.result_ids, query_index, view.count);
-    distance_t* const distances_row = vram_row(view.result_distances, query_index, view.count);
-    context.frontier.for_each_rank(view.count, lane, [&](u32_t rank, vram_scored_node<node_id_type_> entry) noexcept {
-        if (rank >= view.count) return;
-        ids_row[rank] = entry.id();
-        distances_row[rank] = entry.distance();
-    });
+    if constexpr (role_ == score_role_t::search_k) {
+        node_id_type_* const ids_row = vram_row(view.result_ids, query_index, view.count);
+        distance_t* const distances_row = vram_row(view.result_distances, query_index, view.count);
+        context.frontier.for_each_rank(view.count, lane, [&](u32_t rank, scored_node_t entry) noexcept {
+            if (rank >= view.count) return;
+            ids_row[rank] = entry.id();
+            distances_row[rank] = entry.distance();
+        });
+    }
+    else {
+        node_id_type_* const seeds_row = vram_row(view.seed_ids, query_index, view.seeds_count);
+        context.frontier.for_each_rank(view.seeds_count, lane, [&](u32_t rank, scored_node_t entry) noexcept {
+            if (rank < view.seeds_count) seeds_row[rank] = entry.id();
+        });
+    }
     context.telemetry.tail_compactions = context.frontier.compactions();
     context.telemetry.tail_dropped = context.frontier.dropped();
     context.telemetry.visited_saturations = visited.saturations_;
+    constexpr vram_traversal_t traversal_k = role_ == score_role_t::search_k ? vram_traversal_t::searching_k
+                                                                             : vram_traversal_t::seeding_k;
+    context.telemetry.template flush<warp_t, traversal_k>(view.telemetry, lane);
+}
+
+/** One range of one query's exact scan, ranges counting @p item past the queries: the query
+ *  prepares into its span, every published node of the range scores against it a round of two
+ *  lane-widths at a time within the worst kept match, and the range's nearest @c count matches
+ *  land in its row of @c range_matches. The last range of a query to finish merges every range's
+ *  row into the query's outputs, ascending, sentinel IDs past the live prefix. Read-only on the
+ *  graph, reading every slot-0 word as a walk does. */
+template <a_vram_basic_kit kit_, typename schedule_, a_vram_frontier frontier_, typename node_id_type_>
+__device__ __forceinline__ void vram_scan_one( //
+    vram_search_view<node_id_type_> const& view, schedule_& schedule, u32_t item, byte_t* query_span,
+    frontier_ frontier, node_id_type_* gathered_ids, u32_t lane) noexcept {
+
+    using warp_t = typename kit_::warp_t;
+    using scored_node_t = vram_scored_node<node_id_type_>;
+    constexpr node_id_type_ unknown_k = (std::numeric_limits<node_id_type_>::max)();
+    // Ranges lead, so the walkers in flight read the same nodes.
+    u32_t const query_index = item % view.queries_count, range = item / view.queries_count;
+    u64_t const origin = view.query_offsets[0];
+    u64_t const first = view.query_offsets[query_index] - origin;
+    vram_entry_t const query_entry {view.queries + first,
+                                    static_cast<u32_t>(view.query_offsets[query_index + 1] - origin - first)};
+    vram_query<kit_, score_role_t::search_k> const query = vram_prepare<kit_, score_role_t::search_k>(
+        view.storage.parameters, query_entry, query_span, lane);
+
+    vram_warp_context<frontier_> context;
+    context.frontier = frontier;
+    context.frontier.clear(lane);
+    u64_t const range_nodes = divide_round_up<u64_t>(view.sampling_bound, view.ranges);
+    u64_t const range_first = min_of<u64_t>(range * range_nodes, view.sampling_bound);
+    u64_t const range_end = min_of<u64_t>(range_first + range_nodes, view.sampling_bound);
+    for (u64_t base = range_first; base < range_end; base += 2 * warp_t::width_k) { // Warp-uniform bounds.
+        u32_t staged = 0;
+        for (u32_t half = 0; half != 2; ++half) {
+            u64_t const node = base + half * warp_t::width_k + lane;
+            bool published = false;
+            if (node < range_end) {
+                vram_neighbors_ref<warp_t, node_id_type_> const row {
+                    view.storage.neighbors_for(static_cast<node_id_type_>(node)), view.storage.connectivity};
+                published = row.peek_first() != unknown_k;
+            }
+            typename warp_t::mask_t const published_mask = warp_t::ballot(published);
+            if (published)
+                gathered_ids[staged + warp_t::count(published_mask & warp_t::below(lane))] = static_cast<node_id_type_>(
+                    node);
+            staged += warp_t::count(published_mask);
+        }
+        warp_t::sync();
+        if (staged) vram_score_into_frontier<kit_>(view.storage, schedule, query, gathered_ids, staged, context, lane);
+        warp_t::sync();
+    }
+
+    u32_t const count = view.count, ranges = view.ranges;
+    scored_node_t* const query_matches = view.range_matches + std::size_t {query_index} * ranges * count;
+    scored_node_t* const range_row = query_matches + std::size_t {range} * count;
+    context.frontier.for_each_rank(count, lane, [&](u32_t rank, scored_node_t entry) noexcept {
+        if (rank < count) range_row[rank] = entry;
+    });
+    context.telemetry.tail_compactions = context.frontier.compactions();
+    context.telemetry.tail_dropped = context.frontier.dropped();
+    // Every range's matches are written before the finish that lets the last range read them.
+    warp_t::fence_release();
+    warp_t::sync();
+    u32_t finished = lane == 0 ? warp_t::fetch_add_relaxed(view.finished_ranges[query_index], 1u) + 1 : 0;
+    finished = warp_t::shuffle(finished, 0);
+    if (finished == ranges) {
+        // Reading the last count acquires every other range's release.
+        static_cast<void>(warp_t::load_acquire(view.finished_ranges[query_index]));
+        context.frontier.clear(lane);
+        for (u32_t base = 0; base < ranges * count; base += warp_t::width_k) // Warp-uniform bounds.
+            context.frontier.insert_batch(
+                base + lane < ranges * count ? query_matches[base + lane] : scored_node_t::sentinel(), lane);
+        node_id_type_* const ids_row = vram_row(view.result_ids, query_index, count);
+        distance_t* const distances_row = vram_row(view.result_distances, query_index, count);
+        context.frontier.for_each_rank(count, lane, [&](u32_t rank, scored_node_t entry) noexcept {
+            if (rank >= count) return;
+            ids_row[rank] = entry.id();
+            distances_row[rank] = entry.distance();
+        });
+    }
     context.telemetry.template flush<warp_t, vram_traversal_t::searching_k>(view.telemetry, lane);
 }
 
@@ -933,8 +1271,8 @@ __device__ __forceinline__ void vram_gather_one(vram_round_view<node_id_type_> c
     vram_neighborhood_run_t const run = view.runs[run_index];
     u32_t const offset = position - view.run_entries[run_index];
     node_id_type_ const node_id = view.entries ? view.entries[run.first + offset] : run.first + offset;
-    typename kit_::query_t const query = vram_prepare<kit_>(storage.parameters, storage.entry(node_id), query_span,
-                                                            lane);
+    vram_query<kit_, score_role_t::build_k> const query = vram_prepare<kit_, score_role_t::build_k>(
+        storage.parameters, storage.template scored<kit_, score_role_t::build_k>(node_id), query_span, lane);
     u32_t const* const hubs = view.hub_nodes + run.first_hub;
     scored_t nearest = scored_t::sentinel();
     distance_t radius = std::numeric_limits<distance_t>::infinity();
@@ -999,8 +1337,8 @@ __device__ __forceinline__ void vram_restitch_one(vram_round_view<node_id_type_>
         live_count += warp_t::count(usable_mask);
         warp_t::sync();
     }
-    typename kit_::query_t const query = vram_prepare<kit_>(storage.parameters, storage.entry(node_id), query_span,
-                                                            lane);
+    vram_query<kit_, score_role_t::build_k> const query = vram_prepare<kit_, score_role_t::build_k>(
+        storage.parameters, storage.template scored<kit_, score_role_t::build_k>(node_id), query_span, lane);
 
     // Then the nearest mates no live link names, kept ascending, each scored within the farthest
     // kept once the row's worth of them is full.

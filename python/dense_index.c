@@ -442,6 +442,7 @@ static char const doc_DenseTraversalStats[] =                                   
     "  computed_distances (int): Distance evaluations the walk paid for.\n"     //
     "  restarts (int): Times the walk fell back to a fresh entry point.\n"      //
     "  missing_hints (int): Hint keys no shard held an entry under.\n"          //
+    "  seeding_distances (int): Seeding sketch scores in computed_distances.\n" //
     "\n"                                                                        //
     "Example:\n"                                                                //
     "  >>> total = usearch.DenseTraversalStats()\n"                             //
@@ -461,9 +462,10 @@ static void DenseTraversalStats_dealloc(DenseTraversalStats* self) { Py_TYPE(sel
 
 static PyObject* DenseTraversalStats_repr(DenseTraversalStats* self) {
     char const* const format =
-        "DenseTraversalStats(visited_members=%zu, computed_distances=%zu, restarts=%zu, missing_hints=%zu)";
+        "DenseTraversalStats(visited_members=%zu, computed_distances=%zu, restarts=%zu, missing_hints=%zu, " //
+        "seeding_distances=%zu)";
     return PyUnicode_FromFormat(format, self->stats.visited_members, self->stats.computed_distances,
-                                self->stats.restarts, self->stats.missing_hints);
+                                self->stats.restarts, self->stats.missing_hints, self->stats.seeding_distances);
 }
 
 /** Adds another reading's counters into this one. */
@@ -475,6 +477,7 @@ static PyObject* DenseTraversalStats_inplace_add(PyObject* self, PyObject* other
     total->computed_distances += addend.computed_distances;
     total->restarts += addend.restarts;
     total->missing_hints += addend.missing_hints;
+    total->seeding_distances += addend.seeding_distances;
     return Py_NewRef(self);
 }
 
@@ -487,6 +490,9 @@ static PyGetSetDef DenseTraversalStats_getset[] = {
      (void*)offsetof(DenseTraversalStats, stats.restarts)},
     {"missing_hints", usearch_py_size_getter, NULL, "Hint keys no shard held an entry under.",
      (void*)offsetof(DenseTraversalStats, stats.missing_hints)},
+    {"seeding_distances", usearch_py_size_getter, NULL,
+     "Of the distances computed, the sketch distances a sequence search's seeding walk spent.",
+     (void*)offsetof(DenseTraversalStats, stats.seeding_distances)},
     {NULL, NULL, NULL, NULL, NULL},
 };
 
@@ -2005,7 +2011,7 @@ static char const doc_DenseRefinePlan[] =                                       
     "  >>> pool, plan = usearch.Executor.for_ram(threads=2), usearch.DenseRefinePlan()\n"          //
     "  >>> _ = index.on(pool).refine(plan=plan)\n"                                                 //
     "  >>> plan.phase\n"                                                                           //
-    "  <Phase.DONE: 11>\n"                                                                         //
+    "  <Phase.DONE: 12>\n"                                                                         //
     "  >>> index.on(pool).refine_plan_finish(plan).verdict\n"                                      //
     "  <RefineVerdict.CONVERGED: 2>";
 

@@ -301,7 +301,9 @@ static bool usearch_js_stats_report(napi_env env, napi_value sink, usearch_trave
         napi_set_named_property(env, sink, "computedDistances", usearch_js_number(env, stats->computed_distances)) !=
             napi_ok ||
         napi_set_named_property(env, sink, "restarts", usearch_js_number(env, stats->restarts)) != napi_ok ||
-        napi_set_named_property(env, sink, "missingHints", usearch_js_number(env, stats->missing_hints)) != napi_ok)
+        napi_set_named_property(env, sink, "missingHints", usearch_js_number(env, stats->missing_hints)) != napi_ok ||
+        napi_set_named_property(env, sink, "seedingDistances", usearch_js_number(env, stats->seeding_distances)) !=
+            napi_ok)
         return usearch_js_throw(env, usearch_status_internal_k, "Could not publish the telemetry");
     return true;
 }

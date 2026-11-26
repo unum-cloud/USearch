@@ -625,6 +625,7 @@ struct vram_apple_indexes {
             vram_telemetry_block_t const spent = traversal.spent();
             merged.visited_members += spent.hops;
             merged.computed_distances += spent.scored;
+            merged.computed_distances_in_seeding += spent.sketched;
             merged.restarts += spent.restarts;
             merged.tail_compactions += spent.tail_compactions;
             merged.tail_dropped += spent.tail_dropped;

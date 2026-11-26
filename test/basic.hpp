@@ -708,8 +708,8 @@ void test_basic_keys(u64_t seed) {
     expect_equal(ledger.live_bytes, 0);
 }
 
-/** Manual wiring: idempotent links, honest rejections, degree bookkeeping, growth
- *  past the build budget, and a snapshot roundtrip preserving variable degrees. */
+/** Manual wiring: idempotent links, honest rejections, degree bookkeeping, growth past the build
+ *  budget, a snapshot roundtrip preserving variable degrees, and adopted rows. */
 template <typename fixture_type_>
 void test_basic_wiring(u64_t seed) {
     using index_t = typename fixture_type_::index_t;
@@ -770,6 +770,34 @@ void test_basic_wiring(u64_t seed) {
         expect_true(bool(restored.reserve(nodes_k)));
         expect_equal(restored.load(columns.view(), codec), status_code_t::success_k);
         basic_expect_mirrored<fixture_type_>(restored, index, nodes_k);
+
+        // Adopted rows replace the stored ones whole: a fixed row drops its sentinel and its
+        // self-link, and a ragged row naming no node is refused before any row changes.
+        constexpr std::size_t degree_k = 4;
+        std::vector<node_id_t> fixed(nodes_k * degree_k);
+        for (std::size_t node = 0; node != nodes_k; ++node) {
+            node_id_t* const row = fixed.data() + node * degree_k;
+            row[0] = static_cast<node_id_t>((node + 1) % nodes_k);
+            row[1] = (std::numeric_limits<node_id_t>::max)();
+            row[2] = static_cast<node_id_t>(node);
+            row[3] = static_cast<node_id_t>((node + 2) % nodes_k);
+        }
+        expect_equal(index.adopt_links({fixed, {}, degree_k}), status_code_t::success_k);
+        for (std::size_t node = 0; node != nodes_k; ++node) {
+            node_id_t const node_id = static_cast<node_id_t>(node);
+            auto const [degree, degree_status] = index.degree_of(node_id);
+            auto const [next, next_status] = index.link(node_id, static_cast<node_id_t>((node + 1) % nodes_k));
+            auto const [skip, skip_status] = index.link(node_id, static_cast<node_id_t>((node + 2) % nodes_k));
+            expect_equal(degree_status, status_code_t::success_k);
+            expect_equal(degree, std::size_t {2});
+            expect_true(next == membership_t::present_k && skip == membership_t::present_k);
+        }
+        std::vector<util::u64_t> ragged_offsets(nodes_k + 1, 0);
+        ragged_offsets.back() = 1;
+        std::vector<node_id_t> const ragged {static_cast<node_id_t>(nodes_k)};
+        expect_equal(index.adopt_links({ragged, ragged_offsets, 0}), status_code_t::malformed_k);
+        auto const [kept_degree, kept_status] = index.degree_of(node_id_t {0});
+        expect_equal(kept_degree, std::size_t {2});
     }
     expect_equal(ledger.live_bytes, 0);
 }
@@ -1705,7 +1733,8 @@ void basic_rewire(index_type_& index, std::vector<std::vector<std::size_t>> cons
  *  leaves every one reachable. While its plan lives batches and saves refuse and searches run, a
  *  plan dying unfinished reopens the claims, and the one-shot refines the grown graph. An entry
  *  linking into a cycle nothing links to, and a pair the cycle links into that links only to
- *  itself, heal through the root's component without a distance. */
+ *  itself, heal through the root's component without a distance. A load narrower than the round's
+ *  budget fills its rows through the restitch, the reach walking only island entries. */
 template <typename fixture_type_>
 void test_basic_refine(u64_t seed) {
     using index_t = typename fixture_type_::index_t;
@@ -1743,10 +1772,16 @@ void test_basic_refine(u64_t seed) {
             basic_drive(plan, metric, context, selector);
             auto const [refined, finish_status] = plan.finish();
             expect_equal(finish_status, status_code_t::success_k);
-            expect_equal(refined.reselected_nodes, basic_fixture_nodes<fixture_type_>);
+            // Only the reach walks, over island entries, each row it walks counted as reselected.
+            std::size_t const reached = refined.reselected_nodes - basic_fixture_nodes<fixture_type_>;
+            expect_true(refined.reselected_nodes >= basic_fixture_nodes<fixture_type_> &&
+                            reached <= basic_fixture_nodes<fixture_type_> / 2,
+                        "{} rows reselected for {} entries", refined.reselected_nodes,
+                        basic_fixture_nodes<fixture_type_>);
             expect_true(refined.changed_nodes <= refined.reselected_nodes && refined.changed_nodes > 0);
             expect_true(refined.neighborhoods > 0 && refined.verdict == refine_verdict_t::improved_k);
-            expect_equal(refined.traversal_stats.visited_members, 0u);
+            expect_true(reached != 0 || refined.traversal_stats.visited_members == 0,
+                        "{} members visited with no row reached", refined.traversal_stats.visited_members);
             expect_equal(refined.reachability.audited_nodes, basic_fixture_nodes<fixture_type_>);
             expect_equal(refined.reachability.reachable_nodes, basic_fixture_nodes<fixture_type_>);
             expect_true(refined.reachability.depth_from_root != 0);
@@ -1809,6 +1844,29 @@ void test_basic_refine(u64_t seed) {
         expect_equal(report.reachability.stranded_islands, 0u);
         expect_equal(report.reachability.reachable_nodes, entries_k);
         expect_equal(healing, 0u);
+    }
+    {
+        constexpr std::size_t entries_k = basic_growth_nodes_k;
+        std::unique_ptr<index_t> const narrow = fixture_type_::make_index(ledger);
+        auto metric = fixture_type_::make_metric();
+        auto const codec = fixture_type_::make_codec();
+        context_t context {stream_key(seed, "refine_widened"), counting_allocator_t {ledger}};
+        auto values = fixture_type_::make_values(entries_k, stream_key(seed, "refine_widened"),
+                                                 counting_allocator_t {ledger});
+        std::vector<node_id_t> assigned_ids;
+        basic_build<fixture_type_>(*narrow, metric, values, assigned_ids, context,
+                                   keep_diverse_t {basic_connectivity_k / 2});
+        auto const [saved, saved_status] = basic_saved_columns(*narrow, codec);
+        expect_equal(saved_status, status_code_t::success_k);
+        std::unique_ptr<index_t> const widened = fixture_type_::make_index(ledger);
+        expect_equal(widened->load(saved.view(), codec), status_code_t::success_k);
+        keep_diverse_t const selector {basic_connectivity_k};
+        auto const [filled, filled_status] = widened->refine({}, selector, codec, metric, context);
+        expect_equal(filled_status, status_code_t::success_k);
+        expect_true(filled.reselected_nodes >= entries_k && filled.reselected_nodes <= entries_k + entries_k / 2,
+                    "{} rows reselected for {} entries", filled.reselected_nodes, entries_k);
+        // Wider rows re-select, dropping links as well as adding them, yet reach every entry
+        expect_equal(filled.reachability.reachable_nodes, entries_k);
     }
     expect_equal(ledger.live_bytes, 0);
 }
@@ -1874,7 +1932,10 @@ void test_basic_gather(u64_t seed) {
             expect_true(gathered.reachability.depth_from_root != 0);
             expect_true(gathered.changed_nodes <= gathered.reselected_nodes);
             expect_true(gathered.verdict == refine_verdict_t::improved_k && gathered.neighborhoods > 0);
-            expect_equal(gathered.traversal_stats.visited_members, 0u);
+            expect_true(
+                gathered.traversal_stats.visited_members == 0 || gathered.reselected_nodes > parts_k * entries_k,
+                "{} members visited over {} reselected rows", gathered.traversal_stats.visited_members,
+                gathered.reselected_nodes);
         }
         for (std::size_t entry = 0; entry != parts_k * entries_k; ++entry) {
             auto const [node_id, find_status] = target.find(fixture_type_::make_key(entry));
@@ -1972,7 +2033,10 @@ refine_report_t basic_cut(index_type_& source, std::vector<index_type_*>& target
     expect_equal(result.reachability.reachable_nodes, entries);
     expect_true(result.reachability.depth_from_root != 0);
     expect_true(result.neighborhoods >= targets.size());
-    expect_equal(result.traversal_stats.visited_members, 0u);
+    // The moves walk nothing; only the reach over island entries does, counted as reselected rows.
+    expect_true(result.traversal_stats.visited_members == 0 || result.reselected_nodes > entries,
+                "{} members visited over {} reselected rows", result.traversal_stats.visited_members,
+                result.reselected_nodes);
     for (std::size_t entry = 0; entry != entries; ++entry) {
         std::size_t holders = 0;
         for (index_type_* target : targets) {
@@ -2299,7 +2363,9 @@ void test_basic_sharded_cut(u64_t seed, metric_type_& metric, codec_type_ const&
         while (resharding.advance());
         auto const [resharded, resharded_status] = resharding.finish();
         expect_equal(resharded_status, status_code_t::success_k);
-        expect_equal(resharded.traversal_stats.visited_members, 0u);
+        expect_true(resharded.traversal_stats.visited_members == 0 || resharded.reselected_nodes > first_entries,
+                    "{} members visited over {} reselected rows", resharded.traversal_stats.visited_members,
+                    resharded.reselected_nodes);
         expect_true(!resharding.advance());
         expect_equal(resharding.finish().status.code, resharded_status.code);
     }

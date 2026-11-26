@@ -1216,7 +1216,7 @@ test("Traversal telemetry", async (t) => {
   };
 
   const assertCounters = (stats, note) => {
-    for (const counter of ["visitedMembers", "computedDistances", "restarts", "missingHints"]) {
+    for (const counter of ["visitedMembers", "computedDistances", "restarts", "missingHints", "seedingDistances"]) {
       assert(Number.isInteger(stats[counter]) && stats[counter] >= 0, `${note}: ${counter} is a whole count`);
     }
   };
@@ -1240,7 +1240,10 @@ test("Traversal telemetry", async (t) => {
     const call = populated()
       .deferred(executor)
       .search(new Float32Array([7, 8, 9, 10]), 4, new Arena(), { stats });
-    assert.deepEqual({ ...stats }, { visitedMembers: 0, computedDistances: 0, restarts: 0, missingHints: 0 });
+    assert.deepEqual(
+      { ...stats },
+      { visitedMembers: 0, computedDistances: 0, restarts: 0, missingHints: 0, seedingDistances: 0 },
+    );
     await call;
     assert(stats.computedDistances > 0, "the walk it paid for lands with its result");
     executor.free();
@@ -1265,9 +1268,13 @@ test("Traversal telemetry", async (t) => {
     reading.computedDistances = 11;
     reading.restarts = 1;
     reading.missingHints = 3;
+    reading.seedingDistances = 2;
     total.accumulate(reading);
     total.accumulate(reading);
-    assert.deepEqual({ ...total }, { visitedMembers: 10, computedDistances: 22, restarts: 2, missingHints: 6 });
+    assert.deepEqual(
+      { ...total },
+      { visitedMembers: 10, computedDistances: 22, restarts: 2, missingHints: 6, seedingDistances: 4 },
+    );
   });
 });
 
@@ -1466,18 +1473,75 @@ for (const [name, modality] of Object.entries(MODALITIES)) {
   });
 }
 
-test("SequenceIndex: each sequence finds itself, and comes back as it went in", () => {
-  const index = usearch.SequenceIndex.initRam({ metric: usearch.SequenceMetric.LevenshteinUtf8 });
-  assert.equal(index.describe().metadata.metric, usearch.SequenceMetric.LevenshteinUtf8);
+test("SequenceIndex: each sequence finds itself, and comes back folded", () => {
+  const { SequenceIndex, SequenceMetric } = usearch;
+  const index = SequenceIndex.initRam({ metric: SequenceMetric.Utf8Containment });
+  assert.equal(index.describe().metadata.metric, SequenceMetric.Utf8Containment);
+  assert.equal(index.describe().metadata.classes, 0);
+  assert.deepEqual(Object.values(SequenceMetric), ["protein-alignment", "dna-overlap", "utf8-containment"]);
   index.insert([1n, 2n, 3n], ["kitten", new TextEncoder().encode("sitting"), "mitten"]);
   assert.equal(index.describe().size, 3);
-  const matches = index.search(["sitting"], 1, new Arena());
+  const matches = index.search(["SITTING"], 1, new Arena());
   assert.equal(usearch.integerFromKey(matches.get(0).keys), 2n);
   assert.equal(matches.get(0).scores[0], 0);
   const stored = index.get(2n, new Arena());
   assert.equal(stored.entries, 1);
   assert.equal(new TextDecoder().decode(stored.get(0)), "sitting");
   assert.deepEqual(index.count(2n), { entries: 1, totalBytes: 7, largestBytes: 7 });
+});
+
+/** Row-major 256 × 256 similarities, `self` on the diagonal of A, C, G and T, and `similar` between
+ *  A and G. */
+function nucleotideSimilarities(self, similar) {
+  const similarities = new Int8Array(256 * 256);
+  for (const letter of "ACGT") similarities[letter.charCodeAt(0) * 257] = self;
+  similarities["A".charCodeAt(0) * 256 + "G".charCodeAt(0)] = similar;
+  similarities["G".charCodeAt(0) * 256 + "A".charCodeAt(0)] = similar;
+  return similarities;
+}
+
+test("SequenceIndex: a DNA overlap finds the read a query reverse-complements", () => {
+  const { SequenceIndex, SequenceMetric } = usearch;
+  const index = SequenceIndex.initRam({ metric: SequenceMetric.DnaOverlap });
+  index.insert(
+    [1n, 2n, 3n],
+    ["ACGTTGCAAGGCTTAACCGGTTACGATCGA", "GGCTTAACCGGTTACGATCGATTTGCAGCA", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"],
+  );
+  const matches = index.search(["TGCTGCAAATCGATCGTAACCGGTTAAGCC"], 2, new Arena());
+  assert.equal(usearch.integerFromKey(usearch.keyAt(matches.get(0).keys, 0)), 2n);
+  assert.equal(matches.get(0).scores[0], 0);
+});
+
+test("SequenceIndex: an alignment under similarities ranks a near substitution above a far one", () => {
+  const { SequenceIndex, SequenceMetric } = usearch;
+  const index = SequenceIndex.initRam({
+    metric: SequenceMetric.ProteinAlignment,
+    costs: { similarities: nucleotideSimilarities(4, 3), gap: 4 },
+  });
+  index.insert([1n, 2n], ["GCGTTGCAACGT", "CCGTTGCAACGT"]);
+  const nearest = index.search(["ACGTTGCAACGT"], 2, new Arena()).get(0);
+  assert.equal(usearch.integerFromKey(usearch.keyAt(nearest.keys, 0)), 1n);
+  assert.equal(usearch.integerFromKey(usearch.keyAt(nearest.keys, 1)), 2n);
+  assert(nearest.scores[0] < nearest.scores[1]);
+});
+
+test("SequenceIndex: a containment finds the text holding a query, whatever its case, and takes no costs", () => {
+  const { SequenceIndex, SequenceMetric } = usearch;
+  const index = SequenceIndex.initRam({ metric: SequenceMetric.Utf8Containment });
+  index.insert(
+    [1n, 2n],
+    ["The Quick Brown Fox jumps over the lazy dog", "a journey of a thousand miles begins with a single step"],
+  );
+  const matches = index.search(["BROWN FOX JUMPS"], 2, new Arena());
+  assert.equal(usearch.integerFromKey(usearch.keyAt(matches.get(0).keys, 0)), 1n);
+  assert.throws(
+    () =>
+      SequenceIndex.initRam({
+        metric: SequenceMetric.Utf8Containment,
+        costs: { similarities: nucleotideSimilarities(2, 0), gap: 2 },
+      }),
+    { code: Status.ConfigMismatch },
+  );
 });
 
 test("ShapesIndex: shapes of different point counts share a batch, and each finds itself", () => {

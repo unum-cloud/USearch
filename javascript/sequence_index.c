@@ -2,7 +2,7 @@
  *  @file javascript/sequence_index.c
  *  @author Ash Vardanian
  *  @date November 16, 2026
- *  @brief Node-API similarity search over byte sequences under edit distances and alignments.
+ *  @brief Node-API search over sequences: protein alignments, DNA overlaps and UTF-8 containments.
  *
  *  The @c CompiledSequenceIndex class and the lifecycle verbs that instantiate it, the cursor it
  *  opens, and the checkpoint metadata readers that need no index at all. Sequences cross as one
@@ -11,18 +11,20 @@
  *  Every instance verb takes the executor and the completion first, so one native function serves
  *  the calling thread, a blocking receiver and a deferred one alike.
  */
-#include <stdlib.h> // `calloc`, `free`, `malloc`
+#include <stdlib.h> // `calloc`, `free`
 #include <string.h> // `memset`
 
 #include "lib.h"
 
 #pragma region Calls
 
-/** Wraps the metric and connectivity a checkpoint froze. */
+/** Wraps the metric, connectivity, classes and sketch bytes a checkpoint froze. */
 static napi_value usearch_js_sequence_metadata_object(napi_env env, usearch_sequence_metadata_t const* metadata) {
-    static char const* const names[] = {"metric", "connectivity"};
+    static char const* const names[] = {"metric", "connectivity", "classes", "sketchBytes"};
     napi_value const values[] = {usearch_js_static_string(env, usearch_sequence_metric_name(metadata->metric)),
-                                 usearch_js_number(env, metadata->connectivity)};
+                                 usearch_js_number(env, metadata->connectivity),
+                                 usearch_js_number(env, metadata->classes),
+                                 usearch_js_number(env, metadata->sketch_bytes)};
     return usearch_js_object(env, usearch_js_table_size_(names), names, values);
 }
 
@@ -96,65 +98,45 @@ static napi_value usearch_js_sequence_adopt(napi_env env, usearch_outcome_t cons
     return instance;
 }
 
-/** Reads the optional substitution matrix, an @c Int8Array of 256 × 256 scores, and its gap cost;
- *  an absent matrix passes no weights. */
-static bool usearch_js_sequence_weights_from_value(napi_env env, napi_value matrix, napi_value gap,
-                                                   usearch_sequence_weights_t* weights, bool* given) {
+/** Reads the costs from two optional values: an @c Int8Array of 256 × 256 similarities between raw
+ *  bytes and the gap cost. The array is viewed, neither copied nor kept past the call.
+ *  @p costs is left @c NULL when neither is named, for the metric's own. */
+static bool usearch_js_sequence_costs_from_values(napi_env env, napi_value const* arguments,
+                                                  usearch_sequence_costs_t* values,
+                                                  usearch_sequence_costs_t const** costs) {
     napi_typedarray_type type = napi_uint8_array;
-    size_t elements = 0, gap_cost = 0;
+    size_t elements = 0;
     void* data = NULL;
     bool is_typedarray = false;
-    *given = false;
-    if (usearch_js_value_absent(env, matrix)) return true;
-    if (napi_is_typedarray(env, matrix, &is_typedarray) != napi_ok || !is_typedarray ||
-        napi_get_typedarray_info(env, matrix, &type, &elements, &data, NULL, NULL) != napi_ok ||
-        type != napi_int8_array || elements != 256 * 256)
-        return usearch_js_throw_field(env, "substitutionMatrix", "must be an Int8Array of 256 by 256 scores");
-    if (!usearch_js_size_from_value(env, gap, "gap", &gap_cost)) return false;
-    if (gap_cost > INT8_MAX) return usearch_js_throw_field(env, "gap", "must fit a signed byte");
-    weights->substitution_matrix = (int8_t const*)data;
-    weights->gap = (int8_t)gap_cost;
-    *given = true;
-    return true;
-}
-
-/** Reads the overlap kind's window widths, an array of byte counts, into a @c malloc-ed block;
- *  absent reads as none. */
-static bool usearch_js_sequence_widths_from_value(napi_env env, napi_value value, size_t** widths, size_t* count) {
-    bool is_array = false;
-    uint32_t length = 0;
-    *widths = NULL;
-    *count = 0;
-    if (usearch_js_value_absent(env, value)) return true;
-    if (napi_is_array(env, value, &is_array) != napi_ok || !is_array ||
-        napi_get_array_length(env, value, &length) != napi_ok)
-        return usearch_js_throw_field(env, "windowWidths", "must be an array of byte counts");
-    if (!length) return true;
-    *widths = (size_t*)malloc(length * sizeof(size_t));
-    if (!*widths) return usearch_js_throw(env, usearch_status_out_of_memory_k, "Could not gather the window widths");
-    for (uint32_t position = 0; position != length; ++position) {
-        napi_value element = NULL;
-        if (napi_get_element(env, value, position, &element) != napi_ok ||
-            !usearch_js_size_from_value(env, element, "windowWidths", &(*widths)[position])) {
-            free(*widths);
-            *widths = NULL;
-            return false;
-        }
+    int32_t gap = 0;
+    memset(values, 0, sizeof(*values));
+    *costs = NULL;
+    if (!usearch_js_value_absent(env, arguments[0])) {
+        if (napi_is_typedarray(env, arguments[0], &is_typedarray) != napi_ok || !is_typedarray ||
+            napi_get_typedarray_info(env, arguments[0], &type, &elements, &data, NULL, NULL) != napi_ok ||
+            type != napi_int8_array || elements != 256 * 256)
+            return usearch_js_throw_field(env, "similarities", "must be an Int8Array of 256 by 256 scores");
+        values->similarities = (int8_t const*)data;
+        *costs = values;
     }
-    *count = length;
+    if (!usearch_js_value_absent(env, arguments[1])) {
+        if (napi_get_value_int32(env, arguments[1], &gap) != napi_ok || gap < INT8_MIN || gap > INT8_MAX)
+            return usearch_js_throw_field(env, "gap", "must fit a signed byte");
+        values->gap = (int8_t)gap;
+        *costs = values;
+    }
     return true;
 }
 
-/** <tt>initRam(metric, substitutionMatrix, gap, windowWidths, connectivity, valuesPerKey,
- *  memoryDomains, cpuClassCeiling)</tt> and <tt>initVram(..., devices, gpuClassCeiling)</tt> → an
- *  empty, mutable index. The weights are read only during the call alone. */
+/** <tt>initRam(metric, similarities, gap, connectivity, sketchBytes, valuesPerKey, memoryDomains,
+ *  cpuClassCeiling)</tt> and <tt>initVram(..., devices, gpuClassCeiling)</tt> → an empty, mutable index.
+ *  The costs are read during the call alone. */
 static napi_value usearch_js_sequence_init(napi_env env, napi_callback_info info, usearch_residency_t residency) {
     napi_value arguments[8];
-    size_t connectivity = 0, values_per_key = 0, widths_count = 0;
-    size_t* widths = NULL;
+    size_t connectivity = 0, sketch_bytes = 0, values_per_key = 0;
     usearch_sequence_metric_t metric = usearch_sequence_metric_unknown_k;
-    usearch_sequence_weights_t weights = {NULL, 0};
-    bool weighted = false;
+    usearch_sequence_costs_t values;
+    usearch_sequence_costs_t const* costs;
     usearch_cpu_class_t cpu_class_ceiling = usearch_cpu_class_unknown_k;
     usearch_gpu_class_t gpu_class_ceiling = usearch_gpu_class_unknown_k;
     int32_t* ordinals = NULL;
@@ -164,16 +146,13 @@ static napi_value usearch_js_sequence_init(napi_env env, napi_callback_info info
         !(vram ? usearch_js_gpu_class_from_value(env, arguments[7], &gpu_class_ceiling)
                : usearch_js_cpu_class_from_value(env, arguments[7], &cpu_class_ceiling)) ||
         !usearch_js_sequence_metric_from_value(env, arguments[0], "metric", &metric) ||
-        !usearch_js_sequence_weights_from_value(env, arguments[1], arguments[2], &weights, &weighted) ||
-        !usearch_js_size_from_value(env, arguments[4], "connectivity", &connectivity) ||
+        !usearch_js_sequence_costs_from_values(env, arguments + 1, &values, &costs) ||
+        !usearch_js_size_from_value(env, arguments[3], "connectivity", &connectivity) ||
+        !usearch_js_size_from_value(env, arguments[4], "sketchBytes", &sketch_bytes) ||
         !usearch_js_size_from_value(env, arguments[5], "valuesPerKey", &values_per_key) ||
-        !usearch_js_sequence_widths_from_value(env, arguments[3], &widths, &widths_count))
+        !usearch_js_ordinals_from_value(env, arguments[6], vram ? "devices" : "memoryDomains", &ordinals,
+                                        &ordinals_count))
         return NULL;
-    if (!usearch_js_ordinals_from_value(env, arguments[6], vram ? "devices" : "memoryDomains", &ordinals,
-                                        &ordinals_count)) {
-        free(widths);
-        return NULL;
-    }
 
     usearch_sequence_index_t handle = NULL;
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
@@ -181,10 +160,9 @@ static napi_value usearch_js_sequence_init(napi_env env, napi_callback_info info
         usearch_sequence_init_vram_t init = {.index = &handle,
                                              .outcome = &outcome,
                                              .metric = metric,
-                                             .weights = weighted ? &weights : NULL,
-                                             .window_widths = widths,
-                                             .window_widths_count = widths_count,
+                                             .costs = costs,
                                              .connectivity = connectivity,
+                                             .sketch_bytes = sketch_bytes,
                                              .values_per_key = values_per_key,
                                              .vram = {ordinals, ordinals_count, 0, gpu_class_ceiling}};
         usearch_sequence_init_vram(&init);
@@ -193,16 +171,14 @@ static napi_value usearch_js_sequence_init(napi_env env, napi_callback_info info
         usearch_sequence_init_ram_t init = {.index = &handle,
                                             .outcome = &outcome,
                                             .metric = metric,
-                                            .weights = weighted ? &weights : NULL,
-                                            .window_widths = widths,
-                                            .window_widths_count = widths_count,
+                                            .costs = costs,
                                             .connectivity = connectivity,
+                                            .sketch_bytes = sketch_bytes,
                                             .values_per_key = values_per_key,
                                             .ram = {ordinals, ordinals_count, 0, cpu_class_ceiling}};
         usearch_sequence_init_ram(&init);
     }
     free(ordinals);
-    free(widths);
     return usearch_js_sequence_adopt(env, &outcome, handle);
 }
 
@@ -214,13 +190,13 @@ static napi_value usearch_js_sequence_init_vram(napi_env env, napi_callback_info
     return usearch_js_sequence_init(env, info, usearch_residency_vram_k);
 }
 
-/** <tt>loadRam(path, executor, memoryDomains, valuesPerKey, cpuClassCeiling, substitutionMatrix,
- *  gap)</tt> and <tt>loadVram(path, executor, devices, valuesPerKey, gpuClassCeiling,
- *  substitutionMatrix, gap)</tt> → a new, mutable index; @c Buffer twins take any @c TypedArray. */
+/** <tt>loadRam(path, executor, memoryDomains, valuesPerKey, cpuClassCeiling)</tt> and
+ *  <tt>loadVram(path, executor, devices, valuesPerKey, gpuClassCeiling)</tt> → a new, mutable index;
+ *  @c Buffer twins take any @c TypedArray. */
 static napi_value usearch_js_sequence_load(napi_env env, napi_callback_info info, usearch_residency_t residency,
                                            usearch_js_source_t source) {
-    napi_value arguments[7];
-    if (!usearch_js_static_arguments(env, info, 7, arguments)) return NULL;
+    napi_value arguments[5];
+    if (!usearch_js_static_arguments(env, info, 5, arguments)) return NULL;
 
     char* path = NULL;
     void* buffer = NULL;
@@ -229,8 +205,6 @@ static napi_value usearch_js_sequence_load(napi_env env, napi_callback_info info
     size_t values_per_key = 0;
     int32_t* ordinals = NULL;
     size_t ordinals_count = 0;
-    usearch_sequence_weights_t weights = {NULL, 0};
-    bool weighted = false;
     usearch_cpu_class_t cpu_class_ceiling = usearch_cpu_class_unknown_k;
     usearch_gpu_class_t gpu_class_ceiling = usearch_gpu_class_unknown_k;
     bool const vram = residency == usearch_residency_vram_k;
@@ -242,7 +216,6 @@ static napi_value usearch_js_sequence_load(napi_env env, napi_callback_info info
         !usearch_js_size_from_value(env, arguments[3], "valuesPerKey", &values_per_key) ||
         !(vram ? usearch_js_gpu_class_from_value(env, arguments[4], &gpu_class_ceiling)
                : usearch_js_cpu_class_from_value(env, arguments[4], &cpu_class_ceiling)) ||
-        !usearch_js_sequence_weights_from_value(env, arguments[5], arguments[6], &weights, &weighted) ||
         !usearch_js_ordinals_from_value(env, arguments[2], vram ? "devices" : "memoryDomains", &ordinals,
                                         &ordinals_count)) {
         free(path);
@@ -251,7 +224,6 @@ static napi_value usearch_js_sequence_load(napi_env env, napi_callback_info info
 
     usearch_sequence_index_t handle = NULL;
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
-    usearch_sequence_weights_t const* const passed = weighted ? &weights : NULL;
     usearch_ram_options_t const ram = {ordinals, ordinals_count, 0, cpu_class_ceiling};
     usearch_vram_options_t const vram_options = {ordinals, ordinals_count, 0, gpu_class_ceiling};
     if (vram && source == usearch_js_source_path_k) {
@@ -260,8 +232,7 @@ static napi_value usearch_js_sequence_load(napi_env env, napi_callback_info info
                                              .outcome = &outcome,
                                              .path = bytes,
                                              .vram = vram_options,
-                                             .values_per_key = values_per_key,
-                                             .weights = passed};
+                                             .values_per_key = values_per_key};
         usearch_sequence_load_vram(&load);
     }
     else if (vram) {
@@ -270,8 +241,7 @@ static napi_value usearch_js_sequence_load(napi_env env, napi_callback_info info
                                                     .outcome = &outcome,
                                                     .buffer = bytes,
                                                     .vram = vram_options,
-                                                    .values_per_key = values_per_key,
-                                                    .weights = passed};
+                                                    .values_per_key = values_per_key};
         usearch_sequence_load_vram_buffer(&load);
     }
     else if (source == usearch_js_source_path_k) {
@@ -280,8 +250,7 @@ static napi_value usearch_js_sequence_load(napi_env env, napi_callback_info info
                                             .outcome = &outcome,
                                             .path = bytes,
                                             .ram = ram,
-                                            .values_per_key = values_per_key,
-                                            .weights = passed};
+                                            .values_per_key = values_per_key};
         usearch_sequence_load_ram(&load);
     }
     else {
@@ -290,8 +259,7 @@ static napi_value usearch_js_sequence_load(napi_env env, napi_callback_info info
                                                    .outcome = &outcome,
                                                    .buffer = bytes,
                                                    .ram = ram,
-                                                   .values_per_key = values_per_key,
-                                                   .weights = passed};
+                                                   .values_per_key = values_per_key};
         usearch_sequence_load_ram_buffer(&load);
     }
     free(ordinals);
@@ -315,16 +283,13 @@ static napi_value usearch_js_sequence_load_vram_buffer(napi_env env, napi_callba
     return usearch_js_sequence_load(env, info, usearch_residency_vram_k, usearch_js_source_buffer_k);
 }
 
-/** <tt>viewRam(path, cpuClassCeiling, substitutionMatrix, gap)</tt> → a read-only index serving the
+/** <tt>viewRam(path, cpuClassCeiling)</tt> → a read-only index serving the
  *  checkpoint through a memory mapping. */
 static napi_value usearch_js_sequence_view_ram(napi_env env, napi_callback_info info) {
-    napi_value arguments[4];
+    napi_value arguments[2];
     usearch_sequence_view_ram_t view_ram = {0};
-    usearch_sequence_weights_t weights = {NULL, 0};
-    bool weighted = false;
-    if (!usearch_js_static_arguments(env, info, 4, arguments) ||
-        !usearch_js_cpu_class_from_value(env, arguments[1], &view_ram.ram.cpu_class_ceiling) ||
-        !usearch_js_sequence_weights_from_value(env, arguments[2], arguments[3], &weights, &weighted))
+    if (!usearch_js_static_arguments(env, info, 2, arguments) ||
+        !usearch_js_cpu_class_from_value(env, arguments[1], &view_ram.ram.cpu_class_ceiling))
         return NULL;
     char* const path = usearch_js_string_from_value(env, arguments[0], "path", &view_ram.path);
     if (!path) return NULL;
@@ -333,25 +298,21 @@ static napi_value usearch_js_sequence_view_ram(napi_env env, napi_callback_info 
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
     view_ram.index = &handle;
     view_ram.outcome = &outcome;
-    view_ram.weights = weighted ? &weights : NULL;
     usearch_sequence_view_ram(&view_ram);
     free(path);
     return usearch_js_sequence_adopt(env, &outcome, handle);
 }
 
-/** <tt>viewNvme(path, executor, paths, cpuClassCeiling, substitutionMatrix, gap)</tt> → a read-only
+/** <tt>viewNvme(path, executor, paths, cpuClassCeiling)</tt> → a read-only
  *  index served from NVMe drives. */
 static napi_value usearch_js_sequence_view_nvme(napi_env env, napi_callback_info info) {
-    napi_value arguments[6];
+    napi_value arguments[4];
     usearch_sequence_view_nvme_t view_nvme = {0};
     usearch_js_paths_arena_t paths = {NULL, 0};
     usearch_cpu_class_t cpu_class_ceiling = usearch_cpu_class_unknown_k;
-    usearch_sequence_weights_t weights = {NULL, 0};
-    bool weighted = false;
-    if (!usearch_js_static_arguments(env, info, 6, arguments) ||
+    if (!usearch_js_static_arguments(env, info, 4, arguments) ||
         !usearch_js_executor_from_value(env, arguments[1], &view_nvme.executor) ||
-        !usearch_js_cpu_class_from_value(env, arguments[3], &cpu_class_ceiling) ||
-        !usearch_js_sequence_weights_from_value(env, arguments[4], arguments[5], &weights, &weighted))
+        !usearch_js_cpu_class_from_value(env, arguments[3], &cpu_class_ceiling))
         return NULL;
     char* const path = usearch_js_string_from_value(env, arguments[0], "path", &view_nvme.path);
     if (!path || !usearch_js_paths_from_value(env, arguments[2], "paths", &paths)) {
@@ -364,7 +325,6 @@ static napi_value usearch_js_sequence_view_nvme(napi_env env, napi_callback_info
     view_nvme.index = &handle;
     view_nvme.outcome = &outcome;
     view_nvme.nvme = (usearch_nvme_options_t) {paths.views, paths.count, cpu_class_ceiling};
-    view_nvme.weights = weighted ? &weights : NULL;
     usearch_sequence_view_nvme(&view_nvme);
     usearch_js_paths_release(&paths);
     free(path);

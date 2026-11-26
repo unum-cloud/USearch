@@ -1,5 +1,5 @@
-//! Sequence Search over byte strings, UTF-8 text, DNA, RNA and proteins, under edit distances and
-//! alignments.
+//! Sequence Search over byte strings, UTF-8 text, DNA, RNA and proteins, under global alignment,
+//! window containment and shifted overlap.
 //!
 //! Sequences cross as one [`Tape`]: their bytes end to end, and one more offset than entries, as
 //! an Apache Arrow `Binary` or `LargeBinary` column lays them out. Every verb comes from
@@ -48,22 +48,16 @@ pub type usearch_sequence_refine_plan_t = *mut c_void;
 pub type usearch_sequence_reshard_plan_t = *mut c_void;
 pub type usearch_sequence_metric_t = c_int;
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct usearch_sequence_weights_t {
-    pub substitution_matrix: *const i8,
-    pub gap: i8,
-}
+pub type usearch_sequence_costs_t = SequenceCosts<'static>;
 
 #[repr(C)]
 pub struct usearch_sequence_init_ram_t {
     pub index: *mut usearch_sequence_index_t,
     pub outcome: *mut usearch_outcome_t,
     pub metric: usearch_sequence_metric_t,
-    pub weights: *const usearch_sequence_weights_t,
-    pub window_widths: *const usize,
-    pub window_widths_count: usize,
+    pub costs: *const usearch_sequence_costs_t,
     pub connectivity: usize,
+    pub sketch_bytes: usize,
     pub values_per_key: usize,
     pub ram: usearch_ram_options_t,
 }
@@ -73,10 +67,9 @@ pub struct usearch_sequence_init_vram_t {
     pub index: *mut usearch_sequence_index_t,
     pub outcome: *mut usearch_outcome_t,
     pub metric: usearch_sequence_metric_t,
-    pub weights: *const usearch_sequence_weights_t,
-    pub window_widths: *const usize,
-    pub window_widths_count: usize,
+    pub costs: *const usearch_sequence_costs_t,
     pub connectivity: usize,
+    pub sketch_bytes: usize,
     pub values_per_key: usize,
     pub vram: usearch_vram_options_t,
 }
@@ -90,8 +83,8 @@ pub struct usearch_sequence_load_ram_t {
     pub path: usearch_bytes_view_t,
     pub ram: usearch_ram_options_t,
     pub connectivity: usize,
+    pub sketch_bytes: usize,
     pub values_per_key: usize,
-    pub weights: *const usearch_sequence_weights_t,
     pub progress: usearch_progress_t,
 }
 
@@ -104,8 +97,8 @@ pub struct usearch_sequence_load_ram_buffer_t {
     pub buffer: usearch_bytes_view_t,
     pub ram: usearch_ram_options_t,
     pub connectivity: usize,
+    pub sketch_bytes: usize,
     pub values_per_key: usize,
-    pub weights: *const usearch_sequence_weights_t,
     pub progress: usearch_progress_t,
 }
 
@@ -118,8 +111,8 @@ pub struct usearch_sequence_load_vram_t {
     pub path: usearch_bytes_view_t,
     pub vram: usearch_vram_options_t,
     pub connectivity: usize,
+    pub sketch_bytes: usize,
     pub values_per_key: usize,
-    pub weights: *const usearch_sequence_weights_t,
     pub progress: usearch_progress_t,
 }
 
@@ -132,8 +125,8 @@ pub struct usearch_sequence_load_vram_buffer_t {
     pub buffer: usearch_bytes_view_t,
     pub vram: usearch_vram_options_t,
     pub connectivity: usize,
+    pub sketch_bytes: usize,
     pub values_per_key: usize,
-    pub weights: *const usearch_sequence_weights_t,
     pub progress: usearch_progress_t,
 }
 
@@ -142,7 +135,6 @@ pub struct usearch_sequence_view_ram_t {
     pub index: *mut usearch_sequence_index_t,
     pub outcome: *mut usearch_outcome_t,
     pub path: usearch_bytes_view_t,
-    pub weights: *const usearch_sequence_weights_t,
     pub ram: usearch_ram_options_t,
 }
 
@@ -154,7 +146,7 @@ pub struct usearch_sequence_view_nvme_t {
     pub completion: usearch_completion_t,
     pub path: usearch_bytes_view_t,
     pub nvme: usearch_nvme_options_t,
-    pub weights: *const usearch_sequence_weights_t,
+    pub sketch_bytes: usize,
 }
 
 #[repr(C)]
@@ -236,6 +228,7 @@ pub struct usearch_sequence_search_t {
     pub expansion_factor: usize,
     pub traversal: usearch_traversal_t,
     pub predicate: usearch_predicate_t,
+    pub hints: *const usearch_matches_view_t,
     pub progress: usearch_progress_t,
     pub stats: *mut usearch_traversal_stats_t,
 }
@@ -436,30 +429,48 @@ unsafe extern "C" {
 
 // region: Geometry
 
-/// The sequence kinds: edit distances over bytes or code points, a weighted alignment, and the
-/// overlap of fixed-width windows.
+/// The sequence metrics: each names what the sequences are, the form they are stored in, and the
+/// score ranking them.
+///
+/// Every metric stores a sequence folded, and `get` returns the stored form, never the bytes an
+/// insertion passed: packed class codes for a protein alignment, one class code a byte for a DNA
+/// overlap, and case-folded UTF-8 for a containment.
 #[repr(i32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
 #[non_exhaustive]
 pub enum SequenceMetric {
-    /// Edits between two byte strings, each insertion, deletion or substitution counting one.
+    /// Global alignment of proteins with linear gap costs: BLOSUM62 with a gap of 7 over the 20
+    /// amino acids unless the index names its own [`SequenceCosts`].
+    ///
+    /// Both sequences are aligned end to end over the classes the costs fold bytes into, and every
+    /// unaligned symbol is charged the gap cost, so a score is quadratic in time. A stored
+    /// sequence reads back as its class codes, five bits apiece, little-endian behind one byte
+    /// counting the slots the last bytes leave unused.
     #[default]
-    LevenshteinBytes = 1,
-    /// Edits between two UTF-8 strings, counted over code points rather than bytes.
-    LevenshteinUtf8 = 2,
-    /// The global alignment score under [`SequenceWeights`], reported as a distance.
-    NeedlemanWunsch = 3,
-    /// The share of one side's fixed-width windows the other side misses.
-    Overlap = 4,
+    ProteinAlignment = 1,
+    /// Shifted overlap of DNA or RNA: the cost of aligning the two sequences where one slides over
+    /// the other, at the shift most windows vote for, on either strand.
+    ///
+    /// Bytes fold into the four classes of A, C, G and T in either case, U read as T, under costs
+    /// that charge a transition half a transversion and a gap of 2, unless the index names its
+    /// own. The query also scores as its reverse complement, and the lower distance counts. A
+    /// stored sequence reads back as its class codes, one byte apiece.
+    DnaOverlap = 2,
+    /// Window containment of UTF-8 text: the share of the query's distinct windows the stored side
+    /// lacks, whatever the case.
+    ///
+    /// A text is case-folded as Unicode folds it before it is stored or scored, which may lengthen
+    /// it up to three times. Asymmetric, and exact at every radius. A stored text reads back
+    /// folded. Takes no costs.
+    Utf8Containment = 3,
 }
 
 impl SequenceMetric {
     fn from_raw(value: usearch_sequence_metric_t) -> Option<Self> {
         let metric = match value {
-            1 => SequenceMetric::LevenshteinBytes,
-            2 => SequenceMetric::LevenshteinUtf8,
-            3 => SequenceMetric::NeedlemanWunsch,
-            4 => SequenceMetric::Overlap,
+            1 => SequenceMetric::ProteinAlignment,
+            2 => SequenceMetric::DnaOverlap,
+            3 => SequenceMetric::Utf8Containment,
             _ => return None,
         };
         Some(metric)
@@ -482,48 +493,39 @@ impl FromStr for SequenceMetric {
     }
 }
 
-/// The weights [`SequenceMetric::NeedlemanWunsch`] scores with; the Levenshtein kinds refuse any.
-#[derive(Clone, Copy, Debug)]
-pub struct SequenceWeights<'matrix> {
-    /// Signed scores of every byte against every byte, row-major.
-    pub substitution_matrix: &'matrix [[i8; 256]; 256],
+/// How alike two bytes are and the cost of leaving one unaligned, where an index scores by other
+/// costs than its metric's own. The similarities fold bytes into at most 32 classes, and a
+/// checkpoint records the classes and costs, so loads and views take none. A DNA overlap needs
+/// costs folding bytes into exactly the four classes of A, C, G and T.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SequenceCosts<'tables> {
+    /// Signed similarities of every raw byte against every raw byte, row-major, so `A` against `C`
+    /// sits at `[b'A'][b'C']`.
+    pub similarities: Option<&'tables [[i8; 256]; 256]>,
     /// Cost of one unaligned symbol.
     pub gap: i8,
 }
 
-impl SequenceWeights<'_> {
-    fn lower(&self) -> usearch_sequence_weights_t {
-        usearch_sequence_weights_t { substitution_matrix: self.substitution_matrix.as_ptr().cast(), gap: self.gap }
-    }
-}
-
-/// Lowers optional weights into `slot`, answering the pointer a call reads them through.
-fn weights_slot(
-    weights: Option<&SequenceWeights>,
-    slot: &mut usearch_sequence_weights_t,
-) -> *const usearch_sequence_weights_t {
-    match weights {
-        Some(weights) => {
-            *slot = weights.lower();
-            slot
-        }
-        None => ptr::null(),
-    }
+/// The pointer a call reads `costs` through, null for the metric's own.
+fn costs_pointer(costs: Option<&SequenceCosts>) -> *const usearch_sequence_costs_t {
+    costs.map_or(ptr::null(), |costs| ptr::from_ref(costs).cast())
 }
 
 /// Construction options of a sequence index; [`SequenceIndex::init_ram`] and
 /// [`SequenceIndex::init_vram`] both take it.
 #[derive(Clone, Debug, Default)]
 pub struct SequenceOptions<'options> {
-    /// The kind every pair is scored under.
+    /// What the sequences are and the score ranking every pair.
     pub metric: SequenceMetric,
-    /// The weights an alignment kind needs; `None` for the Levenshtein kinds, which refuse any.
-    pub weights: Option<SequenceWeights<'options>>,
-    /// Window widths in bytes for the overlap kind, which needs at least one; every other kind
-    /// refuses any.
-    pub window_widths: &'options [usize],
+    /// The costs to score by; `None` for the metric's own, and refused for
+    /// [`SequenceMetric::Utf8Containment`].
+    pub costs: Option<SequenceCosts<'options>>,
     /// Graph links per node; zero derives it.
     pub connectivity: usize,
+    /// Bytes of the sketch in front of each stored sequence, a multiple of four; zero takes the
+    /// metric's default, and [`SequenceMetric::DnaOverlap`] keeps none.
+    pub sketch_bytes: usize,
     /// Upper bound on entries sharing one key; zero is unbounded.
     pub values_per_key: usize,
     /// The newest class dispatch may pick, intersected with what the machine runs, so a class the
@@ -538,10 +540,14 @@ pub struct SequenceOptions<'options> {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
 #[non_exhaustive]
 pub struct SequenceMetadata {
-    /// The kind the checkpoint scores with.
+    /// The metric the checkpoint scores with.
     pub metric: SequenceMetric,
     /// Connections per node the graph was built with.
     pub connectivity: usize,
+    /// Classes the recorded costs folded bytes into; zero for a containment.
+    pub classes: usize,
+    /// Bytes of the sketch in front of each stored sequence; zero when the metric keeps none.
+    pub sketch_bytes: usize,
 }
 
 /// A live index's frozen metadata and current counters, each read once, so under concurrent
@@ -616,8 +622,6 @@ pub struct SequenceLoadRamConfig<'config> {
     pub cpu_class_ceiling: Option<CPUClass>,
     /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     pub values_per_key: usize,
-    /// The weights an alignment kind needs, which no checkpoint records.
-    pub weights: Option<SequenceWeights<'config>>,
     /// Reports the shards placed and stops wherever it says to; a stopped load creates no index.
     pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
@@ -632,7 +636,6 @@ impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for Sequen
             memory_domains: &[],
             cpu_class_ceiling: None,
             values_per_key: 0,
-            weights: None,
             progress: None,
             progress_steps: 0,
         }
@@ -652,8 +655,6 @@ pub struct SequenceLoadVramConfig<'config> {
     pub gpu_class_ceiling: Option<GPUClass>,
     /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     pub values_per_key: usize,
-    /// The weights an alignment kind needs, which no checkpoint records.
-    pub weights: Option<SequenceWeights<'config>>,
     /// Reports the shards placed and stops wherever it says to; a stopped load creates no index.
     pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
@@ -668,7 +669,6 @@ impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for Sequen
             devices: &[],
             gpu_class_ceiling: None,
             values_per_key: 0,
-            weights: None,
             progress: None,
             progress_steps: 0,
         }
@@ -689,8 +689,6 @@ pub struct SequenceLoadRamBufferConfig<'config> {
     pub cpu_class_ceiling: Option<CPUClass>,
     /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     pub values_per_key: usize,
-    /// The weights an alignment kind needs, which no checkpoint records.
-    pub weights: Option<SequenceWeights<'config>>,
     /// Reports the bytes placed and stops wherever it says to; a stopped load creates no index.
     pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
@@ -705,7 +703,6 @@ impl<'config> From<&'config [u8]> for SequenceLoadRamBufferConfig<'config> {
             memory_domains: &[],
             cpu_class_ceiling: None,
             values_per_key: 0,
-            weights: None,
             progress: None,
             progress_steps: 0,
         }
@@ -731,8 +728,6 @@ pub struct SequenceLoadVramBufferConfig<'config> {
     pub gpu_class_ceiling: Option<GPUClass>,
     /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     pub values_per_key: usize,
-    /// The weights an alignment kind needs, which no checkpoint records.
-    pub weights: Option<SequenceWeights<'config>>,
     /// Reports the bytes placed and stops wherever it says to; a stopped load creates no index.
     pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
@@ -747,7 +742,6 @@ impl<'config> From<&'config [u8]> for SequenceLoadVramBufferConfig<'config> {
             devices: &[],
             gpu_class_ceiling: None,
             values_per_key: 0,
-            weights: None,
             progress: None,
             progress_steps: 0,
         }
@@ -771,19 +765,11 @@ pub struct SequenceViewNvmeConfig<'config> {
     /// The newest class dispatch may pick, intersected with what the machine runs, so a class the
     /// machine lacks narrows rather than refuses; `None` means no ceiling.
     pub cpu_class_ceiling: Option<CPUClass>,
-    /// The weights an alignment kind needs, which no checkpoint records.
-    pub weights: Option<SequenceWeights<'config>>,
 }
 
 impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for SequenceViewNvmeConfig<'config> {
     fn from(path: &'config Location) -> Self {
-        SequenceViewNvmeConfig {
-            path: path.as_ref(),
-            executor: None,
-            paths: &[],
-            cpu_class_ceiling: None,
-            weights: None,
-        }
+        SequenceViewNvmeConfig { path: path.as_ref(), executor: None, paths: &[], cpu_class_ceiling: None }
     }
 }
 
@@ -1051,16 +1037,14 @@ impl SequenceIndex {
     pub fn init_ram(options: &SequenceOptions, memory_domains: &[i32]) -> Result<Self> {
         let mut index = SequenceIndex::null();
         let mut outcome = usearch_outcome_t::default();
-        let mut weights = usearch_sequence_weights_t { substitution_matrix: ptr::null(), gap: 0 };
         unsafe {
             usearch_sequence_init_ram(&mut usearch_sequence_init_ram_t {
                 index: &mut index.handle,
                 outcome: &mut outcome,
                 metric: options.metric as usearch_sequence_metric_t,
-                weights: weights_slot(options.weights.as_ref(), &mut weights),
-                window_widths: options.window_widths.as_ptr(),
-                window_widths_count: options.window_widths.len(),
+                costs: costs_pointer(options.costs.as_ref()),
                 connectivity: options.connectivity,
+                sketch_bytes: options.sketch_bytes,
                 values_per_key: options.values_per_key,
                 ram: ram_options(memory_domains, options.cpu_class_ceiling),
             })
@@ -1073,16 +1057,14 @@ impl SequenceIndex {
     pub fn init_vram(options: &SequenceOptions, devices: &[i32]) -> Result<Self> {
         let mut index = SequenceIndex::null();
         let mut outcome = usearch_outcome_t::default();
-        let mut weights = usearch_sequence_weights_t { substitution_matrix: ptr::null(), gap: 0 };
         unsafe {
             usearch_sequence_init_vram(&mut usearch_sequence_init_vram_t {
                 index: &mut index.handle,
                 outcome: &mut outcome,
                 metric: options.metric as usearch_sequence_metric_t,
-                weights: weights_slot(options.weights.as_ref(), &mut weights),
-                window_widths: options.window_widths.as_ptr(),
-                window_widths_count: options.window_widths.len(),
+                costs: costs_pointer(options.costs.as_ref()),
                 connectivity: options.connectivity,
+                sketch_bytes: options.sketch_bytes,
                 values_per_key: options.values_per_key,
                 vram: vram_options(devices, options.gpu_class_ceiling),
             })
@@ -1095,7 +1077,6 @@ impl SequenceIndex {
         let config = config.into();
         let mut index = SequenceIndex::null();
         let mut outcome = usearch_outcome_t::default();
-        let mut weights = usearch_sequence_weights_t { substitution_matrix: ptr::null(), gap: 0 };
         let progress = lower_progress(&config.progress, config.progress_steps);
         unsafe {
             usearch_sequence_load_ram(&mut usearch_sequence_load_ram_t {
@@ -1106,8 +1087,8 @@ impl SequenceIndex {
                 path: path_view(config.path)?,
                 ram: ram_options(config.memory_domains, config.cpu_class_ceiling),
                 connectivity: 0,
+                sketch_bytes: 0,
                 values_per_key: config.values_per_key,
-                weights: weights_slot(config.weights.as_ref(), &mut weights),
                 progress,
             })
         };
@@ -1119,7 +1100,6 @@ impl SequenceIndex {
         let config = config.into();
         let mut index = SequenceIndex::null();
         let mut outcome = usearch_outcome_t::default();
-        let mut weights = usearch_sequence_weights_t { substitution_matrix: ptr::null(), gap: 0 };
         let progress = lower_progress(&config.progress, config.progress_steps);
         unsafe {
             usearch_sequence_load_vram(&mut usearch_sequence_load_vram_t {
@@ -1130,8 +1110,8 @@ impl SequenceIndex {
                 path: path_view(config.path)?,
                 vram: vram_options(config.devices, config.gpu_class_ceiling),
                 connectivity: 0,
+                sketch_bytes: 0,
                 values_per_key: config.values_per_key,
-                weights: weights_slot(config.weights.as_ref(), &mut weights),
                 progress,
             })
         };
@@ -1143,7 +1123,6 @@ impl SequenceIndex {
         let config = config.into();
         let mut index = SequenceIndex::null();
         let mut outcome = usearch_outcome_t::default();
-        let mut weights = usearch_sequence_weights_t { substitution_matrix: ptr::null(), gap: 0 };
         let progress = lower_progress(&config.progress, config.progress_steps);
         unsafe {
             usearch_sequence_load_ram_buffer(&mut usearch_sequence_load_ram_buffer_t {
@@ -1154,8 +1133,8 @@ impl SequenceIndex {
                 buffer: config.buffer.into(),
                 ram: ram_options(config.memory_domains, config.cpu_class_ceiling),
                 connectivity: 0,
+                sketch_bytes: 0,
                 values_per_key: config.values_per_key,
-                weights: weights_slot(config.weights.as_ref(), &mut weights),
                 progress,
             })
         };
@@ -1167,7 +1146,6 @@ impl SequenceIndex {
         let config = config.into();
         let mut index = SequenceIndex::null();
         let mut outcome = usearch_outcome_t::default();
-        let mut weights = usearch_sequence_weights_t { substitution_matrix: ptr::null(), gap: 0 };
         let progress = lower_progress(&config.progress, config.progress_steps);
         unsafe {
             usearch_sequence_load_vram_buffer(&mut usearch_sequence_load_vram_buffer_t {
@@ -1178,8 +1156,8 @@ impl SequenceIndex {
                 buffer: config.buffer.into(),
                 vram: vram_options(config.devices, config.gpu_class_ceiling),
                 connectivity: 0,
+                sketch_bytes: 0,
                 values_per_key: config.values_per_key,
-                weights: weights_slot(config.weights.as_ref(), &mut weights),
                 progress,
             })
         };
@@ -1188,16 +1166,14 @@ impl SequenceIndex {
 
     /// Serves a checkpoint in place through a memory mapping, read-only; the files must stay
     /// unmodified while it lives.
-    pub fn view_ram(path: impl AsRef<Path>, weights: Option<&SequenceWeights>) -> Result<Self> {
+    pub fn view_ram(path: impl AsRef<Path>) -> Result<Self> {
         let mut index = SequenceIndex::null();
         let mut outcome = usearch_outcome_t::default();
-        let mut lowered = usearch_sequence_weights_t { substitution_matrix: ptr::null(), gap: 0 };
         unsafe {
             usearch_sequence_view_ram(&mut usearch_sequence_view_ram_t {
                 index: &mut index.handle,
                 outcome: &mut outcome,
                 path: path_view(path.as_ref())?,
-                weights: weights_slot(weights, &mut lowered),
                 ram: ram_options(&[], None),
             })
         };
@@ -1210,7 +1186,6 @@ impl SequenceIndex {
         let views = path_views(config.paths)?;
         let mut index = SequenceIndex::null();
         let mut outcome = usearch_outcome_t::default();
-        let mut weights = usearch_sequence_weights_t { substitution_matrix: ptr::null(), gap: 0 };
         unsafe {
             usearch_sequence_view_nvme(&mut usearch_sequence_view_nvme_t {
                 index: &mut index.handle,
@@ -1219,7 +1194,7 @@ impl SequenceIndex {
                 completion: usearch_completion_blocking_k,
                 path: path_view(config.path)?,
                 nvme: nvme_options(&views, config.cpu_class_ceiling),
-                weights: weights_slot(config.weights.as_ref(), &mut weights),
+                sketch_bytes: 0,
             })
         };
         check(outcome).map(|()| index)
@@ -1909,6 +1884,7 @@ impl<'arena, Offset: TapeOffset> Calling for SequenceSearch<'_, 'arena, Offset> 
             expansion_factor: config.expansion_factor,
             traversal: config.traversal as usearch_traversal_t,
             predicate: lower_predicate(&config.predicate),
+            hints: ptr::null(),
             progress: lower_progress(&config.progress, config.progress_steps),
             stats: output_slot(&mut config.stats),
         }
@@ -2171,21 +2147,17 @@ mod tests {
 
     #[test]
     fn init_ram_starts_empty_and_keeps_the_metric() {
-        let options = SequenceOptions { metric: SequenceMetric::LevenshteinUtf8, ..SequenceOptions::default() };
+        let options = SequenceOptions { metric: SequenceMetric::DnaOverlap, ..SequenceOptions::default() };
         let described = SequenceIndex::init_ram(&options, &[]).unwrap().describe().unwrap();
         assert_eq!(described.size, 0);
-        assert_eq!(described.metadata.metric, SequenceMetric::LevenshteinUtf8);
+        assert_eq!(described.metadata.metric, SequenceMetric::DnaOverlap);
+        assert_eq!(described.metadata.classes, 4);
         assert_eq!(described.gpu_class(), "unknown", "a host index names no GPU class");
     }
 
     #[test]
     fn spells_every_metric_back() {
-        for metric in [
-            SequenceMetric::LevenshteinBytes,
-            SequenceMetric::LevenshteinUtf8,
-            SequenceMetric::NeedlemanWunsch,
-            SequenceMetric::Overlap,
-        ] {
+        for metric in [SequenceMetric::ProteinAlignment, SequenceMetric::DnaOverlap, SequenceMetric::Utf8Containment] {
             assert_eq!(metric.to_string().parse(), Ok(metric), "the library spells it back");
         }
         assert!("hamming".parse::<SequenceMetric>().is_err());
@@ -2208,15 +2180,14 @@ mod tests {
     /// around it and its closing `Ok(())` differ.
     #[test]
     fn readme_quickstart() -> Result<()> {
-        let options = SequenceOptions { metric: SequenceMetric::LevenshteinUtf8, ..SequenceOptions::default() };
+        let options = SequenceOptions { metric: SequenceMetric::Utf8Containment, ..SequenceOptions::default() };
         let index = SequenceIndex::init_ram(&options, &[])?;
-        let words = Tape::of(["kitten", "sitting", "mitten"]);
+        let words = Tape::of(["The Quick Brown Fox", "jumps over the lazy dog", "a single step"]);
         index.insert([Key::from(1u64), Key::from(2u64), Key::from(3u64)], words)?;
 
         let mut arena = Arena::new()?;
-        let matches = index.search(Tape::of(["sittin"]), 1, &mut arena)?;
+        let matches = index.search(Tape::of(["LAZY DOG"]), 1, &mut arena)?;
         assert_eq!(matches.query(0)?.keys, [Key::from(2u64)]);
-        assert_eq!(matches.query(0)?.distances[0], 1.0); // one edit away
         Ok(())
     }
 
@@ -2224,18 +2195,81 @@ mod tests {
     #[test]
     fn finds_the_inserted_entry() {
         let index = SequenceIndex::init_ram(&SequenceOptions::default(), &[]).unwrap();
-        index.insert(keys(1, 3), Tape::of(["kitten", "sitting", "mitten"])).unwrap();
+        index.insert(keys(1, 3), Tape::of(["MKTAYIAKQR", "MKSAYIAKQR", "GAVLIMFWPS"])).unwrap();
         assert_eq!(size(&index).unwrap(), 3);
 
         let mut arena = Arena::new().unwrap();
-        let matches = index.search(Tape::of(["sitting"]), 1, &mut arena).unwrap();
+        let matches = index.search(Tape::of(["MKSAYIAKQR"]), 1, &mut arena).unwrap();
         let best = matches.query(0).unwrap();
         assert_eq!((best.keys, best.distances[0]), (&[Key::from(2u64)][..], 0.0));
     }
 
+    /// Scores `matched` between equal nucleotides and `near` between `A` and `G`, zero elsewhere.
+    fn nucleotide_similarities(matched: i8, near: i8) -> Box<[[i8; 256]; 256]> {
+        let mut similarities = Box::new([[0i8; 256]; 256]);
+        for nucleotide in *b"ACGT" {
+            similarities[usize::from(nucleotide)][usize::from(nucleotide)] = matched;
+        }
+        similarities[usize::from(b'A')][usize::from(b'G')] = near;
+        similarities[usize::from(b'G')][usize::from(b'A')] = near;
+        similarities
+    }
+
+    /// A query that is the reverse complement of a read finds that read first, at distance zero.
+    #[test]
+    fn overlap_scores_the_reverse_complement() {
+        let options = SequenceOptions { metric: SequenceMetric::DnaOverlap, ..SequenceOptions::default() };
+        let index = SequenceIndex::init_ram(&options, &[]).unwrap();
+        let reads =
+            ["ACGTTGCAAGGCTTAACCGGTTACGATCGA", "GGCTTAACCGGTTACGATCGATTTGCAGCA", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"];
+        index.insert(keys(1, 3), Tape::of(reads)).unwrap();
+
+        let mut arena = Arena::new().unwrap();
+        let matches = index.search(Tape::of(["TGCTGCAAATCGATCGTAACCGGTTAAGCC"]), 2, &mut arena).unwrap();
+        let best = matches.query(0).unwrap();
+        assert_eq!((best.keys[0], best.distances[0]), (Key::from(2u64), 0.0));
+    }
+
+    /// Under similarities where `A` and `G` are near, an `A` to `G` substitution ranks above an
+    /// `A` to `C` one.
+    #[test]
+    fn alignment_ranks_by_similarities() {
+        let similarities = nucleotide_similarities(4, 3);
+        let costs = SequenceCosts { similarities: Some(&similarities), gap: 4 };
+        let options = SequenceOptions { costs: Some(costs), ..SequenceOptions::default() };
+        let index = SequenceIndex::init_ram(&options, &[]).unwrap();
+        index.insert(keys(1, 2), Tape::of(["GCGTTGCAACGT", "CCGTTGCAACGT"])).unwrap();
+
+        let mut arena = Arena::new().unwrap();
+        let matches = index.search(Tape::of(["ACGTTGCAACGT"]), 2, &mut arena).unwrap();
+        let ranked = matches.query(0).unwrap();
+        assert_eq!(ranked.keys, [Key::from(1u64), Key::from(2u64)]);
+        assert!(ranked.distances[0] < ranked.distances[1]);
+    }
+
+    /// A substring of one entry finds that entry first, whatever its case, and a containment takes
+    /// no costs.
+    #[test]
+    fn containment_finds_the_holding_text() {
+        let options = SequenceOptions { metric: SequenceMetric::Utf8Containment, ..SequenceOptions::default() };
+        let index = SequenceIndex::init_ram(&options, &[]).unwrap();
+        let texts =
+            ["The Quick Brown Fox jumps over the lazy dog", "a journey of a thousand miles begins with a single step"];
+        index.insert(keys(1, 2), Tape::of(texts)).unwrap();
+
+        let mut arena = Arena::new().unwrap();
+        let matches = index.search(Tape::of(["BROWN FOX JUMPS"]), 2, &mut arena).unwrap();
+        assert_eq!(matches.query(0).unwrap().keys[0], Key::from(1u64));
+
+        let costs = SequenceCosts { similarities: Some(&nucleotide_similarities(2, 0)), gap: 2 };
+        let costed = SequenceOptions { costs: Some(costs), ..options };
+        assert!(refused(SequenceIndex::init_ram(&costed, &[]), Status::ConfigMismatch));
+    }
+
     #[test]
     fn gets_and_counts_every_entry_under_a_key() {
-        let index = SequenceIndex::init_ram(&SequenceOptions::default(), &[]).unwrap();
+        let options = SequenceOptions { metric: SequenceMetric::Utf8Containment, ..SequenceOptions::default() };
+        let index = SequenceIndex::init_ram(&options, &[]).unwrap();
         let shared = Key::from(7u64);
         index.insert([shared, shared], Tape::of(["kitten", "sitting"])).unwrap();
 
@@ -2267,13 +2301,13 @@ mod tests {
         let index = populated_index(32, 0, case_stream_key(0)).unwrap();
         index.on(&executor()).save(&path).unwrap();
 
-        assert_eq!(SequenceIndex::metadata(&path).unwrap().metric, SequenceMetric::LevenshteinBytes);
+        assert_eq!(SequenceIndex::metadata(&path).unwrap().metric, SequenceMetric::ProteinAlignment);
         let restored = SequenceIndex::load_ram(&path).unwrap();
         assert_eq!(size(&restored).unwrap(), 32);
         assert!(restored.contains(Key::from(17u64)).unwrap());
 
         // A view serves the checkpoint in place and refuses changes, where RAM serves views at all.
-        match SequenceIndex::view_ram(&path, None) {
+        match SequenceIndex::view_ram(&path) {
             Ok(viewed) => {
                 assert_eq!(size(&viewed).unwrap(), 32);
                 assert!(refused(viewed.reserve(64, 0), Status::ReadOnly));
@@ -2290,7 +2324,7 @@ mod tests {
         let monolith = saved.view().unwrap();
         assert!(!monolith.is_empty());
 
-        assert_eq!(SequenceIndex::metadata_buffer(monolith).unwrap().metric, SequenceMetric::LevenshteinBytes);
+        assert_eq!(SequenceIndex::metadata_buffer(monolith).unwrap().metric, SequenceMetric::ProteinAlignment);
         assert_eq!(size(&SequenceIndex::load_ram_buffer(monolith).unwrap()).unwrap(), 32);
         assert!(
             SequenceIndex::load_ram_buffer(&monolith[..monolith.len() - 1]).is_err(),

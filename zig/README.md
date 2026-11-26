@@ -493,24 +493,39 @@ std.debug.print("{d} of {d} entries reachable\n", .{ reachability.reachable, rea
 
 ## Sequence Indexes
 
-A `SequenceIndex` searches byte strings, UTF-8 text, DNA, RNA and proteins under edit distances and alignments.
+A `SequenceIndex` searches proteins under alignment, DNA and RNA under shifted overlap, and UTF-8 text under window containment.
 Its sequences cross as one `TapeView`, the Apache Arrow `Binary` layout of bytes end to end around one more offset than entries, so the two buffers of an Arrow column feed it as they are, with `u32` or `u64` offsets.
 
 ```zig
-var index = try usearch.SequenceIndex.initRam(.{ .metric = .levenshtein_utf8 }, &.{});
+var index = try usearch.SequenceIndex.initRam(.{ .metric = .utf8_containment }, &.{});
 defer index.deinit();
 const keys = [_]usearch.Key{ .fromInteger(1), .fromInteger(2), .fromInteger(3) };
-const offsets = [_]u64{ 0, 6, 13, 19 };
-try index.insert(&keys, try .of(u8, u64, "kittensittingmitten", &offsets), .{});
+const offsets = [_]u64{ 0, 19, 29, 40 };
+try index.insert(&keys, try .of(u8, u64, "The quick brown foxA lazy dogPack my box", &offsets), .{});
 
 var arena = try usearch.Arena.init(null);
 defer arena.deinit();
-const query = [_]u64{ 0, 6 };
-const matches = try index.search(try .of(u8, u64, "sittin", &query), 1, &arena, .{});
-std.debug.assert(matches.query(0).scores[0] == 1); // one edit away from "sitting"
+const query = [_]u64{ 0, 9 };
+const matches = try index.search(try .of(u8, u64, "BROWN FOX", &query), 1, &arena, .{});
+std.debug.assert(matches.query(0).scores[0] < 1.0 / 32768.0); // holds every query window, whatever the case
 ```
 
-`.needleman_wunsch` takes `SequenceWeights`, a 256 × 256 substitution matrix with a gap cost, and `.overlap` takes `window_widths`; every load and view names the weights again, since no checkpoint records them.
+The `.metric` is `.protein_alignment`, `.dna_overlap` or `.utf8_containment`.
+Each metric stores a sequence folded, so `get` returns the stored form rather than the inserted bytes: packed class codes for a protein, one class code a byte for DNA, and case-folded UTF-8 for text.
+Optional `SequenceCosts` give 256 × 256 similarities between raw bytes and a gap cost in place of the metric's own, and a containment refuses them.
+`SequenceOptions.sketch_bytes` sets the bytes of the sketch in front of each stored sequence, a multiple of four, where zero takes the metric's default of 512 for protein alignment and UTF-8 containment.
+A DNA overlap keeps no sketch and refuses any.
+
+```zig
+var similarities = std.mem.zeroes([256][256]i8);
+for ("ACGT") |base| similarities[base][base] = 2;
+const costs: usearch.SequenceCosts = .{ .similarities = &similarities, .gap = 2 };
+var reads = try usearch.SequenceIndex.initRam(.{ .metric = .dna_overlap, .costs = &costs }, &.{});
+defer reads.deinit();
+```
+
+Text folds its case inside the engine, so inputs are raw bytes and there is nothing to pack.
+A checkpoint records the costs, so loads and views take none.
 `get` writes a key's sequences into an arena as `TapeEntries(u8)`, and `count` answers a `SequenceKeyStats` with the key's entries and their total and largest byte lengths.
 Offsets that reach past the elements are refused with `Error.ShapeMismatch` before the call crosses, since the C interface reads no element count to catch them.
 The receivers, reports and plans work as the dense ones do: `refine` and `reshard` take a `SequenceRefinePlan` or a `SequenceReshardPlan` and answer a `DenseRefineReport`.

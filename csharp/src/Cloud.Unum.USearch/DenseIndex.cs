@@ -294,10 +294,12 @@ public enum Phase : int
     Gather = 8,
     /// <summary>A round re-stitching each neighborhood.</summary>
     Restitch = 9,
+    /// <summary>A round linking island entries by walks from the root.</summary>
+    Reach = 10,
     /// <summary>A plan filing what its moves or rounds produced where it lands.</summary>
-    Write = 10,
+    Write = 11,
     /// <summary>The plan ended its round, and nothing is pending.</summary>
-    Done = 11,
+    Done = 12,
 }
 
 /// <summary>Where a plan stands: its phase, that phase's position in the plan, and its own count.
@@ -2791,6 +2793,9 @@ internal struct NativeDenseTraversalStats
     public nuint Restarts;
     /// <summary>Hint keys no shard held an entry under; zero unless a search was handed hints.</summary>
     public nuint MissingHints;
+    /// <summary>Of the distances computed, the sketch distances a sequence search's seeding walk
+    /// spent; zero for every other walk.</summary>
+    public nuint SeedingDistances;
 }
 
 /// <summary>One reachability audit, laid out as <c>usearch_reachability_t</c>.</summary>
@@ -2908,6 +2913,7 @@ internal unsafe struct NativeDenseLoadVram
     public Completion Completion;
     public NativeBytesView Path;
     public NativeVramOptions Vram;
+    public nuint Connectivity;
     public nuint ValuesPerKey;
     public NativeProgress Progress;
 }
@@ -2937,6 +2943,7 @@ internal unsafe struct NativeDenseLoadVramBuffer
     public Completion Completion;
     public NativeBytesView Buffer;
     public NativeVramOptions Vram;
+    public nuint Connectivity;
     public nuint ValuesPerKey;
     public NativeProgress Progress;
 }

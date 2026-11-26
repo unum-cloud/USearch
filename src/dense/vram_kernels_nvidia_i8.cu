@@ -8,7 +8,7 @@
  *  class's i8 fatbin, which @c vram_variants_nvidia_<class>.cpp finds linked in beside its
  *  variants.
  */
-#include "dense_kernels.cuh"
-#include "usearch/dense/vram_nvidia_index.cuh"
+#include "dense_kernels.cuh"                   // `vram_attend_lookup_t`, `cuda_class_capabilities_k`
+#include "usearch/dense/vram_nvidia_index.cuh" // `dense::cuda_instantiate`
 
-template __device__ void dense::cuda_instantiate<cuda_class_capabilities_k, nk_i8_k, vram_attend_lookup_t>();
+template __device__ void us::dense::cuda_instantiate<cuda_class_capabilities_k, nk_i8_k, vram_attend_lookup_t>();

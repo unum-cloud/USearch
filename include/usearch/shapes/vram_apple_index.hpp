@@ -53,8 +53,10 @@ inline constexpr char metal_shapes_metric_source_k[] = {
 template <nk::a_shapes_dtype scalar_, typename node_id_type_>
 struct vram_apple_kits {
 
-    /** Rungs of the kit's kernels: one, serving every cloud. */
-    inline static constexpr std::size_t rungs_k = 1;
+    /** Rungs of the kit's canonical kernels: one, serving every cloud, which its builders
+     *  compile on too. */
+    inline static constexpr std::size_t canonical_rungs_count_k = 1;
+    inline static constexpr std::size_t build_rungs_count_k = canonical_rungs_count_k;
 
     inline static constexpr char metal_kit_name_k[] = "shapes::metal_f16_shapes_kit_t";
     inline static constexpr char const* metal_sources_k[] = {nk_shapes_source_metal_, metal_shapes_metric_source_k};
@@ -66,15 +68,14 @@ struct vram_apple_kits {
     /** The serial kit a pack's cloud goes in and out through. */
     using pack_kit_t = typename shapes_ladder<scalar_, nk_cap_serial_k>::kit_t;
 
-    /** The one rung serves every cloud. */
-    static std::size_t rung_serving_(std::size_t) noexcept { return 0; }
+    /** The one rung serves every cloud, for either role. */
+    static std::size_t rung_serving_(score_role_t, std::size_t) noexcept { return 0; }
 
-    /** A simdgroup scores a shape, its lanes splitting the outer cloud's points. */
-    static u32_t lanes_per_entry_(std::size_t) noexcept { return metal_simdgroup_width_k; }
+    /** A simdgroup scores a shape for either role, its lanes splitting the outer cloud's points. */
+    static u32_t lanes_per_entry_(score_role_t, std::size_t) noexcept { return metal_simdgroup_width_k; }
 
-    /** A query is its own pack where it lies, so it prepares into no span. */
-    static std::size_t span_bytes_(byte_t const*, std::size_t) noexcept { return 0; }
-    static std::size_t span_bytes_(std::size_t) noexcept { return 0; }
+    /** A query is its own pack where it lies, so it prepares into no span for either role. */
+    static std::size_t span_bytes_(score_role_t, byte_t const*, std::size_t) noexcept { return 0; }
 
     /** Bytes the @p stored pack saves into: its cloud unpacked, @b [points,3] scalars, as the RAM
      *  codec saves a cloud. */

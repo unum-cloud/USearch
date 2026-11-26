@@ -441,18 +441,24 @@ print(version(), capabilitiesCompiled(), capabilitiesAvailable())
 
 ## Sequence Indexes
 
-A `SequenceIndex` searches byte strings, UTF-8 text, DNA, RNA and proteins under Levenshtein over bytes or code points, Needleman-Wunsch with `SequenceWeights`, or window overlap with `windowWidths`.
-A sequence is a `[UInt8]`, and a batch crosses as one Apache Arrow tape the binding packs:
+A `SequenceIndex` searches proteins under `.proteinAlignment`, DNA and RNA under `.dnaOverlap`, and UTF-8 text under `.utf8Containment`.
+A sequence is a `[UInt8]` of raw bytes, and a batch crosses as one Apache Arrow tape the binding packs:
 
 ```swift
-let index = try SequenceIndex.initRam(SequenceOptions(metric: .levenshteinUTF8))
-let words = ["kitten", "sitting", "mitten"].map { Array($0.utf8) }
-try index.insert(keys: [1, 2, 3], sequences: words)
+let index = try SequenceIndex.initRam(SequenceOptions(metric: .utf8Containment))
+let texts = ["The quick brown fox", "A lazy dog", "Pack my box"].map { Array($0.utf8) }
+try index.insert(keys: [1, 2, 3], sequences: texts)
 
-let matches = try index.search([Array("sitten".utf8)], wanted: 3, arena: try Arena())
-print(matches[0][0].key, matches[0][0].distance) // one edit away
+let matches = try index.search([Array("BROWN FOX".utf8)], wanted: 3, arena: try Arena())
+print(matches[0][0].key, matches[0][0].distance) // key 1, whatever the case
 ```
 
+Each metric stores a sequence folded, so `get` returns the stored form rather than the inserted bytes: packed class codes for a protein, one class code a byte for DNA, and case-folded UTF-8 for text.
+Text folds its case inside the engine, so there is nothing to pack.
+Optional `SequenceCosts` give 256 × 256 similarities between raw bytes and a gap cost in place of the metric's own, and a containment refuses them.
+`SequenceOptions.sketchBytes` sets the bytes of the sketch in front of each stored sequence, a multiple of four, where zero takes the metric's default of 512 for protein alignment and UTF-8 containment.
+A DNA overlap keeps no sketch and refuses any.
+A checkpoint records the costs, so loads and views take none.
 The verbs, receivers and plans are the dense ones: `refine` and `reshard` take a `SequenceRefinePlan` or `SequenceReshardPlan` in their configs, `get` answers each stored sequence in place as `TapeEntries<UInt8>`, and `count` reports a key's entries with their total and largest byte lengths.
 
 ## Shape Indexes

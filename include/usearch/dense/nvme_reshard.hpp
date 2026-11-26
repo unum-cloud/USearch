@@ -297,7 +297,7 @@ struct [[nodiscard]] nvme_reshard_plan {
     /** The phase whose tasks run now. */
     phase_t phase() const noexcept { return phase_; }
 
-    /** The position of the round's phase in hand among its six, from the opening health check to
+    /** The position of the round's phase in hand among its seven, from the opening health check to
      *  the closing one, the write counting as the restitch it applies; zero outside a round. */
     std::size_t ordinal() const noexcept {
         return round_ordinal(phase_ == phase_t::write_k ? phase_t::restitch_k : phase_,

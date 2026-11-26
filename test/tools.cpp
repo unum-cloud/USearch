@@ -76,7 +76,7 @@ template <>
 struct arrow_fixture<sequence_verbs_t> {
     std::string symbols;
     std::vector<std::size_t> offsets {0};
-    sequence_geometry_t geometry {{usearch_sequence_metric_levenshtein_bytes_k, 0}, nullptr, {}};
+    sequence_geometry_t geometry {{usearch_sequence_metric_protein_alignment_k, 0}, nullptr};
 
     explicit arrow_fixture(util::u64_t seed) {
         split_mix_generator_t random_generator {seed};
@@ -609,7 +609,7 @@ static case_result_t test_sequence_insert_keys(char const* binary) {
     std::string const texts = scratch.path("texts.txt");
     std::FILE* const file = std::fopen(texts.c_str(), "wb");
     expect_true(file && std::fputs("AAAA\nACGT\nTTTT\n", file) >= 0 && std::fclose(file) == 0);
-    return expect_insert_keys(binary, "sequence", texts, "--metric levenshtein",
+    return expect_insert_keys(binary, "sequence", texts, "--metric protein-alignment",
                               fmt::format("--query-texts '{}'", texts));
 }
 

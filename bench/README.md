@@ -225,16 +225,16 @@ The PubChem and GDB-13 sets come from the USearchMolecules bucket through RetriE
 
 The other modalities keep their own entries, judged by the exact scan each binary runs.
 
-| Dataset                             | Entries                                     | Metric                 | Scales        |
-| :---------------------------------- | :------------------------------------------ | :--------------------- | :------------ |
-| `leipzig-news-10m`, Leipzig Corpora | English news sentences                      | `levenshtein-utf8`     | 10M           |
-| `fineweb-sentences-*`, FineWeb      | English web sentences, deduplicated         | `levenshtein-utf8`     | 100M, 1B      |
-| `hg002-reads-*`, GIAB HG002         | 150-nt Illumina reads                       | `levenshtein`          | 10M, 100M, 1B |
-| `pubchem-conformers-*`, PubChem 3D  | `f16` atoms, one conformer per molecule     | `chamfer`, `hausdorff` | 10M, 100M     |
-| `gdb13-conformers-*`, GDB-13 3D     | `f16` atoms, one conformer per molecule     | `chamfer`, `hausdorff` | 10M, 100M, 1B |
-| `real-conformers-*`, Enamine REAL   | `f16` atoms, one conformer per molecule     | `chamfer`, `hausdorff` | 10M, 100M     |
-| `alphafold-ca-*`, AlphaFold DB      | `f16` Cα atoms, one backbone per protein    | `chamfer`, `hausdorff` | 10M, 100M     |
-| `panoramax-*`, Panoramax            | street-level observations, 11 `f64` columns | near, sees, seen       | 10M, 100M     |
+| Dataset                             | Entries                                     | Metric                  | Scales        |
+| :---------------------------------- | :------------------------------------------ | :---------------------- | :------------ |
+| `leipzig-news-10m`, Leipzig Corpora | English news sentences                      | `alignment` over `utf8` | 10M           |
+| `fineweb-sentences-*`, FineWeb      | English web sentences, deduplicated         | `alignment` over `utf8` | 100M, 1B      |
+| `hg002-reads-*`, GIAB HG002         | 150-nt Illumina reads                       | `alignment`             | 10M, 100M, 1B |
+| `pubchem-conformers-*`, PubChem 3D  | `f16` atoms, one conformer per molecule     | `chamfer`, `hausdorff`  | 10M, 100M     |
+| `gdb13-conformers-*`, GDB-13 3D     | `f16` atoms, one conformer per molecule     | `chamfer`, `hausdorff`  | 10M, 100M, 1B |
+| `real-conformers-*`, Enamine REAL   | `f16` atoms, one conformer per molecule     | `chamfer`, `hausdorff`  | 10M, 100M     |
+| `alphafold-ca-*`, AlphaFold DB      | `f16` Cα atoms, one backbone per protein    | `chamfer`, `hausdorff`  | 10M, 100M     |
+| `panoramax-*`, Panoramax            | street-level observations, 11 `f64` columns | near, sees, seen        | 10M, 100M     |
 
 Sequence sets are text files with one entry per line, which `--base-texts` reads.
 Leipzig publishes at most 1M sentences per corpus, so `leipzig-news-10m` joins ten yearly English news corpora.
@@ -250,85 +250,125 @@ Panoramax publishes every picture's metadata across its federated instances as o
 Every table below holds one row per machine and core class, so a new machine is a new row and nothing else moves.
 Every row keeps 64 links per vector and top-10 over the whole file ingested in one run.
 Expansion lists the insertion and search expansions, starting from 128 and 64.
-The search expansion grows until 1-recall@10 reaches 99%; the insertion expansion grows only when 99% is out of reach or the row inserts faster than it searches.
-A dataset that misses 99% gets a wider insertion expansion or a refine pass, never a lower target.
+The search expansion grows until 1-recall@10 reaches 99%.
+An index is built once and searched many times, so a wider insertion expansion or another refine pass pays back in every search.
+A dataset that misses 99% gets more construction, never a lower target.
+Sequence rows link by a sketch and search by a canonical score, so their insertion and query rates are not compared.
 CPU rows name the threads used, and run with the 1 GiB pool reserved.
-A row never inserts faster than it searches: when insertions outpace queries, the insertion expansion rises and the search expansion falls until the row searches at least as fast at 99% 1-recall@10.
 
 ### 10M
 
 SIFT, `u8`, euclidean, 10,000,000 rows of 128 dimensions.
 
-| Machine                                            | Class       | Expansion |   Insertions |      Queries | Recall@10 | Date       |
-| :------------------------------------------------- | :---------- | --------: | -----------: | -----------: | --------: | :--------- |
-| Intel i9-13950HX, 8P+16E cores, 1 domain, 4K pages | `haswell`   |  256 / 96 |   12.8 k IPS |   46.9 k QPS |     98.5% | 2026-09-02 |
-| NVIDIA RTX 4060 Laptop, 24 SMs, 8 GB               | `ada`       |  256 / 96 |  114.5 k IPS |  210.9 k QPS |     98.6% | 2026-09-02 |
-| Apple M5 Pro, 6S+12P cores, 16 threads, 16K pages  | `neonsdot`  |  256 / 96 |  23.05 k IPS |  75.15 k QPS |   98.800% | 2026-10-11 |
-| Apple M5 Pro, 20 GPU cores, 64 GiB shared memory   | `metal`     |  256 / 96 |  72.96 k IPS | 176.48 k QPS |   98.860% | 2026-10-11 |
-| NVIDIA B300 MIG 1g.34gb slice, 18 SMs, 30.5 GB     | `blackwell` |  256 / 96 |  59.89 k IPS | 235.81 k QPS |   97.726% | 2026-10-14 |
-| NVIDIA B200, 148 SMs, 178.35 GB                    | `blackwell` |  256 / 96 | 522.31 k IPS | 512.23 k QPS |   97.630% | 2026-10-15 |
-| NVIDIA B300 SXM6, 148 SMs, 267.68 GB               | `blackwell` | 256 / 128 | 558.51 k IPS |   1.04 M QPS |   99.110% | 2026-10-21 |
+| Device                | Class       | Expansion |   Insertions |      Queries | Recall@10 | Date       |
+| :-------------------- | :---------- | --------: | -----------: | -----------: | --------: | :--------- |
+| 24× Intel Raptor Lake | `haswell`   |  256 / 96 |   12.8 k IPS |   46.9 k QPS |     98.5% | 2026-09-02 |
+| 24× NVIDIA SM89       | `ada`       |  256 / 96 |  114.5 k IPS |  210.9 k QPS |     98.6% | 2026-09-02 |
+| 16× Apple M5          | `neonsdot`  |  256 / 96 |  23.05 k IPS |  75.15 k QPS |   98.800% | 2026-10-11 |
+| 20× Apple M5 GPU      | `metal`     |  256 / 96 |  72.96 k IPS | 176.48 k QPS |   98.860% | 2026-10-11 |
+| 18× NVIDIA SM103      | `blackwell` |  256 / 96 |  59.89 k IPS | 235.81 k QPS |   97.726% | 2026-10-14 |
+| 148× NVIDIA SM100     | `blackwell` |  256 / 96 | 522.31 k IPS | 512.23 k QPS |   97.630% | 2026-10-15 |
+| 148× NVIDIA SM103     | `blackwell` | 256 / 128 | 558.51 k IPS |   1.04 M QPS |   99.110% | 2026-10-21 |
 
-PubChem MACCS and ECFP4 from USearchMolecules, `u1`, Hamming, the first 10,000,000 molecules, of 166 and 2048 bits.
+PubChem ECFP4 from USearchMolecules, `u1`, Hamming, the first 10,000,000 molecules of 2048 bits.
 
-| Machine | Class | Dataset | Expansion | Insertions | Queries | Recall@10 | Date |
-| :------ | :---- | :------ | --------: | ---------: | ------: | --------: | :--- |
-| -       | -     | -       |         - |          - |       - |         - | -    |
+| Device            | Class          | Expansion |   Insertions |      Queries | Recall@10 | Date       |
+| :---------------- | :------------- | --------: | -----------: | -----------: | --------: | :--------- |
+| 188× NVIDIA SM120 | `blackwellrtx` | 512 / 512 | 135.91 k IPS | 140.04 k QPS |   99.400% | 2026-11-18 |
+
+PubChem conformers from USearchMolecules, `f16` atoms, Chamfer, 10,000,000 clouds of 49.5 atoms on average.
+
+| Device            | Class       | Expansion | Insertions |    Queries | Recall@10 | Date       |
+| :---------------- | :---------- | --------: | ---------: | ---------: | --------: | :--------- |
+| 148× NVIDIA SM103 | `blackwell` | 128 / 512 | 3.71 k IPS | 4.90 k QPS |   98.100% | 2026-10-21 |
 
 ### 100M
 
-SIFT, `u8`, euclidean, 100,000,000 rows of 128 dimensions, SpaceV, `i8`, euclidean, 100,000,000 rows of 100 dimensions, and Deep, `f32` stored as `bf16`, euclidean, 100,000,000 rows of 96 dimensions.
+SIFT, `u8`, euclidean, 100,000,000 rows of 128 dimensions.
 
-| Machine                                           | Class       | Dataset | Expansion |   Insertions |      Queries | Recall@10 | Date       |
-| :------------------------------------------------ | :---------- | :------ | --------: | -----------: | -----------: | --------: | :--------- |
-| Apple M5 Pro, 6S+12P cores, 16 threads, 16K pages | `neonsdot`  | SIFT    |  256 / 96 |  16.86 k IPS |   5.63 k QPS |   96.410% | 2026-10-11 |
-| Apple M5 Pro, 20 GPU cores, 64 GiB shared memory  | `metal`     | SIFT    |  256 / 96 |  61.99 k IPS | 146.82 k QPS |   97.650% | 2026-10-11 |
-| NVIDIA B300 MIG 1g.34gb slice, 18 SMs, 30.5 GB    | `blackwell` | SIFT    |  256 / 96 |  56.52 k IPS | 214.77 k QPS |   95.190% | 2026-10-14 |
-| NVIDIA B200, 148 SMs, 178.35 GB                   | `blackwell` | SIFT    |  256 / 96 | 342.23 k IPS | 483.06 k QPS |   95.160% | 2026-10-15 |
-| NVIDIA B300 SXM6, 148 SMs, 267.68 GB              | `blackwell` | SIFT    | 256 / 256 | 431.52 k IPS | 604.49 k QPS |   99.130% | 2026-10-21 |
-| AWS Graviton5, 192 cores, 2 domains, 4K pages     | `apple-m2`  | SIFT    | 512 / 160 | 161.95 k IPS | 173.82 k QPS |   99.250% | 2026-11-09 |
-| AWS Graviton4, 96 cores, 84 threads, 1 domain     | `apple-m2`  | SIFT    | 128 / 128 | 185.05 k IPS | 208.84 k QPS |   99.210% | 2026-11-13 |
-| AWS Graviton4, 96 cores, 84 threads, 1 domain     | `apple-m2`  | SpaceV  | 512 / 384 |  38.71 k IPS |  57.97 k QPS |   99.340% | 2026-11-13 |
-| AWS Graviton4, 96 cores, 84 threads, 1 domain     | `apple-m2`  | Deep    | 256 / 192 |  87.96 k IPS | 118.98 k QPS |   99.340% | 2026-11-13 |
+| Device             | Class          | Expansion |   Insertions |      Queries | Recall@10 | Date       |
+| :----------------- | :------------- | --------: | -----------: | -----------: | --------: | :--------- |
+| 16× Apple M5       | `neonsdot`     |  256 / 96 |  16.86 k IPS |   5.63 k QPS |   96.410% | 2026-10-11 |
+| 20× Apple M5 GPU   | `metal`        |  256 / 96 |  61.99 k IPS | 146.82 k QPS |   97.650% | 2026-10-11 |
+| 18× NVIDIA SM103   | `blackwell`    |  256 / 96 |  56.52 k IPS | 214.77 k QPS |   95.190% | 2026-10-14 |
+| 148× NVIDIA SM100  | `blackwell`    |  256 / 96 | 342.23 k IPS | 483.06 k QPS |   95.160% | 2026-10-15 |
+| 148× NVIDIA SM103  | `blackwell`    | 256 / 256 | 431.52 k IPS | 604.49 k QPS |   99.130% | 2026-10-21 |
+| 192× Arm Graviton5 | `apple-m2`     | 512 / 160 | 161.95 k IPS | 173.82 k QPS |   99.250% | 2026-11-09 |
+| 84× Arm Graviton4  | `apple-m2`     | 128 / 128 | 185.05 k IPS | 208.84 k QPS |   99.210% | 2026-11-13 |
+| 188× NVIDIA SM120  | `blackwellrtx` | 256 / 192 | 207.21 k IPS | 270.81 k QPS |  100.000% | 2026-11-17 |
 
-PubChem MACCS and ECFP4 from USearchMolecules, `u1`, Hamming, all 115,627,267 molecules, of 166 and 2048 bits.
+SpaceV, `i8`, euclidean, 100,000,000 rows of 100 dimensions.
 
-| Machine                                       | Class       | Dataset | Expansion |   Insertions |      Queries | Recall@10 | Date       |
-| :-------------------------------------------- | :---------- | :------ | --------: | -----------: | -----------: | --------: | :--------- |
-| NVIDIA B300 SXM6, 148 SMs, 267.68 GB          | `blackwell` | MACCS   |  256 / 64 | 559.14 k IPS |   1.46 M QPS |   99.070% | 2026-10-21 |
-| NVIDIA B300 SXM6, 148 SMs, 267.68 GB          | `blackwell` | ECFP4   | 512 / 512 | 146.81 k IPS | 285.23 k QPS |   99.060% | 2026-10-21 |
-| AWS Graviton5, 192 cores, 2 domains, 4K pages | `apple-m2`  | ECFP4   | 512 / 512 | 104.41 k IPS |  57.81 k QPS |   98.210% | 2026-11-09 |
-| AWS Graviton4, 96 cores, 84 threads, 1 domain | `apple-m2`  | ECFP4   | 512 / 512 |  41.01 k IPS |  49.05 k QPS |   99.310% | 2026-11-13 |
+| Device            | Class          | Expansion |   Insertions |      Queries | Recall@10 | Date       |
+| :---------------- | :------------- | --------: | -----------: | -----------: | --------: | :--------- |
+| 84× Arm Graviton4 | `apple-m2`     | 512 / 384 |  38.71 k IPS |  57.97 k QPS |   99.340% | 2026-11-13 |
+| 188× NVIDIA SM120 | `blackwellrtx` | 512 / 192 | 118.48 k IPS | 263.24 k QPS |   99.000% | 2026-11-17 |
+
+Deep, `f32` stored as `bf16`, euclidean, 100,000,000 rows of 96 dimensions.
+
+| Device            | Class          | Expansion |   Insertions |      Queries | Recall@10 | Date       |
+| :---------------- | :------------- | --------: | -----------: | -----------: | --------: | :--------- |
+| 84× Arm Graviton4 | `apple-m2`     | 256 / 192 |  87.96 k IPS | 118.98 k QPS |   99.340% | 2026-11-13 |
+| 188× NVIDIA SM120 | `blackwellrtx` | 256 / 192 | 169.18 k IPS | 222.64 k QPS |   99.300% | 2026-11-17 |
+
+Turing, `f32` stored as `bf16`, euclidean, 100,000,000 rows of 100 dimensions.
+
+| Device            | Class          |  Expansion |  Insertions |      Queries | Recall@10 | Date       |
+| :---------------- | :------------- | ---------: | ----------: | -----------: | --------: | :--------- |
+| 188× NVIDIA SM120 | `blackwellrtx` | 1024 / 384 | 42.20 k IPS | 100.95 k QPS |   99.500% | 2026-11-17 |
+
+PubChem ECFP4 from USearchMolecules, `u1`, Hamming, all 115,627,256 molecules of 2048 bits.
+
+| Device             | Class          | Expansion |   Insertions |      Queries | Recall@10 | Date       |
+| :----------------- | :------------- | --------: | -----------: | -----------: | --------: | :--------- |
+| 148× NVIDIA SM103  | `blackwell`    | 512 / 512 | 146.81 k IPS | 285.23 k QPS |   99.060% | 2026-10-21 |
+| 192× Arm Graviton5 | `apple-m2`     | 512 / 512 | 104.41 k IPS |  57.81 k QPS |   98.210% | 2026-11-09 |
+| 84× Arm Graviton4  | `apple-m2`     | 512 / 512 |  41.01 k IPS |  49.05 k QPS |   99.310% | 2026-11-13 |
+| 188× NVIDIA SM120  | `blackwellrtx` | 512 / 256 | 118.69 k IPS | 368.71 k QPS |   99.170% | 2026-11-17 |
+
+PubChem conformers from USearchMolecules, `f16` atoms, Chamfer, all 113,567,323 clouds, searched by 100,000 Enamine REAL conformers.
+
+| Device            | Class          | Expansion | Insertions | Queries | Recall@10 | Date       |
+| :---------------- | :------------- | --------: | ---------: | ------: | --------: | :--------- |
+| 188× NVIDIA SM120 | `blackwellrtx` |  - / 4096 |          - | 132 QPS |   99.610% | 2026-11-18 |
 
 ### 1B
 
-SIFT, `u8`, euclidean, 1,000,000,000 rows of 128 dimensions, and Deep, `f32` stored as `bf16`, euclidean, 1,000,000,000 rows of 96 dimensions, the goal being one hour of build on a dual-socket CPU.
+The goal at this scale is one hour of build on a dual-socket CPU.
 
-| Machine | Class | Dataset | Expansion | Insertions | Queries | Recall@10 | Date |
-| :------ | :---- | :------ | --------: | ---------: | ------: | --------: | :--- |
-| -       | -     | -       |         - |          - |       - |         - | -    |
+SIFT, `u8`, euclidean, 1,000,000,000 rows of 128 dimensions.
 
-GDB-13 MACCS and ECFP4 from USearchMolecules, `u1`, Hamming, all 977 million molecules, of 166 and 2048 bits.
+| Device | Class | Expansion | Insertions | Queries | Recall@10 | Date |
+| :----- | :---- | --------: | ---------: | ------: | --------: | :--- |
+| -      | -     |         - |          - |       - |         - | -    |
 
-| Machine | Class | Dataset | Expansion | Insertions | Queries | Recall@10 | Date |
-| :------ | :---- | :------ | --------: | ---------: | ------: | --------: | :--- |
-| -       | -     | -       |         - |          - |       - |         - | -    |
+Deep, `f32` stored as `bf16`, euclidean, 1,000,000,000 rows of 96 dimensions.
+
+| Device | Class | Expansion | Insertions | Queries | Recall@10 | Date |
+| :----- | :---- | --------: | ---------: | ------: | --------: | :--- |
+| -      | -     |         - |          - |       - |         - | -    |
+
+GDB-13 ECFP4 from USearchMolecules, `u1`, Hamming, all 977 million molecules of 2048 bits.
+
+| Device | Class | Expansion | Insertions | Queries | Recall@10 | Date |
+| :----- | :---- | --------: | ---------: | ------: | --------: | :--- |
+| -      | -     |         - |          - |       - |         - | -    |
 
 ### Multiply
 
 Wiki, `f32` stored as `bf16`, dot, 1,000,000 rows of 256 dimensions, every one of the 100,000 query rows running one `multiply`.
 
-| Machine | Class | Rows | Pairs per row | Date |
-| :------ | :---- | ---: | ------------: | :--- |
-| -       | -     |    - |             - | -    |
+| Device | Class | Rows | Pairs per row | Date |
+| :----- | :---- | ---: | ------------: | :--- |
+| -      | -     |    - |             - | -    |
 
 ### Attend
 
 The same index, every query row running one `attend` as a single head, judged on 16 queries against exact `f64` attention.
 
-| Machine | Class | Queries | Keys per query | Relative L2 error | Date |
-| :------ | :---- | ------: | -------------: | ----------------: | :--- |
-| -       | -     |       - |              - |                 - | -    |
+| Device | Class | Queries | Keys per query | Relative L2 error | Date |
+| :----- | :---- | ------: | -------------: | ----------------: | :--- |
+| -      | -     |       - |              - |                 - | -    |
 
 ## Hyper-Parameters
 

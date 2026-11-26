@@ -30,7 +30,8 @@
 #include "usearch/geospatial/vram_amd_metric.hip"
 #endif
 
-#include "basic_specializations.cuh"
+#include "geospatial_kits.hpp"       // `geospatial_vram_kit`, `geospatial_nvidia_fatbin_t` & kin
+#include "basic_specializations.cuh" // the basic variants, `lib.hpp` under them
 
 #pragma region Geospatial Variants
 
@@ -220,7 +221,8 @@ struct geospatial_ram_variant {
     /** Opens one round of every live shard in place under the config's cache. */
     util::expected<refine_plan_t> plan_refine(refine_config_t config) noexcept {
         typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        return index.plan_refine({config.cache_bytes}, us::geospatial::surface_keep_octants_t {geometry.connectivity},
+        return index.plan_refine({config.cache_bytes, config.expansion_factor},
+                                 us::geospatial::surface_keep_octants_t {geometry.connectivity},
                                  us::geospatial::earth_observation_codec_t {}, planning);
     }
 
@@ -230,7 +232,7 @@ struct geospatial_ram_variant {
     util::expected<reshard_plan_t> plan_reshard(std::span<index_t* const> sources, std::span<index_t* const> targets,
                                                 refine_config_t config, util::u64_t seed) noexcept {
         typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        return index.plan_reshard(sources, targets, {{config.cache_bytes}, 0, seed},
+        return index.plan_reshard(sources, targets, {{config.cache_bytes, config.expansion_factor}, 0, seed},
                                   us::geospatial::surface_keep_octants_t {geometry.connectivity},
                                   us::geospatial::earth_observation_codec_t {}, planning);
     }
@@ -1187,26 +1189,14 @@ util::expected<util::sample_result_t> geospatial_nvme_variant<cpu_class_>::sampl
 
 #if USEARCH_ARCH_CUDA_
 
-/** The fatbin of the geospatial kit and its judging kernel, defined in
- *  @c src/geospatial/vram_variants_nvidia.cu. */
-struct geospatial_nvidia_fatbin_t {
-    static util::bytes_view_t bytes() noexcept;
-};
-
-/** The capabilities the geospatial kit compiles under on NVIDIA: the Ampere floor, which one cubin
- *  per class holds. */
-inline constexpr nk_capability_t geospatial_nvidia_capabilities_k = nk_cap_cuda_k | nk_cap_ampere_k;
-
 /* The face's members reading the kit, defined in @c src/geospatial/vram_variants_nvidia.cu. */
-extern template struct us::geospatial::vram_nvidia_index<
-    typename us::geospatial::geospatial_ladder<geospatial_nvidia_capabilities_k>::kit_t, util::u32_t,
-    geospatial_nvidia_fatbin_t>;
+extern template struct us::geospatial::vram_nvidia_index<geospatial_vram_kit<cuda_class_k>, util::u32_t,
+                                                         geospatial_nvidia_fatbin_t>;
 
 /** Builds one shard of the geospatial face on a CUDA device. */
 struct geospatial_vram_nvidia_build_t {
-    using face_t = us::geospatial::vram_nvidia_index<
-        typename us::geospatial::geospatial_ladder<geospatial_nvidia_capabilities_k>::kit_t, util::u32_t,
-        geospatial_nvidia_fatbin_t>;
+    using face_t =
+        us::geospatial::vram_nvidia_index<geospatial_vram_kit<cuda_class_k>, util::u32_t, geospatial_nvidia_fatbin_t>;
 
     std::unique_ptr<face_t> operator()(int device) const noexcept {
         return std::unique_ptr<face_t> {new (std::nothrow) face_t(util::cuda_virtual_memory_allocator<util::byte_t> {
@@ -1268,10 +1258,8 @@ struct geospatial_vram_nvidia_variant {
         if (failed(status)) return status;
         admit_module = std::move(module);
         util::vram_kernel_symbol_t symbol;
-        vram_kernel_symbol(
-            symbol, "geospatial", "cuda_admit", {"cuda_admit_arguments", 1},
-            util::itanium_type<us::geospatial::geospatial_ladder<geospatial_nvidia_capabilities_k>::kit_t> {},
-            util::itanium_type<node_id_t> {});
+        vram_kernel_symbol(symbol, "geospatial", "cuda_admit", {"cuda_admit_arguments", 1},
+                           util::itanium_type<geospatial_vram_kit<cuda_class_k>> {}, util::itanium_type<node_id_t> {});
         admit = admit_module.function(symbol.text);
         return admit ? util::status_code_t::success_k : util::status_code_t::device_k;
     }
@@ -1475,20 +1463,25 @@ util::expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::se
     auto const [queries, encode_status] = encode_(query_batch.observations.data(), count, pages);
     if (failed(encode_status)) return {{}, encode_status};
     // Candidates fewer than the ranking they fill would short every query.
-    std::size_t const candidates_count = util::max_of(
-        expansion ? expansion : util::default_expansion_factor(geometry.connectivity), wanted);
-    face_t::search_config_t const config {static_cast<util::u32_t>(candidates_count),
-                                          static_cast<util::u32_t>(candidates_count)};
+    std::size_t candidates_count = 0;
+    face_t::search_config_t config {};
 
     // Past the walk's own scratch: the queries, the judged metres and counts, the candidates and
     // the judged IDs, each column its own aligned carve.
-    std::size_t const listed_count = count * candidates_count, judged = count * wanted;
+    std::size_t const judged = count * wanted;
+    std::size_t listed_count = 0, judging_bytes = 0;
     auto const aligned = [](std::size_t bytes) noexcept {
         return util::round_up_to_multiple(bytes, util::default_alignment_k);
     };
-    std::size_t const judging_bytes = aligned(count * sizeof(value_t)) + aligned(judged * sizeof(util::f64_t)) +
-                                      aligned(count * sizeof(util::u64_t)) + aligned(listed_count * sizeof(node_id_t)) +
-                                      aligned(listed_count * sizeof(util::f32_t)) + aligned(judged * sizeof(node_id_t));
+    auto const take_candidates = [&](std::size_t candidates) noexcept {
+        candidates_count = candidates, listed_count = count * candidates;
+        config = {static_cast<util::u32_t>(candidates), static_cast<util::u32_t>(candidates), search.traversal};
+        judging_bytes = aligned(count * sizeof(value_t)) + aligned(judged * sizeof(util::f64_t)) +
+                        aligned(count * sizeof(util::u64_t)) + aligned(listed_count * sizeof(node_id_t)) +
+                        aligned(listed_count * sizeof(util::f32_t)) + aligned(judged * sizeof(node_id_t));
+    };
+    take_candidates(
+        util::max_of(expansion ? expansion : util::default_expansion_factor(geometry.connectivity), wanted));
     // Each shard judges its own candidates on its stream into the sharded index's outputs, which
     // merges them by distance.
     auto judge = [&](face_t& face, nk::matrix_span<node_id_t> host_ids, nk::matrix_span<util::f64_t> host_metres,
@@ -1541,17 +1534,27 @@ util::expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::se
             return util::status_code_t::device_k;
         return context.wait();
     };
-    auto const [found, status] = index.search_every_shard(
-        count, executor, judge,
-        nk::matrix_span<util::uuid128_t> {reinterpret_cast<util::uuid128_t*>(outputs.keys), count, wanted},
-        nk::matrix_span<util::f64_t> {outputs.scores, count, wanted}, std::span<std::size_t> {outputs.counts, count},
-        queries, config, judging_bytes);
-    if (failed(status)) return {{}, status};
+    // A scan judges the exact nearest candidates, so while the relation leaves a query short of its
+    // matches and some node went unjudged, it judges twice as many.
+    std::size_t const published = index.size();
+    traversal_stats_t stats;
+    while (true) {
+        auto const [found, status] = index.search_every_shard(
+            count, executor, judge,
+            nk::matrix_span<util::uuid128_t> {reinterpret_cast<util::uuid128_t*>(outputs.keys), count, wanted},
+            nk::matrix_span<util::f64_t> {outputs.scores, count, wanted},
+            std::span<std::size_t> {outputs.counts, count}, queries, config, judging_bytes);
+        if (failed(status)) return {{}, status};
+        stats.computed_distances += found.computed_distances;
+        stats.visited_members += found.visited_members;
+        stats.restarts += found.restarts;
+        std::size_t filled = 0;
+        for (std::size_t query = 0; query != count; ++query) filled += outputs.counts[query] == wanted;
+        if (search.traversal != util::traversal_t::scan_k || filled == count || candidates_count >= published) break;
+        take_candidates(util::min_of(candidates_count * 2, published));
+    }
     [[maybe_unused]] util::continuation_t const heard = ticks(count - 1);
-    return {{.computed_distances = found.computed_distances,
-             .visited_members = found.visited_members,
-             .restarts = found.restarts},
-            util::status_code_t::success_k};
+    return {stats, util::status_code_t::success_k};
 }
 
 template <gpu_class_t gpu_class_>
@@ -1724,30 +1727,15 @@ util::expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::wi
 
 #if USEARCH_ARCH_ROCM_
 
-/** One AMD class's code object of the geospatial kit and its judging kernels, defined in its class
- *  unit, @c src/geospatial/vram_variants_amd.hip, under that class's ceiling. */
-template <gpu_class_t gpu_class_>
-struct geospatial_amd_code_object {
-    inline static constexpr nk_capability_t capability_k = numkong_capabilities_of(gpu_class_);
-    static util::bytes_view_t bytes() noexcept;
-};
-
-/** The capabilities the geospatial kit compiles under on AMD class @p gpu_class_ : its ceiling, as
- *  the class unit compiles that class's code object. */
-template <gpu_class_t gpu_class_>
-inline constexpr nk_capability_t geospatial_amd_capabilities = numkong_capabilities_of(gpu_class_);
-
 /* The face's members reading the kit, defined in the class unit this one compiles as. */
-extern template struct us::geospatial::vram_amd_index<
-    typename us::geospatial::geospatial_ladder<geospatial_amd_capabilities<hip_class_k>>::kit_t, util::u32_t,
-    geospatial_amd_code_object<hip_class_k>>;
+extern template struct us::geospatial::vram_amd_index<geospatial_vram_kit<hip_class_k>, util::u32_t,
+                                                      geospatial_amd_code_object<hip_class_k>>;
 
 /** Builds one shard of the geospatial face for @p gpu_class_ on a HIP device. */
 template <gpu_class_t gpu_class_>
 struct geospatial_vram_amd_build {
-    using face_t = us::geospatial::vram_amd_index<
-        typename us::geospatial::geospatial_ladder<geospatial_amd_capabilities<gpu_class_>>::kit_t, util::u32_t,
-        geospatial_amd_code_object<gpu_class_>>;
+    using face_t = us::geospatial::vram_amd_index<geospatial_vram_kit<gpu_class_>, util::u32_t,
+                                                  geospatial_amd_code_object<gpu_class_>>;
 
     std::unique_ptr<face_t> operator()(int device) const noexcept {
         return std::unique_ptr<face_t> {new (std::nothrow) face_t(util::hip_virtual_memory_allocator<util::byte_t> {
@@ -1810,11 +1798,8 @@ struct geospatial_vram_amd_variant {
         if (failed(status)) return status;
         admit_module = std::move(module);
         util::vram_kernel_symbol_t symbol;
-        vram_kernel_symbol(
-            symbol, "geospatial", "amd_admit", {"hip_admit_arguments", 1},
-            util::itanium_type<
-                typename us::geospatial::geospatial_ladder<geospatial_amd_capabilities<gpu_class_>>::kit_t> {},
-            util::itanium_type<node_id_t> {});
+        vram_kernel_symbol(symbol, "geospatial", "amd_admit", {"hip_admit_arguments", 1},
+                           util::itanium_type<geospatial_vram_kit<gpu_class_>> {}, util::itanium_type<node_id_t> {});
         admit = admit_module.function(symbol.text);
         return admit ? util::status_code_t::success_k : util::status_code_t::device_k;
     }
@@ -2017,20 +2002,25 @@ util::expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::searc
     auto const [queries, encode_status] = encode_(query_batch.observations.data(), count, pages);
     if (failed(encode_status)) return {{}, encode_status};
     // Candidates fewer than the ranking they fill would short every query.
-    std::size_t const candidates_count = util::max_of(
-        expansion ? expansion : util::default_expansion_factor(geometry.connectivity), wanted);
-    typename face_t::search_config_t const config {static_cast<util::u32_t>(candidates_count),
-                                                   static_cast<util::u32_t>(candidates_count)};
+    std::size_t candidates_count = 0;
+    typename face_t::search_config_t config {};
 
     // Past the walk's own scratch: the queries, the judged metres and counts, the candidates and
     // the judged IDs, each column its own aligned carve.
-    std::size_t const listed_count = count * candidates_count, judged = count * wanted;
+    std::size_t const judged = count * wanted;
+    std::size_t listed_count = 0, judging_bytes = 0;
     auto const aligned = [](std::size_t bytes) noexcept {
         return util::round_up_to_multiple(bytes, util::default_alignment_k);
     };
-    std::size_t const judging_bytes = aligned(count * sizeof(value_t)) + aligned(judged * sizeof(util::f64_t)) +
-                                      aligned(count * sizeof(util::u64_t)) + aligned(listed_count * sizeof(node_id_t)) +
-                                      aligned(listed_count * sizeof(util::f32_t)) + aligned(judged * sizeof(node_id_t));
+    auto const take_candidates = [&](std::size_t candidates) noexcept {
+        candidates_count = candidates, listed_count = count * candidates;
+        config = {static_cast<util::u32_t>(candidates), static_cast<util::u32_t>(candidates), search.traversal};
+        judging_bytes = aligned(count * sizeof(value_t)) + aligned(judged * sizeof(util::f64_t)) +
+                        aligned(count * sizeof(util::u64_t)) + aligned(listed_count * sizeof(node_id_t)) +
+                        aligned(listed_count * sizeof(util::f32_t)) + aligned(judged * sizeof(node_id_t));
+    };
+    take_candidates(
+        util::max_of(expansion ? expansion : util::default_expansion_factor(geometry.connectivity), wanted));
     // Each shard judges its own candidates on its stream into the sharded index's outputs, which
     // merges them by distance.
     auto judge = [&](face_t& face, nk::matrix_span<node_id_t> host_ids, nk::matrix_span<util::f64_t> host_metres,
@@ -2082,17 +2072,27 @@ util::expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::searc
             return util::status_code_t::device_k;
         return context.wait();
     };
-    auto const [found, status] = index.search_every_shard(
-        count, executor, judge,
-        nk::matrix_span<util::uuid128_t> {reinterpret_cast<util::uuid128_t*>(outputs.keys), count, wanted},
-        nk::matrix_span<util::f64_t> {outputs.scores, count, wanted}, std::span<std::size_t> {outputs.counts, count},
-        queries, config, judging_bytes);
-    if (failed(status)) return {{}, status};
+    // A scan judges the exact nearest candidates, so while the relation leaves a query short of its
+    // matches and some node went unjudged, it judges twice as many.
+    std::size_t const published = index.size();
+    traversal_stats_t stats;
+    while (true) {
+        auto const [found, status] = index.search_every_shard(
+            count, executor, judge,
+            nk::matrix_span<util::uuid128_t> {reinterpret_cast<util::uuid128_t*>(outputs.keys), count, wanted},
+            nk::matrix_span<util::f64_t> {outputs.scores, count, wanted},
+            std::span<std::size_t> {outputs.counts, count}, queries, config, judging_bytes);
+        if (failed(status)) return {{}, status};
+        stats.computed_distances += found.computed_distances;
+        stats.visited_members += found.visited_members;
+        stats.restarts += found.restarts;
+        std::size_t filled = 0;
+        for (std::size_t query = 0; query != count; ++query) filled += outputs.counts[query] == wanted;
+        if (search.traversal != util::traversal_t::scan_k || filled == count || candidates_count >= published) break;
+        take_candidates(util::min_of(candidates_count * 2, published));
+    }
     [[maybe_unused]] util::continuation_t const heard = ticks(count - 1);
-    return {{.computed_distances = found.computed_distances,
-             .visited_members = found.visited_members,
-             .restarts = found.restarts},
-            util::status_code_t::success_k};
+    return {stats, util::status_code_t::success_k};
 }
 
 template <gpu_class_t gpu_class_>
@@ -2392,7 +2392,8 @@ struct variant_bodies<geospatial_traits_t> {
     }
 
     /** A device's stored observation, decoded by the codec its checkpoints write. */
-    static util::status_t keep_stored(util::bytes_view_t stored, kept_t& kept) noexcept {
+    template <typename variant_type_>
+    static util::status_t keep_stored(variant_type_ const&, util::bytes_view_t stored, kept_t& kept) noexcept {
         return us::geospatial::earth_observation_codec_t {}.load(stored, kept);
     }
 

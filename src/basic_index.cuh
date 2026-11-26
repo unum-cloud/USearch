@@ -87,6 +87,10 @@ using basic_held_plan =
 template <typename arguments_type_>
 using handle_of = std::remove_pointer_t<std::remove_pointer_t<decltype(std::declval<arguments_type_&>().index)>>;
 
+/** Whether a call's arguments name the bytes of the sketch in front of every stored value. */
+template <typename arguments_type_>
+concept a_sketch_sizing_argument_set = requires(arguments_type_ const& arguments) { arguments.sketch_bytes; };
+
 /** Applies @p visitor to the variant @p handle picked, as <tt>visitor(punned_basic_index<traits,
  *  residency>)</tt>. */
 template <typename handle_type_, typename visitor_type_>
@@ -357,6 +361,8 @@ void basic_load_ram(arguments_type_* arguments, checkpoint_type_ checkpoint) noe
     if (arguments->connectivity && arguments->connectivity < geometry.connectivity)
         return propagate_error(usearch_status_config_mismatch_k, outcome, "A load widens rows, never narrows"), void();
     if (arguments->connectivity) geometry.connectivity = arguments->connectivity;
+    if constexpr (a_sketch_sizing_argument_set<arguments_type_>)
+        if (arguments->sketch_bytes) geometry.sketch_bytes = arguments->sketch_bytes;
     auto load = [&](auto const& punned) noexcept {
         return basic_load_variant(punned, checkpoint, *arguments, outcome);
     };
@@ -393,6 +399,8 @@ void basic_load_vram(arguments_type_* arguments, [[maybe_unused]] checkpoint_typ
     if (arguments->connectivity && arguments->connectivity < geometry.connectivity)
         return propagate_error(usearch_status_config_mismatch_k, outcome, "A load widens rows, never narrows"), void();
     if (arguments->connectivity) geometry.connectivity = arguments->connectivity;
+    if constexpr (a_sketch_sizing_argument_set<arguments_type_>)
+        if (arguments->sketch_bytes) geometry.sketch_bytes = arguments->sketch_bytes;
     auto load = [&](auto const& punned) noexcept {
         return basic_load_variant(punned, checkpoint, *arguments, outcome);
     };
@@ -446,6 +454,8 @@ void basic_view_nvme(arguments_type_* arguments) noexcept {
     typename handle_t::traits_t::geometry_t geometry;
     if (util::status_t const recalled = handle_t::traits_t::recall(path, geometry); failed(recalled))
         return propagate_error(recalled, outcome), void();
+    if constexpr (a_sketch_sizing_argument_set<arguments_type_>)
+        if (arguments->sketch_bytes) geometry.sketch_bytes = arguments->sketch_bytes;
     auto view = [&](auto punned) noexcept {
         nvme_executor_t call_executor;
         nvme_executor_t* const executor = executor_of(punned, arguments->executor, call_executor, outcome);
@@ -683,9 +693,6 @@ void basic_search(arguments_type_* arguments) noexcept {
     visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
         arena_residency_t const residency = punned.verbs.residency(punned.variant);
         if (!accepts_traversal(residency, arguments->traversal, arguments->predicate, outcome)) return;
-        if (arguments->traversal == usearch_traversal_scan_k && residency != ram_residency_k)
-            return propagate_error(usearch_status_unsupported_k, outcome, "No device scan serves this modality"),
-                   void();
         usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
                                                           staging_residency(arguments->arena, residency),
                                                           {address_of(arguments->queries)}, outcome);
@@ -729,15 +736,15 @@ void basic_within(arguments_type_* arguments) noexcept {
     if (arguments->stats) *arguments->stats = {};
     *arguments->matches = {};
     if (arguments->written) *arguments->written = 0;
-    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
-                                                      ram_residency_k, {address_of(arguments->queries)}, outcome);
-    if (!arena) return;
-    if (!traits_t::accepts(*arguments, outcome)) return;
-    if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
     visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
-        if (!accepts_traversal(punned.verbs.residency(punned.variant), arguments->traversal, arguments->predicate,
-                               outcome))
-            return;
+        arena_residency_t const residency = punned.verbs.residency(punned.variant);
+        if (!accepts_traversal(residency, arguments->traversal, arguments->predicate, outcome)) return;
+        usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
+                                                          staging_residency(arguments->arena, residency),
+                                                          {address_of(arguments->queries)}, outcome);
+        if (!arena) return;
+        if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
+        if (!traits_t::accepts(*arguments, outcome)) return;
         auto const [queries, queries_status] = traits_t::queries_of(*arguments, arena->memory);
         if (failed(queries_status)) return propagate_error(queries_status, outcome), void();
         predicate_t const predicate = predicate_of(arguments->predicate);
@@ -754,7 +761,14 @@ void basic_within(arguments_type_* arguments) noexcept {
                                          predicate, arena->memory, *executor, ticks),
                      arguments->stats, outcome))
             return;
-        *arguments->matches = outputs.matches;
+        auto const [keys, keys_status] = publish(*arena, outputs.matches.keys, outputs.written);
+        auto const [scores, scores_status] = publish(*arena, outputs.matches.scores, outputs.written);
+        auto const [offsets, offsets_status] = publish(*arena, outputs.matches.offsets, count + 1);
+        if (util::status_t const published = drained(*arena,
+                                                     first_failure({keys_status, scores_status, offsets_status}));
+            failed(published))
+            return propagate_error(published, outcome), void();
+        *arguments->matches = {keys, scores, offsets};
         if (arguments->written) *arguments->written = outputs.written;
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });

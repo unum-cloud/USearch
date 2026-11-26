@@ -216,8 +216,9 @@ usearch_py_enum_t usearch_py_gpu_class = {"GPUClass", usearch_gpu_class_nvidia_a
                                           NULL};
 usearch_py_enum_t usearch_py_nvme_class = {"NVMeClass", usearch_nvme_class_posix_k, usearch_nvme_class_windows_ioring_k,
                                            spell_nvme_class, NULL};
-usearch_py_enum_t usearch_py_sequence_metric = {"SequenceMetric", usearch_sequence_metric_levenshtein_bytes_k,
-                                                usearch_sequence_metric_overlap_k, spell_sequence_metric, NULL};
+usearch_py_enum_t usearch_py_sequence_metric = {"SequenceMetric", usearch_sequence_metric_protein_alignment_k,
+                                                usearch_sequence_metric_utf8_containment_k, spell_sequence_metric,
+                                                NULL};
 usearch_py_enum_t usearch_py_shapes_metric = {"ShapesMetric", usearch_shapes_metric_chamfer_k,
                                               usearch_shapes_metric_wasserstein_procrustes_k, spell_shapes_metric,
                                               NULL};

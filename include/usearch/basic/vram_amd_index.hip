@@ -34,19 +34,20 @@ static_assert(sizeof(std::size_t) == sizeof(u64_t), "The caller's offsets cross 
 
 /**
  *  @brief Scores each round of a walk's entries with the whole block: warp zero posts the query
- *      and an entry per lane, and every warp scores its share on @p rung_ of @p kit_.
+ *      and an entry per lane, and every warp scores its share on @p rung_ of @p kit_ for @p role_.
  *
  *  Warps score @c lanes_per_entry_k lanes to an entry, in turns when an entry takes more lanes than
- *  the block's warps split evenly. Only warp zero walks, so the frontier, the visited set and the
- *  query's span stay its own; the other warps @ref serve rounds until it @ref finish es. Two named
- *  barriers bracket every round, so the posted entries and the span are read between them alone and
- *  rewritten outside them.
+ *  the block's warps split evenly, and two neighbouring entries a turn for a paired kit. Only warp
+ *  zero walks, so the frontier, the visited set and the query's span stay its own; the other warps
+ *  @ref serve rounds until it @ref finish es. Two named barriers bracket every round, so the posted
+ *  entries and the span are read between them alone and rewritten outside them.
  */
-template <a_vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
+template <a_vram_basic_kit kit_, score_role_t role_, u32_t rung_, typename node_id_type_>
 struct hip_block_schedule {
     using warp_t = typename kit_::warp_t;
-    using query_t = typename kit_::query_t;
-    inline static constexpr u32_t lanes_per_entry_k = vram_lanes_per_entry<kit_, rung_>();
+    inline static constexpr score_role_t role_k = role_;
+    using query_t = vram_query<kit_, role_>;
+    inline static constexpr u32_t lanes_per_entry_k = vram_lanes_per_entry<kit_, role_, rung_>();
 
     /** Entries one warp scores per round. */
     inline static constexpr u32_t entries_per_warp_k = warp_t::width_k / lanes_per_entry_k;
@@ -120,17 +121,20 @@ struct hip_block_schedule {
   private:
     __device__ __forceinline__ void score_share_(vram_ragged_view<node_id_type_> const& storage, u32_t warp,
                                                  u32_t lane) noexcept {
+        if constexpr (a_vram_paired_kit<kit_, role_, rung_>) {
+            // Each warp takes neighbours of the round's order, alike in length once split.
+            for (u32_t first = 2 * warp; first < round.entries; first += 2 * vram_warps_per_block_k) {
+                vram_distance_pair_t const distances = vram_score_pair<kit_, role_, rung_>(
+                    storage, round.query, round.ids[first], round.ids[first + 1], round.radius, lane);
+                if (lane == 0) round.distances[first] = distances.first, round.distances[first + 1] = distances.second;
+            }
+            return;
+        }
         for (u32_t first = warp * entries_per_warp_k; first < round.entries; first += entries_per_block_k) {
             u32_t const position = first + lane / lanes_per_entry_k;
             node_id_type_ const node_id = round.ids[position];
-            distance_t distance = std::numeric_limits<distance_t>::infinity();
-            // An entry's lanes share its ID, so every group takes one side of each branch whole.
-            if (node_id != (std::numeric_limits<node_id_type_>::max)()) {
-                vram_entry_t const entry = storage.entry(node_id);
-                distance = kit_::lower_bound(storage.kernel, round.query, entry);
-                if (!(distance > round.radius))
-                    distance = vram_score<kit_, rung_>(storage.kernel, round.query, entry, round.radius, lane);
-            }
+            distance_t const distance = vram_score_entry<kit_, role_, rung_>(storage, round.query, node_id,
+                                                                             round.radius, lane);
             if (lane % lanes_per_entry_k == 0) round.distances[position] = distance;
         }
     }
@@ -140,16 +144,16 @@ struct hip_block_schedule {
     static __device__ __forceinline__ void barrier_() noexcept { __syncthreads(); }
 };
 
-/** The schedule a kit scores through on @p rung_: in place when a lane scores an entry alone, with
- *  the whole block when an entry takes several lanes. */
-template <a_vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
-using hip_schedule =
-    std::conditional_t<vram_lanes_per_entry<kit_, rung_>() == 1, vram_lane_schedule<kit_, rung_, node_id_type_>,
-                       hip_block_schedule<kit_, rung_, node_id_type_>>;
+/** The schedule a kit scores through for @p role_ on @p rung_: in place when a lane scores an entry
+ *  alone, as every builder by sketches does, and with the whole block when one takes several. */
+template <a_vram_basic_kit kit_, score_role_t role_, u32_t rung_, typename node_id_type_>
+using hip_schedule = std::conditional_t<vram_lanes_per_entry<kit_, role_, rung_>() == 1,
+                                        vram_lane_schedule<kit_, role_, rung_, node_id_type_>,
+                                        hip_block_schedule<kit_, role_, rung_, node_id_type_>>;
 
 /** Hands @p walk every ID in @b [first,end) the calling warp assigns itself from @p assigned, a
- *  node ID, a touched offset or a query index: every warp walks under a lane schedule, warp zero
- *  alone under a block one, the other warps serving its rounds until it runs out. */
+ *  wave's offset, a touched offset or a query index: every warp walks under a lane schedule, warp
+ *  zero alone under a block one, the other warps serving its rounds until it runs out. */
 template <typename warp_type_, typename schedule_, typename node_id_type_, typename assigned_type_, typename walk_type_>
 __device__ __forceinline__ void hip_for_each_assigned(schedule_& schedule,
                                                       vram_ragged_view<node_id_type_> const& storage, u32_t* assigned,
@@ -174,14 +178,15 @@ __device__ __forceinline__ void hip_for_each_assigned(schedule_& schedule,
  *  walks the published nodes, and publishes its forward neighbor row with one release. The host
  *  launches each wave behind the last one's back-link passes, so a wave walks a graph whose reverse
  *  links are already merged, and re-selects behind its own, so its nodes reach one another. Nodes
- *  keep the neighbors the kit's @c selector_t picks.
+ *  keep the neighbors the kit's @c selector_t picks. A re-selection over the view's listed IDs
+ *  walks the ID at each offset, every ID once, so each row still has one writer in the launch.
  */
 template <a_vram_basic_kit kit_, u32_t rung_, u32_t candidate_slots_, vram_kernel_t kernel_, typename node_id_type_>
 __device__ __forceinline__ void hip_insert(vram_build_view<node_id_type_> const& view) {
     using warp_t = typename kit_::warp_t;
     using scan_t = typename kit_::scan_t;
     using selector_t = typename kit_::selector_t;
-    using schedule_t = hip_schedule<kit_, rung_, node_id_type_>;
+    using schedule_t = hip_schedule<kit_, score_role_t::build_k, rung_, node_id_type_>;
     // The scratch slice hosts the query span, the pivot span and the selection spans over the
     // walk's candidates; the visited set is in the arena.
     extern __shared__ byte_t dynamic_scratch[];
@@ -196,7 +201,9 @@ __device__ __forceinline__ void hip_insert(vram_build_view<node_id_type_> const&
                                           vram_register_frontier<candidate_slots_, warp_t, node_id_type_>>;
     schedule_t schedule {schedule_state};
     hip_for_each_assigned<warp_t>( //
-        schedule, view.storage, view.assigned_nodes, view.first_id, view.end_id, slice, [&](node_id_type_ node_id) {
+        schedule, view.storage, view.assigned_nodes, 0u, static_cast<u32_t>(view.end_id - view.first_id), slice,
+        [&](u32_t offset) {
+            node_id_type_ const node_id = view.listed ? view.listed[offset] : view.first_id + offset;
             vram_warp_context<frontier_t> context;
             if constexpr (candidate_slots_ == 0) {
                 context.frontier.tail_.entries_ = view.arena_shape.template tail_span<node_id_type_>(view.arena,
@@ -205,12 +212,11 @@ __device__ __forceinline__ void hip_insert(vram_build_view<node_id_type_> const&
                 context.frontier.expansion_target_ = view.expansion;
             }
             context.random_generator = vram_lane_generator<warp_t>(node_id, lane);
-            node_id_type_ const walked = node_id - view.first_id;
             vram_visited_set<warp_t, node_id_type_> visited {slice.visited_slots, view.arena_shape.visited_hash_shift,
-                                                             view.epoch_base + static_cast<u32_t>(walked) + 1};
+                                                             view.epoch_base + offset + 1};
             if constexpr (kernel_ == vram_kernel_t::refine_k)
                 vram_reselect_one<kit_, selector_t>( //
-                    view, schedule, node_id, visited, slice.scratch, slice.scratch + view.span_bytes,
+                    view, schedule, node_id, offset, visited, slice.scratch, slice.scratch + view.span_bytes,
                     gathered_ids[warp], selection, context, lane);
             else
                 vram_insert_one<kit_, selector_t>( //
@@ -228,7 +234,7 @@ __device__ __forceinline__ void hip_insert(vram_build_view<node_id_type_> const&
 template <a_vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
 __device__ __forceinline__ void hip_back_link(vram_build_view<node_id_type_> const& view) {
     using warp_t = typename kit_::warp_t;
-    using schedule_t = hip_schedule<kit_, rung_, node_id_type_>;
+    using schedule_t = hip_schedule<kit_, score_role_t::build_k, rung_, node_id_type_>;
     extern __shared__ byte_t dynamic_scratch[];
     __shared__ typename schedule_t::shared_t schedule_state;
 
@@ -253,7 +259,7 @@ __device__ __forceinline__ void hip_back_link(vram_build_view<node_id_type_> con
 template <a_vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
 __device__ __forceinline__ void hip_gather_neighborhoods(vram_round_view<node_id_type_> const& view) {
     using warp_t = typename kit_::warp_t;
-    using schedule_t = hip_schedule<kit_, rung_, node_id_type_>;
+    using schedule_t = hip_schedule<kit_, score_role_t::build_k, rung_, node_id_type_>;
     extern __shared__ byte_t dynamic_scratch[];
     __shared__ typename schedule_t::shared_t schedule_state;
 
@@ -273,7 +279,7 @@ __device__ __forceinline__ void hip_gather_neighborhoods(vram_round_view<node_id
 template <a_vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
 __device__ __forceinline__ void hip_restitch(vram_round_view<node_id_type_> const& view) {
     using warp_t = typename kit_::warp_t;
-    using schedule_t = hip_schedule<kit_, rung_, node_id_type_>;
+    using schedule_t = hip_schedule<kit_, score_role_t::build_k, rung_, node_id_type_>;
     extern __shared__ byte_t dynamic_scratch[];
     __shared__ typename schedule_t::shared_t schedule_state;
 
@@ -298,13 +304,15 @@ __device__ __forceinline__ void hip_restitch(vram_round_view<node_id_type_> cons
     telemetry.template flush<warp_t, vram_traversal_t::searching_k>(view.telemetry, lane);
 }
 
-/** One walker per query on the rung of @p slots_, the arena frontier at zero; walkers take queries
+/** One walker per query for @p kernel_, a search or its seeding walk, or per range of a query for
+ *  a scan, on the rung of @p slots_, the arena frontier at zero; walkers take queries or ranges
  *  from the batch counter, as builders take entries. */
-template <a_vram_basic_kit kit_, u32_t rung_, u32_t slots_, typename node_id_type_>
+template <a_vram_basic_kit kit_, vram_kernel_t kernel_, u32_t rung_, u32_t slots_, typename node_id_type_>
 __device__ __forceinline__ void hip_walk(vram_search_view<node_id_type_> const& view) {
     using warp_t = typename kit_::warp_t;
     using scan_t = typename kit_::scan_t;
-    using schedule_t = hip_schedule<kit_, rung_, node_id_type_>;
+    constexpr score_role_t role_k = vram_kernel_role(kernel_);
+    using schedule_t = hip_schedule<kit_, role_k, rung_, node_id_type_>;
     extern __shared__ byte_t dynamic_scratch[];
     __shared__ node_id_type_ gathered_ids[vram_warps_per_block_k][3 * warp_t::width_k];
     __shared__ typename schedule_t::shared_t schedule_state;
@@ -319,14 +327,80 @@ __device__ __forceinline__ void hip_walk(vram_search_view<node_id_type_> const& 
         frontier.expansion_target_ = view.expansion;
     }
     schedule_t schedule {schedule_state};
+    u32_t const items = kernel_ == vram_kernel_t::scan_k ? view.queries_count * view.ranges : view.queries_count;
     hip_for_each_assigned<warp_t>( //
-        schedule, view.storage, view.assigned_queries, 0u, view.queries_count, slice, [&](u32_t query_index) {
-            vram_visited_set<warp_t, node_id_type_> visited {slice.visited_slots, view.arena_shape.visited_hash_shift,
-                                                             view.epoch_base + query_index + 1};
-            vram_walk_one<kit_>(view, schedule, query_index, slice.scratch, visited, frontier, gathered_ids[slice.warp],
-                                slice.lane);
+        schedule, view.storage, view.assigned_queries, 0u, items, slice, [&](u32_t item) {
+            if constexpr (kernel_ == vram_kernel_t::scan_k)
+                vram_scan_one<kit_>(view, schedule, item, slice.scratch, frontier, gathered_ids[slice.warp],
+                                    slice.lane);
+            else {
+                vram_visited_set<warp_t, node_id_type_> visited {
+                    slice.visited_slots, view.arena_shape.visited_hash_shift, view.epoch_base + item + 1};
+                vram_walk_one<kit_, role_k>(view, schedule, item, slice.scratch, visited, frontier,
+                                            gathered_ids[slice.warp], slice.lane);
+            }
         });
 }
+
+#pragma region Stored Values
+
+/** Fills the sketch of every value of a staged batch: a warp per value, striding the grid, each
+ *  sketch written from its own value's sequence, in front of a stored value or into a bare query's
+ *  row, through the warp's share of the launch's shared scratch. */
+template <a_vram_sketching_kit kit_>
+__device__ __forceinline__ void hip_sketch_values(vram_sketch_t const& batch) {
+    extern __shared__ byte_t dynamic_scratch[];
+    vram_grid_warp_t const warp = vram_grid_warp<typename kit_::warp_t>();
+    byte_t* const scratch = dynamic_scratch +
+                            threadIdx.x / kit_::warp_t::width_k * kit_::sketch_scratch_bytes(batch.sketch_bytes);
+    for (u32_t value = warp.index; value < batch.count; value += warp.count) {
+        u64_t const first = batch.offsets[value] + batch.shift, end = batch.offsets[value + 1] + batch.shift;
+        if (batch.sketches)
+            kit_::sketch_write(batch.tables, {batch.values + first, static_cast<u32_t>(end - first)}, warp.lane,
+                               batch.sketches + std::size_t {value} * batch.sketch_bytes, batch.sketch_bytes, scratch);
+        else
+            kit_::sketch_write(batch.tables,
+                               vram_part<kit_, score_role_t::search_k>(batch.values, first, end, batch.sketch_bytes),
+                               warp.lane, batch.values + first, batch.sketch_bytes, scratch);
+    }
+}
+
+/**
+ *  @brief Stores a load's run for a kit closing its values.
+ *
+ *  A warp per value copies the saved sequence behind the gap its sketch of the load's bytes takes,
+ *  writes the closing padding and its count, and under a sketching kit fills the sketch from the
+ *  stored sequence through the warp's share of the launch's shared scratch.
+ *
+ *  The saved sums count bytes from the run's first, and every stored value starts on a word of the
+ *  tape, as its planned start says.
+ */
+template <typename kit_, typename node_id_type_>
+__device__ __forceinline__ void hip_load_closed(vram_load<node_id_type_> const& load) {
+    using warp_t = typename kit_::warp_t;
+    vram_grid_warp_t const warp = vram_grid_warp<warp_t>();
+    u64_t const saved_first = load.saved_offsets[0];
+    u32_t const sketch_bytes = load.sketch_bytes;
+    for (u32_t value = warp.index; value < load.count; value += warp.count) {
+        byte_t const* const saved = load.saved + (load.saved_offsets[value] - saved_first);
+        u32_t const bytes = static_cast<u32_t>(load.saved_offsets[value + 1] - load.saved_offsets[value]);
+        u64_t const first = load.stored_offsets[value], end = load.stored_offsets[value + 1];
+        byte_t* const sequence = load.tape + first + sketch_bytes;
+        u32_t const closing = static_cast<u32_t>(end - first) - sketch_bytes - bytes;
+        for (u32_t byte = warp.lane; byte < bytes; byte += warp_t::width_k) sequence[byte] = saved[byte];
+        if (warp.lane < closing)
+            sequence[bytes + warp.lane] = static_cast<byte_t>(warp.lane + 1 == closing ? closing : 0);
+        if constexpr (a_vram_sketching_kit<kit_>) {
+            extern __shared__ byte_t dynamic_scratch[];
+            byte_t* const scratch = dynamic_scratch +
+                                    threadIdx.x / warp_t::width_k * kit_::sketch_scratch_bytes(sketch_bytes);
+            warp_t::sync();
+            kit_::sketch_write(load.tables, {sequence, bytes}, warp.lane, load.tape + first, sketch_bytes, scratch);
+        }
+    }
+}
+
+#pragma endregion Stored Values
 
 #pragma region Views
 
@@ -334,8 +408,8 @@ __device__ __forceinline__ void hip_walk(vram_search_view<node_id_type_> const& 
 template <typename node_id_type_>
 __device__ __forceinline__ vram_ragged_view<node_id_type_> vram_view(
     vram_ragged_storage<node_id_type_> const& storage) noexcept {
-    return {storage.values,       storage.offsets, storage.neighbors,
-            storage.connectivity, storage.kernel,  storage.parameters};
+    return {storage.values, storage.offsets,    storage.neighbors,   storage.connectivity,
+            storage.kernel, storage.parameters, storage.sketch_bytes};
 }
 template <typename node_id_type_>
 __device__ __forceinline__ vram_build_view<node_id_type_> vram_view(vram_build<node_id_type_> const& build) noexcept {
@@ -347,6 +421,7 @@ __device__ __forceinline__ vram_build_view<node_id_type_> vram_view(vram_build<n
             build.scratch_bytes_per_warp,
             build.span_bytes,
             build.first_id,
+            build.listed,
             build.arena,
             vram_view(build.arena_shape),
             build.expansion,
@@ -366,6 +441,9 @@ __device__ __forceinline__ vram_search_view<node_id_type_> vram_view(
             search.queries,
             search.query_offsets,
             search.queries_count,
+            search.query_sketches,
+            search.seed_ids,
+            search.seeds_count,
             search.sampling_bound,
             search.scratch_bytes_per_warp,
             search.expansion,
@@ -379,7 +457,10 @@ __device__ __forceinline__ vram_search_view<node_id_type_> vram_view(
             search.filling_nodes,
             search.result_ids,
             search.result_distances,
-            search.count};
+            search.count,
+            search.ranges,
+            reinterpret_cast<vram_scored_node<node_id_type_>*>(search.range_matches),
+            search.finished_ranges};
 }
 
 template <typename node_id_type_>
@@ -412,19 +493,25 @@ __device__ __forceinline__ vram_round_view<node_id_type_> vram_view(vram_round<n
 template <vram_kernel_t kernel_, a_vram_basic_kit kit_, u32_t rung_, u32_t slots_, typename node_id_type_>
 __device__ __forceinline__ void hip_kernel_body(vram_arguments<node_id_type_> const& arguments) {
     vram_build<node_id_type_> const& build = arguments.build;
-    // Kits without a load hook store values as saved and size spans by length; theirs never launch.
+    // Kits without a load hook store values as saved; theirs never launch.
     constexpr bool loads_values = requires { kit_::load_values(arguments.load); };
-    constexpr bool sizes_spans = requires { kit_::size_spans(arguments.load); };
     if constexpr (kernel_ == vram_kernel_t::insert_k || kernel_ == vram_kernel_t::refine_k)
         hip_insert<kit_, rung_, slots_, kernel_>(vram_view(build));
     else if constexpr (kernel_ == vram_kernel_t::back_link_k) hip_back_link<kit_, rung_>(vram_view(build));
     else if constexpr (kernel_ == vram_kernel_t::gather_neighborhoods_k)
         hip_gather_neighborhoods<kit_, rung_>(vram_view(arguments.round));
     else if constexpr (kernel_ == vram_kernel_t::restitch_k) hip_restitch<kit_, rung_>(vram_view(arguments.round));
+    else if constexpr (kernel_ == vram_kernel_t::load_values_k && a_vram_kit_closing_values<kit_>)
+        hip_load_closed<kit_>(arguments.load);
     else if constexpr (kernel_ == vram_kernel_t::load_values_k && loads_values) kit_::load_values(arguments.load);
-    else if constexpr (kernel_ == vram_kernel_t::size_spans_k && sizes_spans) kit_::size_spans(arguments.load);
-    else if constexpr (kernel_ == vram_kernel_t::load_values_k || kernel_ == vram_kernel_t::size_spans_k) return;
-    else hip_walk<kit_, rung_, slots_>(vram_view(arguments.search));
+    else if constexpr (kernel_ == vram_kernel_t::sketch_values_k && a_vram_sketching_kit<kit_>)
+        hip_sketch_values<kit_>(arguments.sketch);
+    else if constexpr (kernel_ == vram_kernel_t::load_values_k || kernel_ == vram_kernel_t::sketch_values_k) return;
+    else if constexpr (kernel_ == vram_kernel_t::seed_k) {
+        static_assert(a_vram_sketching_kit<kit_>, "Only a kit building by sketches seeds its searches");
+        hip_walk<kit_, kernel_, rung_, slots_>(vram_view(arguments.search));
+    }
+    else hip_walk<kit_, kernel_, rung_, slots_>(vram_view(arguments.search));
 }
 
 } // namespace unum::usearch::basic

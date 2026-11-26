@@ -30,23 +30,19 @@ util::bytes_view_t shapes_amd_code_object<hip_class_k, nk_f16_k>::bytes() noexce
     util::byte_t const* const* const bounds = shapes_bundles<hip_class_k>();
     return {bounds[0], bounds[1]};
 }
-template struct us::shapes::vram_amd_index<
-    typename us::shapes::shapes_ladder<nk::f16_t, numkong_capabilities_of(hip_class_k)>::kit_t, util::u32_t,
-    shapes_amd_code_object<hip_class_k, nk_f16_k>>;
-template struct us::shapes::vram_amd_kits<
-    typename us::shapes::shapes_ladder<nk::f16_t, numkong_capabilities_of(hip_class_k)>::kit_t, util::u32_t,
-    shapes_amd_code_object<hip_class_k, nk_f16_k>>;
+template struct us::shapes::vram_amd_index<shapes_vram_kit<nk::f16_t, hip_class_k>, util::u32_t,
+                                           shapes_amd_code_object<hip_class_k, nk_f16_k>>;
+template struct us::shapes::vram_amd_kits<shapes_vram_kit<nk::f16_t, hip_class_k>, util::u32_t,
+                                          shapes_amd_code_object<hip_class_k, nk_f16_k>>;
 
 template <>
 util::bytes_view_t shapes_amd_code_object<hip_class_k, nk_f32_k>::bytes() noexcept {
     util::byte_t const* const* const bounds = shapes_bundles<hip_class_k>();
     return {bounds[2], bounds[3]};
 }
-template struct us::shapes::vram_amd_index<
-    typename us::shapes::shapes_ladder<nk::f32_t, numkong_capabilities_of(hip_class_k)>::kit_t, util::u32_t,
-    shapes_amd_code_object<hip_class_k, nk_f32_k>>;
-template struct us::shapes::vram_amd_kits<
-    typename us::shapes::shapes_ladder<nk::f32_t, numkong_capabilities_of(hip_class_k)>::kit_t, util::u32_t,
-    shapes_amd_code_object<hip_class_k, nk_f32_k>>;
+template struct us::shapes::vram_amd_index<shapes_vram_kit<nk::f32_t, hip_class_k>, util::u32_t,
+                                           shapes_amd_code_object<hip_class_k, nk_f32_k>>;
+template struct us::shapes::vram_amd_kits<shapes_vram_kit<nk::f32_t, hip_class_k>, util::u32_t,
+                                          shapes_amd_code_object<hip_class_k, nk_f32_k>>;
 
 template struct basic_class_tables<shapes_traits_t, vendored_residency_t::vram_amd_k, hip_class_k>;

@@ -1486,6 +1486,8 @@ struct vram_shard_core {
             root_ = root;
             next_pass_ = 0;
             step_ = root == node_id_unknown_k ? step_t::done_k : step_t::expand_k;
+            // Until the first batch lands the copied counters hold the last check's sweep.
+            if (counters_) counters_->swept = root == node_id_unknown_k ? 0 : 2;
         }
 
         /** Turns to @p step from its first pass, answering whether a batch follows. */
@@ -1659,7 +1661,7 @@ struct vram_shard_core {
         /** The phase the plan is in. */
         phase_t phase() const noexcept { return phase_; }
 
-        /** The position of the round's phase in hand among its six, from the opening health check
+        /** The position of the round's phase in hand among its seven, from the opening health check
          *  to the closing one; zero outside a round's phases. */
         std::size_t ordinal() const noexcept { return rounding() ? round_ordinal(phase_, swept_after_) : 0; }
 
@@ -1999,7 +2001,7 @@ struct vram_shard_core {
         /** The phase the plan is in: a move's, then the bound target's round's. */
         phase_t phase() const noexcept { return moving() ? moves_ : rounds_.phase(); }
 
-        /** Where the round's phase sits among its six, and its units done and in all; none in the
+        /** Where the round's phase sits among its seven, and its units done and in all; none in the
          *  moves, which report nothing. */
         std::size_t ordinal() const noexcept { return moving() ? 0 : rounds_.ordinal(); }
         std::size_t completed() const noexcept { return moving() ? 0 : rounds_.completed(); }

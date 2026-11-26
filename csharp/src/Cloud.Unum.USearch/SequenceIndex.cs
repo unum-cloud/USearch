@@ -17,36 +17,45 @@ namespace Cloud.Unum.USearch;
 #region Options
 
 /// <summary>
-/// A sequence scoring kind supported out of the box. Mirrors <c>usearch_sequence_metric_t</c>.
+/// A sequence metric supported out of the box: what the sequences are, the form they are stored in,
+/// and the score ranking them. Every metric stores a sequence folded, and a get returns the stored
+/// form, never the bytes an insertion passed. Mirrors <c>usearch_sequence_metric_t</c>.
 /// </summary>
 public enum SequenceMetric : int
 {
-    /// <summary>A kind the library could not name.</summary>
+    /// <summary>A metric the library could not name.</summary>
     Unknown = 0,
-    /// <summary>Levenshtein edit distance over raw bytes.</summary>
-    LevenshteinBytes = 1,
-    /// <summary>Levenshtein edit distance over UTF-8 code points.</summary>
-    LevenshteinUtf8 = 2,
-    /// <summary>Global alignment with a linear gap cost, scored by a substitution matrix.</summary>
-    NeedlemanWunsch = 3,
-    /// <summary>The share of fixed-width windows one side misses of the other.</summary>
-    Overlap = 4,
+    /// <summary>Global alignment of proteins with linear gaps: BLOSUM62 with a gap of 7 over the 20
+    /// amino acids, B, Z, X and the stop in either case, any other byte as X, unless the index names
+    /// its own costs. A stored sequence reads back as its class codes, five bits apiece, little-endian
+    /// behind one byte counting the slots the last bytes leave unused.</summary>
+    ProteinAlignment = 1,
+    /// <summary>Shifted overlap of DNA or RNA: the cost of aligning two sequences where one slides over
+    /// the other, at the shift most windows of 12 and 19 symbols vote for, on either strand. Bytes fold
+    /// into the classes of A, C, G and T in either case, U read as T and any other byte as T. A stored
+    /// sequence reads back as its class codes, one byte apiece.</summary>
+    DnaOverlap = 2,
+    /// <summary>Window containment of UTF-8 text: the share of the query's distinct windows of 5 and 8
+    /// bytes the stored side lacks, whatever the case. Text is case-folded before it is stored or
+    /// scored, which may lengthen it up to three times, and a stored text reads back folded. Takes no
+    /// costs.</summary>
+    Utf8Containment = 3,
 }
 
 /// <summary>The sequence spellings of <see cref="Names"/>.</summary>
 public static partial class Names
 {
-    /// <summary>Spells a sequence scoring kind, as <see cref="SequenceMetric.LevenshteinBytes"/> spells
-    /// "levenshtein". Calls <c>usearch_sequence_metric_name</c>.</summary>
-    /// <param name="metric">The kind to spell.</param>
+    /// <summary>Spells a sequence metric, as <see cref="SequenceMetric.ProteinAlignment"/> spells
+    /// "protein-alignment". Calls <c>usearch_sequence_metric_name</c>.</summary>
+    /// <param name="metric">The metric to spell.</param>
     /// <returns>The canonical spelling.</returns>
     public static string Name(this SequenceMetric metric) => Spelled(usearch_sequence_metric_name(metric));
 
-    /// <summary>Reads a sequence scoring kind back from its spelling. Calls
+    /// <summary>Reads a sequence metric back from its spelling. Calls
     /// <c>usearch_sequence_metric_from_name</c>.</summary>
     /// <param name="name">The canonical spelling.</param>
-    /// <param name="metric">The kind it spells.</param>
-    /// <returns>True when the spelling names a kind, false otherwise.</returns>
+    /// <param name="metric">The metric it spells.</param>
+    /// <returns>True when the spelling names a metric, false otherwise.</returns>
     public static bool TryParse(string name, out SequenceMetric metric)
     {
         SequenceMetric parsed = default;
@@ -57,50 +66,46 @@ public static partial class Names
 }
 
 /// <summary>
-/// The substitution matrix and gap cost <see cref="SequenceMetric.NeedlemanWunsch"/> scores with; the
-/// Levenshtein kinds score with unit costs and take none. Mirrors <c>usearch_sequence_weights_t</c>.
+/// How alike two symbols are, and the cost of leaving one unaligned, where an index scores by other
+/// costs than its metric's own. A checkpoint records them, so loads and views take none. Bytes
+/// sharing their rows and columns fold into one class, at most 32. A DNA overlap needs costs folding
+/// bytes into exactly four classes holding A, C, G and T apart. Mirrors
+/// <c>usearch_sequence_costs_t</c>.
 /// </summary>
-/// <param name="SubstitutionMatrix">Row-major 256×256 signed scores over byte alphabets.</param>
+/// <param name="Similarities">Row-major 256×256 signed similarities between raw bytes.</param>
 /// <param name="Gap">The cost of one unaligned symbol.</param>
-public readonly record struct SequenceWeights(ReadOnlyMemory<sbyte> SubstitutionMatrix, sbyte Gap)
+public readonly record struct SequenceCosts(ReadOnlyMemory<sbyte> Similarities, sbyte Gap)
 {
-    /// <summary>The scores a whole matrix holds, which the library reads in full.</summary>
-    internal const int MatrixScores = 256 * 256;
-
-    /// <summary>The matrix of optional weights, checked once against the size the library reads.</summary>
-    /// <param name="weights">The weights, if any.</param>
-    /// <returns>The scores, empty without weights.</returns>
-    internal static ReadOnlySpan<sbyte> MatrixOf(SequenceWeights? weights)
+    /// <summary>The similarities of optional costs, checked once against the size the library
+    /// reads.</summary>
+    /// <param name="costs">The costs, if any.</param>
+    /// <returns>The similarities, empty for none.</returns>
+    internal static ReadOnlySpan<sbyte> SimilaritiesOf(SequenceCosts? costs)
     {
-        if (weights is null)
+        ReadOnlySpan<sbyte> similarities = costs is null ? default : costs.Value.Similarities.Span;
+        // The library reads whole tables, so only this side sees a shorter one.
+        if (costs is not null && similarities.Length != 256 * 256)
         {
-            return default;
+            throw new USearchException(Status.ShapeMismatch, "similarities hold 256x256 scores");
         }
 
-        ReadOnlySpan<sbyte> matrix = weights.Value.SubstitutionMatrix.Span;
-        // The library reads the whole matrix, so only this side sees a shorter one.
-        if (matrix.Length != MatrixScores)
-        {
-            throw new USearchException(Status.ShapeMismatch, "a substitution matrix holds 256x256 scores");
-        }
-
-        return matrix;
+        return similarities;
     }
 
-    /// <summary>Lowers optional weights over a matrix the caller fixed.</summary>
-    /// <param name="weights">The weights, if any.</param>
-    /// <param name="matrix">Their matrix, fixed for the call.</param>
+    /// <summary>Lowers optional costs over a table the caller fixed.</summary>
+    /// <param name="costs">The costs, if any.</param>
+    /// <param name="similarities">Their similarities, fixed for the call, or null.</param>
     /// <param name="lowered">Where the C struct is written.</param>
-    /// <returns>The struct, or null without weights.</returns>
-    internal static unsafe NativeSequenceWeights* Lower(
-        SequenceWeights? weights, sbyte* matrix, NativeSequenceWeights* lowered)
+    /// <returns>The struct, or null without costs.</returns>
+    internal static unsafe NativeSequenceCosts* Lower(
+        SequenceCosts? costs, sbyte* similarities, NativeSequenceCosts* lowered)
     {
-        if (weights is null)
+        if (costs is null)
         {
             return null;
         }
 
-        *lowered = new NativeSequenceWeights { SubstitutionMatrix = matrix, Gap = weights.Value.Gap };
+        *lowered = new NativeSequenceCosts { Similarities = similarities, Gap = costs.Value.Gap };
         return lowered;
     }
 }
@@ -111,28 +116,28 @@ public readonly record struct SequenceWeights(ReadOnlyMemory<sbyte> Substitution
 /// </summary>
 public readonly struct SequenceOptions
 {
-    /// <summary>The scoring kind.</summary>
+    /// <summary>What the sequences are and the score ranking them.</summary>
     public SequenceMetric Metric { get; init; }
 
-    /// <summary>The weights <see cref="SequenceMetric.NeedlemanWunsch"/> needs; null for every other
-    /// kind, which refuses any.</summary>
-    public SequenceWeights? Weights { get; init; }
-
-    /// <summary>Window widths in bytes for <see cref="SequenceMetric.Overlap"/>, which needs at least one;
-    /// every other kind refuses any.</summary>
-    public ReadOnlyMemory<nuint> WindowWidths { get; init; }
+    /// <summary>The optional costs; null for the metric's own, and refused for
+    /// <see cref="SequenceMetric.Utf8Containment"/>.</summary>
+    public SequenceCosts? Costs { get; init; }
 
     /// <summary>The connections-per-node bound of the graph; zero derives.</summary>
     public ulong Connectivity { get; init; }
 
+    /// <summary>The bytes of the sketch in front of each stored sequence, a multiple of four; zero takes the
+    /// metric's default, and <see cref="SequenceMetric.DnaOverlap"/> keeps none and refuses any.</summary>
+    public ulong SketchBytes { get; init; }
+
     /// <summary>The upper bound on entries sharing one key; zero is unbounded.</summary>
     public ulong ValuesPerKey { get; init; }
 
-    /// <summary>A byte Levenshtein index, with every optional field derived.</summary>
-    public static SequenceOptions Default => new() { Metric = SequenceMetric.LevenshteinBytes };
+    /// <summary>A protein alignment index, with every optional field derived.</summary>
+    public static SequenceOptions Default => new() { Metric = SequenceMetric.ProteinAlignment };
 }
 
-/// <summary>The scoring kind and connectivity a checkpoint froze. Mirrors
+/// <summary>The scoring kind and geometry a checkpoint froze. Mirrors
 /// <c>usearch_sequence_metadata_t</c>.</summary>
 public readonly struct SequenceMetadata
 {
@@ -142,9 +147,16 @@ public readonly struct SequenceMetadata
     /// <summary>The connections per node the graph was built with.</summary>
     public ulong Connectivity { get; init; }
 
+    /// <summary>The classes the recorded costs folded bytes into; zero for a containment.</summary>
+    public ulong Classes { get; init; }
+
+    /// <summary>The bytes of the sketch in front of each stored sequence; zero when the metric keeps none.</summary>
+    public ulong SketchBytes { get; init; }
+
     internal static SequenceMetadata Lift(in NativeSequenceMetadata lowered) => new()
     {
-        Metric = lowered.Metric, Connectivity = lowered.Connectivity,
+        Metric = lowered.Metric, Connectivity = lowered.Connectivity, Classes = lowered.Classes,
+        SketchBytes = lowered.SketchBytes,
     };
 }
 
@@ -152,7 +164,7 @@ public readonly struct SequenceMetadata
 /// <c>usearch_sequence_index_description_t</c>.</summary>
 public readonly struct SequenceIndexDescription
 {
-    /// <summary>The frozen scoring kind and connectivity.</summary>
+    /// <summary>The frozen scoring kind and geometry.</summary>
     public SequenceMetadata Metadata { get; init; }
 
     /// <summary>The stored entries.</summary>
@@ -186,8 +198,8 @@ public readonly record struct SequenceKeyStats(ulong Entries, ulong TotalBytes, 
 #region Index
 
 /// <summary>
-/// A Similarity Search Index over variable-length sequences - text, DNA, RNA and proteins - under
-/// edit distances, alignments and window overlap.
+/// A Similarity Search Index over variable-length sequences - proteins under alignment, DNA and RNA
+/// under overlap, and UTF-8 text under containment.
 /// </summary>
 /// <remarks>
 /// Every batch is a <see cref="TapeView{TElement}"/> of bytes, so a single sequence is a tape of one.
@@ -206,7 +218,7 @@ public sealed unsafe class SequenceIndex : IDisposable
 
     /// <summary>Creates an empty, mutable sequence index in host memory. Calls
     /// <c>usearch_sequence_init_ram</c>.</summary>
-    /// <param name="options">The scoring kind, its weights or windows, and the graph's bounds.</param>
+    /// <param name="options">The metric, its costs, and the graph's bounds.</param>
     /// <param name="memoryDomains">NUMA node IDs to place one shard on apiece; empty derives.</param>
     /// <param name="cpuClassCeiling">The newest class dispatch may pick, intersected with what the
     /// machine runs; null means no ceiling.</param>
@@ -216,17 +228,16 @@ public sealed unsafe class SequenceIndex : IDisposable
     {
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
-        NativeSequenceWeights weights = default;
-        fixed (sbyte* matrix = SequenceWeights.MatrixOf(options.Weights))
-        fixed (nuint* widths = options.WindowWidths.Span)
+        NativeSequenceCosts costs = default;
+        fixed (sbyte* similarities = SequenceCosts.SimilaritiesOf(options.Costs))
         fixed (int* domains = memoryDomains)
         {
             NativeSequenceInitRam arguments = new()
             {
                 Index = &created, Outcome = &outcome, Metric = options.Metric,
-                Weights = SequenceWeights.Lower(options.Weights, matrix, &weights),
-                WindowWidths = widths, WindowWidthsCount = (nuint)options.WindowWidths.Length,
-                Connectivity = (nuint)options.Connectivity, ValuesPerKey = (nuint)options.ValuesPerKey,
+                Costs = SequenceCosts.Lower(options.Costs, similarities, &costs),
+                Connectivity = (nuint)options.Connectivity, SketchBytes = (nuint)options.SketchBytes,
+                ValuesPerKey = (nuint)options.ValuesPerKey,
                 Ram = new NativeRamOptions
                 {
                     MemoryDomains = (IntPtr)domains, MemoryDomainsCount = (nuint)memoryDomains.Length,
@@ -241,7 +252,7 @@ public sealed unsafe class SequenceIndex : IDisposable
 
     /// <summary>Creates an empty, mutable sequence index in device memory. Calls
     /// <c>usearch_sequence_init_vram</c>.</summary>
-    /// <param name="options">The scoring kind, its weights or windows, and the graph's bounds.</param>
+    /// <param name="options">The metric, its costs, and the graph's bounds.</param>
     /// <param name="devices">CUDA device ordinals to place one shard on apiece; empty derives one.</param>
     /// <param name="gpuClassCeiling">The newest class dispatch may pick; null means no ceiling.</param>
     /// <returns>The new index.</returns>
@@ -250,17 +261,16 @@ public sealed unsafe class SequenceIndex : IDisposable
     {
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
-        NativeSequenceWeights weights = default;
-        fixed (sbyte* matrix = SequenceWeights.MatrixOf(options.Weights))
-        fixed (nuint* widths = options.WindowWidths.Span)
+        NativeSequenceCosts costs = default;
+        fixed (sbyte* similarities = SequenceCosts.SimilaritiesOf(options.Costs))
         fixed (int* ordinals = devices)
         {
             NativeSequenceInitVram arguments = new()
             {
                 Index = &created, Outcome = &outcome, Metric = options.Metric,
-                Weights = SequenceWeights.Lower(options.Weights, matrix, &weights),
-                WindowWidths = widths, WindowWidthsCount = (nuint)options.WindowWidths.Length,
-                Connectivity = (nuint)options.Connectivity, ValuesPerKey = (nuint)options.ValuesPerKey,
+                Costs = SequenceCosts.Lower(options.Costs, similarities, &costs),
+                Connectivity = (nuint)options.Connectivity, SketchBytes = (nuint)options.SketchBytes,
+                ValuesPerKey = (nuint)options.ValuesPerKey,
                 Vram = new NativeVramOptions
                 {
                     Devices = (IntPtr)ordinals, DevicesCount = (nuint)devices.Length,
@@ -276,23 +286,20 @@ public sealed unsafe class SequenceIndex : IDisposable
     /// <summary>Copies a checkpoint into a new, mutable index in host memory. Calls
     /// <c>usearch_sequence_load_ram</c>.</summary>
     /// <param name="path">The checkpoint to read, a monolith or a manifest.</param>
-    /// <param name="weights">The weights an alignment checkpoint was built with; null otherwise.</param>
     /// <param name="memoryDomains">Where the parts land; empty derives every node.</param>
     /// <param name="valuesPerKey">The upper bound on entries sharing one key; zero is unbounded.</param>
     /// <param name="executor">The workers the read fans out over; null reads on the caller's thread.</param>
     /// <param name="cpuClassCeiling">The newest class dispatch may pick; null means no ceiling.</param>
     /// <returns>The new index.</returns>
     public static SequenceIndex LoadRam(
-        string path, SequenceWeights? weights = null, ReadOnlySpan<int> memoryDomains = default,
+        string path, ReadOnlySpan<int> memoryDomains = default,
         ulong valuesPerKey = 0, Executor? executor = null, CPUClass? cpuClassCeiling = null)
     {
         byte[] encoded = Encoding.UTF8.GetBytes(path);
         using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
-        NativeSequenceWeights lowered = default;
         fixed (byte* data = encoded)
-        fixed (sbyte* matrix = SequenceWeights.MatrixOf(weights))
         fixed (int* domains = memoryDomains)
         {
             NativeSequenceLoadRam arguments = new()
@@ -303,7 +310,7 @@ public sealed unsafe class SequenceIndex : IDisposable
                     MemoryDomains = (IntPtr)domains, MemoryDomainsCount = (nuint)memoryDomains.Length,
                     CpuClassCeiling = (int)(cpuClassCeiling ?? 0),
                 },
-                ValuesPerKey = (nuint)valuesPerKey, Weights = SequenceWeights.Lower(weights, matrix, &lowered),
+                ValuesPerKey = (nuint)valuesPerKey,
             };
             usearch_sequence_load_ram(&arguments);
         }
@@ -314,23 +321,20 @@ public sealed unsafe class SequenceIndex : IDisposable
     /// <summary>Copies a checkpoint into a new, mutable index in device memory. Calls
     /// <c>usearch_sequence_load_vram</c>.</summary>
     /// <param name="path">The checkpoint to read.</param>
-    /// <param name="weights">The weights an alignment checkpoint was built with; null otherwise.</param>
     /// <param name="devices">Where the parts land; empty derives one free device.</param>
     /// <param name="valuesPerKey">The upper bound on entries sharing one key; zero is unbounded.</param>
     /// <param name="executor">The workers the upload runs on; null uploads on the caller's thread.</param>
     /// <param name="gpuClassCeiling">The newest class dispatch may pick; null means no ceiling.</param>
     /// <returns>The new index.</returns>
     public static SequenceIndex LoadVram(
-        string path, SequenceWeights? weights = null, ReadOnlySpan<int> devices = default, ulong valuesPerKey = 0,
+        string path, ReadOnlySpan<int> devices = default, ulong valuesPerKey = 0,
         Executor? executor = null, GPUClass? gpuClassCeiling = null)
     {
         byte[] encoded = Encoding.UTF8.GetBytes(path);
         using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
-        NativeSequenceWeights lowered = default;
         fixed (byte* data = encoded)
-        fixed (sbyte* matrix = SequenceWeights.MatrixOf(weights))
         fixed (int* ordinals = devices)
         {
             NativeSequenceLoadVram arguments = new()
@@ -341,7 +345,7 @@ public sealed unsafe class SequenceIndex : IDisposable
                     Devices = (IntPtr)ordinals, DevicesCount = (nuint)devices.Length,
                     GpuClassCeiling = (int)(gpuClassCeiling ?? 0),
                 },
-                ValuesPerKey = (nuint)valuesPerKey, Weights = SequenceWeights.Lower(weights, matrix, &lowered),
+                ValuesPerKey = (nuint)valuesPerKey,
             };
             usearch_sequence_load_vram(&arguments);
         }
@@ -352,22 +356,19 @@ public sealed unsafe class SequenceIndex : IDisposable
     /// <summary>Copies a checkpoint from a buffer into a new, mutable index in host memory. Calls
     /// <c>usearch_sequence_load_ram_buffer</c>.</summary>
     /// <param name="buffer">The checkpoint's bytes, copied in before the call returns.</param>
-    /// <param name="weights">The weights an alignment checkpoint was built with; null otherwise.</param>
     /// <param name="memoryDomains">Where the parts land; empty derives every node.</param>
     /// <param name="valuesPerKey">The upper bound on entries sharing one key; zero is unbounded.</param>
     /// <param name="executor">The workers the copy fans out over; null copies on the caller's thread.</param>
     /// <param name="cpuClassCeiling">The newest class dispatch may pick; null means no ceiling.</param>
     /// <returns>The new index.</returns>
     public static SequenceIndex LoadRamBuffer(
-        ReadOnlySpan<byte> buffer, SequenceWeights? weights = null, ReadOnlySpan<int> memoryDomains = default,
+        ReadOnlySpan<byte> buffer, ReadOnlySpan<int> memoryDomains = default,
         ulong valuesPerKey = 0, Executor? executor = null, CPUClass? cpuClassCeiling = null)
     {
         using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
-        NativeSequenceWeights lowered = default;
         fixed (byte* source = buffer)
-        fixed (sbyte* matrix = SequenceWeights.MatrixOf(weights))
         fixed (int* domains = memoryDomains)
         {
             NativeSequenceLoadRamBuffer arguments = new()
@@ -378,7 +379,7 @@ public sealed unsafe class SequenceIndex : IDisposable
                     MemoryDomains = (IntPtr)domains, MemoryDomainsCount = (nuint)memoryDomains.Length,
                     CpuClassCeiling = (int)(cpuClassCeiling ?? 0),
                 },
-                ValuesPerKey = (nuint)valuesPerKey, Weights = SequenceWeights.Lower(weights, matrix, &lowered),
+                ValuesPerKey = (nuint)valuesPerKey,
             };
             usearch_sequence_load_ram_buffer(&arguments);
         }
@@ -389,22 +390,19 @@ public sealed unsafe class SequenceIndex : IDisposable
     /// <summary>Copies a checkpoint from a buffer into a new, mutable index in device memory. Calls
     /// <c>usearch_sequence_load_vram_buffer</c>.</summary>
     /// <param name="buffer">The checkpoint's bytes.</param>
-    /// <param name="weights">The weights an alignment checkpoint was built with; null otherwise.</param>
     /// <param name="devices">Where the parts land; empty derives one free device.</param>
     /// <param name="valuesPerKey">The upper bound on entries sharing one key; zero is unbounded.</param>
     /// <param name="executor">The workers the upload runs on; null uploads on the caller's thread.</param>
     /// <param name="gpuClassCeiling">The newest class dispatch may pick; null means no ceiling.</param>
     /// <returns>The new index.</returns>
     public static SequenceIndex LoadVramBuffer(
-        ReadOnlySpan<byte> buffer, SequenceWeights? weights = null, ReadOnlySpan<int> devices = default,
+        ReadOnlySpan<byte> buffer, ReadOnlySpan<int> devices = default,
         ulong valuesPerKey = 0, Executor? executor = null, GPUClass? gpuClassCeiling = null)
     {
         using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
-        NativeSequenceWeights lowered = default;
         fixed (byte* source = buffer)
-        fixed (sbyte* matrix = SequenceWeights.MatrixOf(weights))
         fixed (int* ordinals = devices)
         {
             NativeSequenceLoadVramBuffer arguments = new()
@@ -415,7 +413,7 @@ public sealed unsafe class SequenceIndex : IDisposable
                     Devices = (IntPtr)ordinals, DevicesCount = (nuint)devices.Length,
                     GpuClassCeiling = (int)(gpuClassCeiling ?? 0),
                 },
-                ValuesPerKey = (nuint)valuesPerKey, Weights = SequenceWeights.Lower(weights, matrix, &lowered),
+                ValuesPerKey = (nuint)valuesPerKey,
             };
             usearch_sequence_load_vram_buffer(&arguments);
         }
@@ -426,26 +424,22 @@ public sealed unsafe class SequenceIndex : IDisposable
     /// <summary>Serves a checkpoint in place through a memory mapping, as a read-only index. Calls
     /// <c>usearch_sequence_view_ram</c>.</summary>
     /// <param name="path">The checkpoint to serve.</param>
-    /// <param name="weights">The weights an alignment checkpoint was built with; null otherwise.</param>
     /// <param name="memoryDomains">Where the parts are served from; empty derives.</param>
     /// <param name="cpuClassCeiling">The newest class dispatch may pick; null means no ceiling.</param>
     /// <returns>The read-only index.</returns>
     public static SequenceIndex ViewRam(
-        string path, SequenceWeights? weights = null, ReadOnlySpan<int> memoryDomains = default,
+        string path, ReadOnlySpan<int> memoryDomains = default,
         CPUClass? cpuClassCeiling = null)
     {
         byte[] encoded = Encoding.UTF8.GetBytes(path);
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
-        NativeSequenceWeights lowered = default;
         fixed (byte* data = encoded)
-        fixed (sbyte* matrix = SequenceWeights.MatrixOf(weights))
         fixed (int* domains = memoryDomains)
         {
             NativeSequenceViewRam arguments = new()
             {
                 Index = &created, Outcome = &outcome, Path = View(data, encoded.Length),
-                Weights = SequenceWeights.Lower(weights, matrix, &lowered),
                 Ram = new NativeRamOptions
                 {
                     MemoryDomains = (IntPtr)domains, MemoryDomainsCount = (nuint)memoryDomains.Length,
@@ -461,7 +455,6 @@ public sealed unsafe class SequenceIndex : IDisposable
     /// <summary>Serves a checkpoint in place from NVMe drives as a read-only index. Calls
     /// <c>usearch_sequence_view_nvme</c>.</summary>
     /// <param name="path">The checkpoint to serve.</param>
-    /// <param name="weights">The weights an alignment checkpoint was built with; null otherwise.</param>
     /// <param name="paths">The devices the parts are served from; empty serves each where its manifest
     /// points.</param>
     /// <param name="executor">The NVMe executor whose rings read the headers; null reads on the caller's
@@ -469,19 +462,17 @@ public sealed unsafe class SequenceIndex : IDisposable
     /// <param name="cpuClassCeiling">The newest class dispatch may pick; null means no ceiling.</param>
     /// <returns>The read-only index.</returns>
     public static SequenceIndex ViewNvme(
-        string path, SequenceWeights? weights = null, ReadOnlySpan<string> paths = default, Executor? executor = null,
+        string path, ReadOnlySpan<string> paths = default, Executor? executor = null,
         CPUClass? cpuClassCeiling = null)
     {
         byte[] encoded = Encoding.UTF8.GetBytes(path);
         using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
-        NativeSequenceWeights lowered = default;
         NativeBytesView* views = Paths.Encode(paths);
         try
         {
             fixed (byte* data = encoded)
-            fixed (sbyte* matrix = SequenceWeights.MatrixOf(weights))
             {
                 NativeSequenceViewNvme arguments = new()
                 {
@@ -491,7 +482,6 @@ public sealed unsafe class SequenceIndex : IDisposable
                         Paths = (IntPtr)views, PathsCount = (nuint)paths.Length,
                         CpuClassCeiling = (int)(cpuClassCeiling ?? 0),
                     },
-                    Weights = SequenceWeights.Lower(weights, matrix, &lowered),
                 };
                 usearch_sequence_view_nvme(&arguments);
             }
@@ -1553,9 +1543,9 @@ internal unsafe struct SequenceSaveBufferCall(CallHandles handles, Arena arena, 
 #region Native Vocabulary
 
 [StructLayout(LayoutKind.Sequential)]
-internal unsafe struct NativeSequenceWeights
+internal unsafe struct NativeSequenceCosts
 {
-    public sbyte* SubstitutionMatrix;
+    public sbyte* Similarities;
     public sbyte Gap;
 }
 
@@ -1564,6 +1554,8 @@ internal struct NativeSequenceMetadata
 {
     public SequenceMetric Metric;
     public nuint Connectivity;
+    public nuint Classes;
+    public nuint SketchBytes;
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -1593,10 +1585,9 @@ internal unsafe struct NativeSequenceInitRam
     public IntPtr* Index;
     public NativeOutcome* Outcome;
     public SequenceMetric Metric;
-    public NativeSequenceWeights* Weights;
-    public nuint* WindowWidths;
-    public nuint WindowWidthsCount;
+    public NativeSequenceCosts* Costs;
     public nuint Connectivity;
+    public nuint SketchBytes;
     public nuint ValuesPerKey;
     public NativeRamOptions Ram;
 }
@@ -1607,10 +1598,9 @@ internal unsafe struct NativeSequenceInitVram
     public IntPtr* Index;
     public NativeOutcome* Outcome;
     public SequenceMetric Metric;
-    public NativeSequenceWeights* Weights;
-    public nuint* WindowWidths;
-    public nuint WindowWidthsCount;
+    public NativeSequenceCosts* Costs;
     public nuint Connectivity;
+    public nuint SketchBytes;
     public nuint ValuesPerKey;
     public NativeVramOptions Vram;
 }
@@ -1624,8 +1614,9 @@ internal unsafe struct NativeSequenceLoadRam
     public Completion Completion;
     public NativeBytesView Path;
     public NativeRamOptions Ram;
+    public nuint Connectivity;
+    public nuint SketchBytes;
     public nuint ValuesPerKey;
-    public NativeSequenceWeights* Weights;
     public NativeProgress Progress;
 }
 
@@ -1638,8 +1629,9 @@ internal unsafe struct NativeSequenceLoadRamBuffer
     public Completion Completion;
     public NativeBytesView Buffer;
     public NativeRamOptions Ram;
+    public nuint Connectivity;
+    public nuint SketchBytes;
     public nuint ValuesPerKey;
-    public NativeSequenceWeights* Weights;
     public NativeProgress Progress;
 }
 
@@ -1652,8 +1644,9 @@ internal unsafe struct NativeSequenceLoadVram
     public Completion Completion;
     public NativeBytesView Path;
     public NativeVramOptions Vram;
+    public nuint Connectivity;
+    public nuint SketchBytes;
     public nuint ValuesPerKey;
-    public NativeSequenceWeights* Weights;
     public NativeProgress Progress;
 }
 
@@ -1666,8 +1659,9 @@ internal unsafe struct NativeSequenceLoadVramBuffer
     public Completion Completion;
     public NativeBytesView Buffer;
     public NativeVramOptions Vram;
+    public nuint Connectivity;
+    public nuint SketchBytes;
     public nuint ValuesPerKey;
-    public NativeSequenceWeights* Weights;
     public NativeProgress Progress;
 }
 
@@ -1677,7 +1671,6 @@ internal unsafe struct NativeSequenceViewRam
     public IntPtr* Index;
     public NativeOutcome* Outcome;
     public NativeBytesView Path;
-    public NativeSequenceWeights* Weights;
     public NativeRamOptions Ram;
 }
 
@@ -1690,7 +1683,7 @@ internal unsafe struct NativeSequenceViewNvme
     public Completion Completion;
     public NativeBytesView Path;
     public NativeNvmeOptions Nvme;
-    public NativeSequenceWeights* Weights;
+    public nuint SketchBytes;
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -1779,6 +1772,7 @@ internal unsafe struct NativeSequenceSearch
     public nuint ExpansionFactor;
     public Traversal Traversal;
     public NativePredicate Predicate;
+    public NativeMatchesView* Hints;
     public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
 }

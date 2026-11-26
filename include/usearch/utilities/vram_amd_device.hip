@@ -12,8 +12,8 @@
 
 #include <hip/hip_runtime.h> // `__shfl`, `__ballot`, `__lane_id` & the agent-scope atomics
 
-#include <stringzilla/strings/cdna3.cuh> // `sz_u32_wavefront_prefix_sum_cdna3_`, `sz_u64_wavefront_prefix_sum_cdna3_`
-#include <stringzilla/strings/cdna5.cuh> // `sz_u32_lanes_prefix_sum_cdna5_`, `sz_u64_lanes_prefix_sum_cdna5_`
+#include <stringzilla/strings/cdna3.cuh> // `sz_u32_wavefront_prefix_sum_cdna3`, `sz_u64_wavefront_prefix_sum_cdna3`
+#include <stringzilla/strings/cdna5.cuh> // `sz_u32_lanes_prefix_sum_cdna5`, `sz_u64_lanes_prefix_sum_cdna5`
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/vram_amd_device.hpp"
@@ -166,8 +166,8 @@ struct cdna3_scan_t {
     template <typename value_type_>
     static __device__ __forceinline__ value_type_ warp_inclusive_sum(value_type_ value, u32_t) noexcept {
         static_assert(std::is_unsigned_v<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8));
-        if constexpr (sizeof(value_type_) == 4) return sz_u32_wavefront_prefix_sum_cdna3_(value);
-        else return sz_u64_wavefront_prefix_sum_cdna3_(value);
+        if constexpr (sizeof(value_type_) == 4) return sz_u32_wavefront_prefix_sum_cdna3(value);
+        else return sz_u64_wavefront_prefix_sum_cdna3(value);
     }
 };
 
@@ -178,8 +178,8 @@ struct cdna5_scan_t {
     template <typename value_type_>
     static __device__ __forceinline__ value_type_ warp_inclusive_sum(value_type_ value, u32_t) noexcept {
         static_assert(std::is_unsigned_v<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8));
-        if constexpr (sizeof(value_type_) == 4) return sz_u32_lanes_prefix_sum_cdna5_(value);
-        else return sz_u64_lanes_prefix_sum_cdna5_(value);
+        if constexpr (sizeof(value_type_) == 4) return sz_u32_lanes_prefix_sum_cdna5(value);
+        else return sz_u64_lanes_prefix_sum_cdna5(value);
     }
 };
 

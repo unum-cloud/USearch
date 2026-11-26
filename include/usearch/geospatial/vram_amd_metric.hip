@@ -82,9 +82,9 @@ struct vram_keep_octants_t {
 
     template <basic::a_vram_basic_kit kit_, typename schedule_, typename node_id_type_>
     static __device__ __forceinline__ u32_t select( //
-        basic::vram_ragged_view<node_id_type_> const& storage, schedule_&, typename kit_::query_t const& query, byte_t*,
-        node_id_type_ const* candidate_ids, f32_t const*, u32_t candidates_count, u32_t* kept_positions,
-        vram_telemetry_t&, u32_t lane, bool = true) noexcept {
+        basic::vram_ragged_view<node_id_type_> const& storage, schedule_&,
+        typename kit_::canonical_query_t const& query, byte_t*, node_id_type_ const* candidate_ids, f32_t const*,
+        u32_t candidates_count, u32_t* kept_positions, vram_telemetry_t&, u32_t lane, bool = true) noexcept {
 
         using warp_t = typename kit_::warp_t;
         constexpr u32_t cones_k = static_cast<u32_t>(surface_keep_octants_t::cones_k);
@@ -97,7 +97,9 @@ struct vram_keep_octants_t {
             u32_t const position = base + lane;
             u32_t const cone = position < candidates_count
                                    ? octant_of(frame, query,
-                                               kit_::prepare(storage.entry(candidate_ids[position]), nullptr, lane))
+                                               kit_::canonical_prepare(
+                                                   storage.template canonical_entry<kit_>(candidate_ids[position]),
+                                                   nullptr, lane))
                                    : cones_k;
             for (u32_t candidate_cone = 0; candidate_cone != cones_k; ++candidate_cone) {
                 typename warp_t::mask_t const in_cone = warp_t::ballot(cone == candidate_cone);
@@ -147,33 +149,35 @@ struct i32_cdna3_geospatial_kit_t {
 
     /** The kit's identity in kernel symbols. */
     inline static constexpr char name_k[] = "i32_cdna3_geospatial_kit_t";
-    inline static constexpr u32_t lanes_per_entry_k = 1;
+    inline static constexpr u32_t canonical_lanes_per_entry_k = 1;
 
     using warp_t = hip_warp<64>;
     using scan_t = cdna3_scan_t;
-    using query_t = earth_fixed_t;
+    using canonical_query_t = earth_fixed_t;
     using selector_t = vram_keep_octants_t;
 
-    static constexpr bool serves(std::size_t bytes) noexcept { return bytes <= sizeof(earth_observation_t); }
+    static constexpr bool canonical_serves(std::size_t bytes) noexcept { return bytes <= sizeof(earth_observation_t); }
 
     /** A position is its own query, so an entry prepares into no span. */
-    static constexpr std::size_t span_bytes(byte_t const*, std::size_t) noexcept { return 0; }
+    static constexpr std::size_t canonical_span_bytes(byte_t const*, std::size_t) noexcept { return 0; }
 
     /** The position at the front of the entry, in one 16-byte load. */
-    static __device__ __forceinline__ query_t prepare(basic::vram_entry_t entry, byte_t*, u32_t) noexcept {
+    static __device__ __forceinline__ canonical_query_t canonical_prepare(basic::vram_entry_t entry, byte_t*,
+                                                                          u32_t) noexcept {
         int4 const words = *reinterpret_cast<int4 const*>(entry.data);
         return {words.x, words.y, words.z};
     }
 
     /** No header bounds a chord. */
-    static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t, query_t const&,
-                                                             basic::vram_entry_t) noexcept {
+    static __device__ __forceinline__ distance_t canonical_lower_bound(nk_kernel_kind_t, canonical_query_t const& query,
+                                                                       basic::vram_entry_t) noexcept {
         return 0;
     }
 
-    static __device__ __forceinline__ distance_t score(nk_kernel_kind_t, query_t const& query,
-                                                       basic::vram_entry_t entry, distance_t, u32_t lane) noexcept {
-        return static_cast<distance_t>(chord_squared(query, prepare(entry, nullptr, lane)));
+    static __device__ __forceinline__ distance_t canonical_distance(nk_kernel_kind_t, canonical_query_t const& query,
+                                                                    basic::vram_entry_t entry, distance_t,
+                                                                    u32_t lane) noexcept {
+        return static_cast<distance_t>(chord_squared(query, canonical_prepare(entry, nullptr, lane)));
     }
 };
 
@@ -184,33 +188,35 @@ struct i32_cdna5_geospatial_kit_t {
 
     /** The kit's identity in kernel symbols. */
     inline static constexpr char name_k[] = "i32_cdna5_geospatial_kit_t";
-    inline static constexpr u32_t lanes_per_entry_k = 1;
+    inline static constexpr u32_t canonical_lanes_per_entry_k = 1;
 
     using warp_t = hip_warp<32>;
     using scan_t = cdna5_scan_t;
-    using query_t = earth_fixed_t;
+    using canonical_query_t = earth_fixed_t;
     using selector_t = vram_keep_octants_t;
 
-    static constexpr bool serves(std::size_t bytes) noexcept { return bytes <= sizeof(earth_observation_t); }
+    static constexpr bool canonical_serves(std::size_t bytes) noexcept { return bytes <= sizeof(earth_observation_t); }
 
     /** A position is its own query, so an entry prepares into no span. */
-    static constexpr std::size_t span_bytes(byte_t const*, std::size_t) noexcept { return 0; }
+    static constexpr std::size_t canonical_span_bytes(byte_t const*, std::size_t) noexcept { return 0; }
 
     /** The position at the front of the entry, in one 16-byte load. */
-    static __device__ __forceinline__ query_t prepare(basic::vram_entry_t entry, byte_t*, u32_t) noexcept {
+    static __device__ __forceinline__ canonical_query_t canonical_prepare(basic::vram_entry_t entry, byte_t*,
+                                                                          u32_t) noexcept {
         int4 const words = *reinterpret_cast<int4 const*>(entry.data);
         return {words.x, words.y, words.z};
     }
 
     /** No header bounds a chord. */
-    static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t, query_t const&,
-                                                             basic::vram_entry_t) noexcept {
+    static __device__ __forceinline__ distance_t canonical_lower_bound(nk_kernel_kind_t, canonical_query_t const& query,
+                                                                       basic::vram_entry_t) noexcept {
         return 0;
     }
 
-    static __device__ __forceinline__ distance_t score(nk_kernel_kind_t, query_t const& query,
-                                                       basic::vram_entry_t entry, distance_t, u32_t lane) noexcept {
-        return static_cast<distance_t>(chord_squared(query, prepare(entry, nullptr, lane)));
+    static __device__ __forceinline__ distance_t canonical_distance(nk_kernel_kind_t, canonical_query_t const& query,
+                                                                    basic::vram_entry_t entry, distance_t,
+                                                                    u32_t lane) noexcept {
+        return static_cast<distance_t>(chord_squared(query, canonical_prepare(entry, nullptr, lane)));
     }
 };
 
@@ -221,19 +227,20 @@ struct geospatial_ladder<caps_> {
 };
 
 template <typename kit_type_, typename node_id_type_, typename kernels_type_>
-std::size_t vram_amd_kits<kit_type_, node_id_type_, kernels_type_>::rung_serving_(std::size_t longest) noexcept {
-    return kit_type_::serves(longest) ? 0 : rungs_k;
+std::size_t vram_amd_kits<kit_type_, node_id_type_, kernels_type_>::rung_serving_(score_role_t,
+                                                                                  std::size_t longest) noexcept {
+    return kit_type_::canonical_serves(longest) ? 0 : canonical_rungs_count_k;
 }
 
 template <typename kit_type_, typename node_id_type_, typename kernels_type_>
-u32_t vram_amd_kits<kit_type_, node_id_type_, kernels_type_>::lanes_per_entry_(std::size_t) noexcept {
-    return kit_type_::lanes_per_entry_k;
+u32_t vram_amd_kits<kit_type_, node_id_type_, kernels_type_>::lanes_per_entry_(score_role_t, std::size_t) noexcept {
+    return kit_type_::canonical_lanes_per_entry_k;
 }
 
 template <typename kit_type_, typename node_id_type_, typename kernels_type_>
-std::size_t vram_amd_kits<kit_type_, node_id_type_, kernels_type_>::span_bytes_(byte_t const* data,
+std::size_t vram_amd_kits<kit_type_, node_id_type_, kernels_type_>::span_bytes_(score_role_t, byte_t const* data,
                                                                                 std::size_t bytes) noexcept {
-    return kit_type_::span_bytes(data, bytes);
+    return kit_type_::canonical_span_bytes(data, bytes);
 }
 
 template <typename kit_type_, typename node_id_type_, typename kernels_type_>
@@ -516,11 +523,18 @@ __global__ void __launch_bounds__(vram_warps_per_block_k* kit_type_::warp_t::wid
     basic::hip_kernel_body<kernel_, kit_type_, 0, slots_>(arguments);
 }
 
+/** Instantiates the kernel at @p position_ of @c basic::amd_rungs for @p kit_type_, but a seeding
+ *  walk, which a kit storing no sketch never runs. */
+template <typename kit_type_, typename node_id_type_, std::size_t position_>
+void amd_instantiate_rung() noexcept {
+    constexpr basic::amd_rung_t instantiated_k = basic::amd_rungs[position_];
+    if constexpr (instantiated_k.kernel != vram_kernel_t::seed_k)
+        static_cast<void>(&amd_kernel<instantiated_k.kernel, kit_type_, node_id_type_, instantiated_k.slots>);
+}
+
 template <typename kit_type_, typename node_id_type_, std::size_t... rungs_>
 void amd_instantiate_rungs(std::index_sequence<rungs_...>) noexcept {
-    (static_cast<void>(
-         &amd_kernel<basic::amd_rungs[rungs_].kernel, kit_type_, node_id_type_, basic::amd_rungs[rungs_].slots>),
-     ...);
+    (amd_instantiate_rung<kit_type_, node_id_type_, rungs_>(), ...);
 }
 
 /** Instantiates every kernel of @p kit_type_ with @p node_id_type_ IDs, the judging ones too; the
@@ -532,7 +546,7 @@ template <typename kit_type_, typename node_id_type_>
 void amd_instantiate() noexcept {
     amd_instantiate_rungs<kit_type_, node_id_type_>(std::make_index_sequence<std::size(basic::amd_rungs)> {});
     static_cast<void>(&amd_kernel<vram_kernel_t::load_values_k, kit_type_, node_id_type_, 0>);
-    static_cast<void>(&amd_kernel<vram_kernel_t::size_spans_k, kit_type_, node_id_type_, 0>);
+    static_cast<void>(&amd_kernel<vram_kernel_t::sketch_values_k, kit_type_, node_id_type_, 0>);
     static_cast<void>(&amd_admit<kit_type_, node_id_type_>);
     static_cast<void>(&amd_within<kit_type_, node_id_type_, vram_kernel_t::within_count_k>);
     static_cast<void>(&amd_within<kit_type_, node_id_type_, vram_kernel_t::within_write_k>);

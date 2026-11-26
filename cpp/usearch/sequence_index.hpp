@@ -14,7 +14,7 @@
  *  @code{.cpp}
  *  namespace us = unum::usearch;
  *  auto [index, index_status] = us::sequence_index_t::init_ram({
- *      .metric = usearch_sequence_metric_levenshtein_utf8_k});
+ *      .metric = usearch_sequence_metric_utf8_containment_k});
  *  std::uint8_t const bytes[] = {'k', 'i', 't', 't', 'e', 'n'};
  *  std::uint64_t const offsets[] = {0, 6};
  *  us::status_t const inserted = index.on(executor).insert(keys, {bytes, offsets});
@@ -32,12 +32,12 @@
 
 namespace unum::usearch {
 
-/** The canonical spelling of a metric kind, as @c usearch_sequence_metric_name answers it. */
+/** The canonical spelling of a sequence metric, as @c usearch_sequence_metric_name answers it. */
 inline char const* sequence_metric_name(usearch_sequence_metric_t metric) noexcept {
     return usearch_sequence_metric_name(metric);
 }
 
-/** Reads a metric kind spelled @p name back, or fails with @c status_code_t::invalid_argument_k. */
+/** Reads the sequence score @p name spells, or fails with @c status_code_t::invalid_argument_k. */
 inline expected<usearch_sequence_metric_t> sequence_metric_from_name(usearch_bytes_view_t name) noexcept {
     return metric_read_(usearch_sequence_metric_from_name, name);
 }
@@ -71,6 +71,9 @@ struct sequence_search_config_t {
 
     /** Which candidate keys may be reported; empty admits every key. */
     predicate_t predicate {};
+
+    /** Matches of an earlier search to start from; @c nullptr starts where searches start. */
+    usearch_matches_view_t const* hints = nullptr;
 
     /** Hears the queries answered, and may cancel. */
     progress_t progress {};
@@ -331,6 +334,7 @@ class sequence_index {
                     .expansion_factor = config.expansion_factor,
                     .traversal = config.traversal,
                     .predicate = config.predicate.raw(),
+                    .hints = config.hints,
                     .progress = config.progress.raw(),
                     .stats = config.stats,
                 };
@@ -429,7 +433,7 @@ class sequence_index {
                                        executor);
     }
 
-    /** Reads a checkpoint's metric & connectivity without loading it. */
+    /** Reads a checkpoint's metric, connectivity & sketch bytes without loading it. */
     static expected<usearch_sequence_metadata_t> metadata_read(usearch_sequence_metadata_read_t arguments,
                                                                executor_t const& executor = {}) noexcept
         requires a_handle_owner<receiver_type_>
@@ -438,7 +442,7 @@ class sequence_index {
                                                            executor.handle());
     }
 
-    /** Reads metric & connectivity from a serialized checkpoint buffer. */
+    /** Reads metric, connectivity & sketch bytes from a serialized checkpoint buffer. */
     static expected<usearch_sequence_metadata_t> metadata_read_buffer(usearch_sequence_metadata_read_buffer_t arguments,
                                                                       executor_t const& executor = {}) noexcept
         requires a_handle_owner<receiver_type_>

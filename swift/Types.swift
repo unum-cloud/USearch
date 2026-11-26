@@ -524,6 +524,8 @@ public struct Phase: Hashable, Sendable, CustomStringConvertible {
     public static let gather = Phase(raw: usearch_phase_gather_k)
     /// A round re-stitching each neighborhood.
     public static let restitch = Phase(raw: usearch_phase_restitch_k)
+    /// A round linking island entries by walks from the root.
+    public static let reach = Phase(raw: usearch_phase_reach_k)
     /// A round on NVMe rewriting each tile of links from what its restitch changed.
     public static let write = Phase(raw: usearch_phase_write_k)
     /// The plan ended its round, and nothing more is pending.

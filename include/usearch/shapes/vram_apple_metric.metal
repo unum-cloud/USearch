@@ -32,28 +32,30 @@ struct metal_pack_query_t {
 
 /** Chamfer and Hausdorff between f16 packs in f32 math, a simdgroup to a shape. */
 struct metal_f16_shapes_kit_t {
-    using query_t = metal_pack_query_t;
+    using canonical_query_t = metal_pack_query_t;
 
     /** One rung, serving every cloud. */
-    static constexpr constant uint rungs_k[1] = {0};
+    static constexpr constant uint canonical_rungs_k[1] = {0};
 
-    static constexpr uint lanes_per_row(uint) { return metal_simdgroup_width_k; }
+    static constexpr uint canonical_lanes_per_entry(uint) { return metal_simdgroup_width_k; }
 
-    static query_t prepare(device uchar const*, device uchar const* data, uint, device uchar*, uint) {
-        query_t query;
+    static canonical_query_t canonical_prepare(device uchar const*, device uchar const* data, uint, device uchar*,
+                                               uint) {
+        canonical_query_t query;
         query.pack = data;
         return query;
     }
 
     /** The gap between the two clouds' largest radii, from their headers alone, bounds Hausdorff;
      *  nothing bounds Chamfer. */
-    static float lower_bound(uint metric, thread query_t const& query, device uchar const* data, uint) {
+    static float canonical_lower_bound(uint metric, thread canonical_query_t const& query, device uchar const* data,
+                                       uint) {
         return metric == metal_hausdorff_kernel_k ? nk_hausdorff_bound_packed_f16_metal_(query.pack, data) : 0.0f;
     }
 
     template <uint rung_>
-    static float score(uint metric, thread query_t const& query, device uchar const* data, uint, float radius,
-                       uint lane, uint) {
+    static float canonical_distance(uint metric, thread canonical_query_t const& query, device uchar const* data, uint,
+                                    float radius, uint lane, uint) {
         return metric == metal_hausdorff_kernel_k
                    ? nk_hausdorff_simdgroup_packed_f16_metal_(query.pack, data, radius, lane)
                    : nk_chamfer_simdgroup_packed_f16_metal_(query.pack, data, radius, lane);

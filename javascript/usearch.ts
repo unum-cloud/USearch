@@ -100,6 +100,7 @@ export {
   SequenceReshardPlan,
 } from "./sequence_index";
 export type {
+  SequenceCosts,
   SequenceIndexDescription,
   SequenceKeyStats,
   SequenceLoadConfig,
@@ -109,7 +110,6 @@ export type {
   SequenceRefineConfig,
   SequenceReshardConfig,
   SequenceViewNvmeConfig,
-  SequenceWeights,
   SequencesLike,
 } from "./sequence_index";
 

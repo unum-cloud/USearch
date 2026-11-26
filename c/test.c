@@ -1371,7 +1371,7 @@ void test_sequence_reshard(void) {
     for (size_t which = 0; which != indexes_count; ++which) {
         usearch_sequence_init_ram(&(usearch_sequence_init_ram_t) {.index = &indexes[which],
                                                                   .outcome = &outcome,
-                                                                  .metric = usearch_sequence_metric_levenshtein_bytes_k,
+                                                                  .metric = usearch_sequence_metric_protein_alignment_k,
                                                                   .connectivity = 8});
         if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return;
         // Eight candidates wire a deliberately weak graph, which the rounds then improve.
@@ -2419,19 +2419,20 @@ void test_cursor_steps(void) {
 }
 
 /** Sequences round-trip through a checkpoint: a stored query finds itself, then its one-edit
- *  neighbor, and @c get hands the bytes back, before the save and after the load alike. The overlap
- *  kind refuses to go without window widths. */
+ *  neighbor, and @c get hands the bytes back, before the save and after the load alike. Costs are
+ *  refused without similarities. */
 void test_sequence_saves_and_loads_a_file(void) {
     usearch_outcome_t outcome = {0};
     usearch_executor_t const executor = create_executor(0);
     usearch_arena_t const arena = create_arena(executor);
 
     usearch_sequence_index_t refused = NULL;
+    usearch_sequence_costs_t const gapped = {.gap = 2};
     usearch_sequence_init_ram(&(usearch_sequence_init_ram_t) {.index = &refused,
                                                               .outcome = &outcome,
-                                                              .metric = usearch_sequence_metric_overlap_k});
-    expect_at(outcome.status == usearch_status_config_mismatch_k, __FILE__, __LINE__,
-              "The overlap kind needs window widths");
+                                                              .metric = usearch_sequence_metric_protein_alignment_k,
+                                                              .costs = &gapped});
+    expect_at(outcome.status == usearch_status_invalid_argument_k, __FILE__, __LINE__, "Costs need similarities");
     expect_at(refused == NULL, __FILE__, __LINE__, "A refused initialization returns no handle");
 
     char const bytes[] = "kittensittingmittenflask";
@@ -2440,7 +2441,8 @@ void test_sequence_saves_and_loads_a_file(void) {
     usearch_sequence_index_t index = NULL;
     usearch_sequence_init_ram(&(usearch_sequence_init_ram_t) {.index = &index,
                                                               .outcome = &outcome,
-                                                              .metric = usearch_sequence_metric_levenshtein_bytes_k});
+                                                              .metric = usearch_sequence_metric_utf8_containment_k,
+                                                              .sketch_bytes = 64});
     if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return;
     usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = index,
                                                           .executor = executor,
@@ -2475,8 +2477,9 @@ void test_sequence_saves_and_loads_a_file(void) {
         if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return;
         expect_at(matches.counts[0] == 2 && value_of(matches.keys[0]) == 0 && matches.scores[0] == 0, __FILE__,
                   __LINE__, "A stored query finds itself first");
-        expect_at(value_of(matches.keys[1]) == 2 && matches.scores[1] == 1, __FILE__, __LINE__,
-                  "One substitution away comes second");
+        // "mitten" holds one of the two windows "kitten" has, at five bytes.
+        expect_at(value_of(matches.keys[1]) == 2 && fabs(matches.scores[1] - 0.5) < 1.0 / 32767, __FILE__, __LINE__,
+                  "Missing half of the windows comes second");
 
         usearch_tape_view_t got = {0};
         size_t written = 0;
@@ -2510,8 +2513,10 @@ void test_sequence_saves_and_loads_a_file(void) {
                                                               .outcome = &outcome,
                                                               .description = &description});
     if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return;
-    expect_at(description.size == 4 && description.metadata.metric == usearch_sequence_metric_levenshtein_bytes_k,
+    expect_at(description.size == 4 && description.metadata.metric == usearch_sequence_metric_utf8_containment_k,
               __FILE__, __LINE__, "A loaded index describes the saved one");
+    expect_at(description.metadata.classes == 0, __FILE__, __LINE__, "A containment folds bytes into no classes");
+    expect_at(description.metadata.sketch_bytes == 64, __FILE__, __LINE__, "A checkpoint keeps its sketch bytes");
     expect_at(description.load_path == usearch_load_path_none_k, __FILE__, __LINE__,
               "A load into RAM names no device load path");
 
@@ -2696,6 +2701,77 @@ void test_sequence_saves_and_loads_a_file(void) {
     expect_(usearch_executor_free(executor) == usearch_status_success_k);
 }
 
+/** A DNA overlap scores a query as its reverse complement too: the other strand of a stored read
+ *  finds it at distance zero, ahead of the read continuing it, and the description counts the
+ *  classes its costs fold bytes into. */
+void test_sequence_overlaps_the_other_strand(void) {
+    usearch_outcome_t outcome = {0};
+    usearch_executor_t const executor = create_executor(0);
+    usearch_arena_t const arena = create_arena(executor);
+
+    usearch_sequence_index_t index = NULL;
+    usearch_sequence_init_ram(&(usearch_sequence_init_ram_t) {.index = &index,
+                                                              .outcome = &outcome,
+                                                              .metric = usearch_sequence_metric_dna_overlap_k});
+    if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return;
+
+    // The second read continues the first, and the query is the second read's other strand.
+    char const reads[] = "ACGTTGCAAGGCTTAACCGGTTACGATCGA" //
+                         "GGCTTAACCGGTTACGATCGATTTGCAGCA" //
+                         "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTT";
+    size_t const offsets[] = {0, 30, 60, 90};
+    usearch_key_t const keys[] = {key_of(1), key_of(2), key_of(3)};
+    usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = index,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .count = 3,
+                                                          .keys = {keys, sizeof(usearch_key_t)},
+                                                          .sequences = tape_of(reads, offsets, usearch_scalar_u8_k)});
+    if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return;
+    char const query[] = "TGCTGCAAATCGATCGTAACCGGTTAAGCC";
+    size_t const query_offsets[] = {0, 30};
+    usearch_matches_view_t matches = {0};
+    usearch_sequence_search(&(usearch_sequence_search_t) {.index = index,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .count = 1,
+                                                          .queries = tape_of(query, query_offsets, usearch_scalar_u8_k),
+                                                          .matches = &matches,
+                                                          .arena = arena,
+                                                          .wanted = 2});
+    if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return;
+    expect_at(matches.counts[0] == 2 && value_of(matches.keys[0]) == 2 && matches.scores[0] == 0, __FILE__, __LINE__,
+              "The other strand of a stored read finds it at distance zero");
+    expect_at(value_of(matches.keys[1]) == 1 && matches.scores[1] > 0, __FILE__, __LINE__,
+              "The read it continues comes second");
+
+    usearch_sequence_index_description_t description = {0};
+    usearch_sequence_describe(&(usearch_sequence_describe_t) {.index = index,
+                                                              .executor = executor,
+                                                              .outcome = &outcome,
+                                                              .description = &description});
+    if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return;
+    expect_at(description.metadata.metric == usearch_sequence_metric_dna_overlap_k && description.metadata.classes == 4,
+              __FILE__, __LINE__, "An index describes the classes its costs fold bytes into");
+    // Hints naming no counts are refused, by a library that walks from them or not.
+    usearch_matches_view_t const uncounted = {.keys = keys, .columns = 1};
+    usearch_sequence_search(&(usearch_sequence_search_t) {.index = index,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .count = 1,
+                                                          .queries = tape_of(query, query_offsets, usearch_scalar_u8_k),
+                                                          .matches = &matches,
+                                                          .arena = arena,
+                                                          .hints = &uncounted,
+                                                          .wanted = 2});
+    expect_at(outcome.status == usearch_status_invalid_argument_k, __FILE__, __LINE__,
+              "Hints naming no counts are refused");
+
+    usearch_sequence_free(index);
+    usearch_arena_free(arena);
+    usearch_executor_free(executor);
+}
+
 /** A sequence RAM index bounded at ten entries a shard takes twenty-five reads in one batch,
  *  opening three generations of shards on its one default domain: every key counts once, every read
  *  finds itself first across the shards, a cursor pulls every key once, and a checkpoint writes a
@@ -2715,7 +2791,7 @@ void test_sequence_shards(void) {
     usearch_sequence_index_t index = NULL;
     usearch_sequence_init_ram(&(usearch_sequence_init_ram_t) {.index = &index,
                                                               .outcome = &outcome,
-                                                              .metric = usearch_sequence_metric_levenshtein_bytes_k,
+                                                              .metric = usearch_sequence_metric_protein_alignment_k,
                                                               .ram = {.shard_capacity = shard_capacity}});
     if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return;
     usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = index,
@@ -2839,11 +2915,10 @@ void test_sequence_shards(void) {
     expect_(usearch_executor_free(executor) == usearch_status_success_k);
 }
 
-/** A GPU sequence index takes byte and rune Levenshtein, inserts and describes its entries, and
- *  lands a search's matches in its executor's device arena; local alignments, a global one without
- *  weights and the verbs it lacks refuse. An overlap index lands its scores in a host arena on the
- *  scale a RAM one does, and a Needleman-Wunsch one its exact costs over packed codes. Skipped
- *  without a GPU. */
+/** A GPU sequence index takes unit-cost alignment, inserts and describes its entries, and lands a
+ *  search's matches in its executor's device arena; containment without window widths and the verbs
+ *  it lacks refuse. A containment index lands its scores in a host arena on the scale a RAM one
+ *  does, and an alignment with costs its exact costs over raw bytes. Skipped without a GPU. */
 char const* test_sequence_vram(void) {
     usearch_outcome_t outcome = {0};
     size_t devices_count = 0;
@@ -2855,7 +2930,7 @@ char const* test_sequence_vram(void) {
     usearch_sequence_index_t index = NULL;
     usearch_sequence_init_vram(&(usearch_sequence_init_vram_t) {.index = &index,
                                                                 .outcome = &outcome,
-                                                                .metric = usearch_sequence_metric_levenshtein_bytes_k,
+                                                                .metric = usearch_sequence_metric_utf8_containment_k,
                                                                 .vram = vram});
     if (outcome.status == usearch_status_device_k) return no_gpu_device_k;
     if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return NULL;
@@ -2863,12 +2938,13 @@ char const* test_sequence_vram(void) {
     usearch_sequence_index_t refused = NULL;
     usearch_sequence_init_vram(&(usearch_sequence_init_vram_t) {.index = &refused,
                                                                 .outcome = &outcome,
-                                                                .metric = usearch_sequence_metric_needleman_wunsch_k,
+                                                                .metric = usearch_sequence_metric_protein_alignment_k,
+                                                                .costs = &(usearch_sequence_costs_t) {.gap = 2},
                                                                 .vram = vram});
-    expect_at(outcome.status == usearch_status_config_mismatch_k, __FILE__, __LINE__, "An alignment needs weights");
+    expect_at(outcome.status == usearch_status_invalid_argument_k, __FILE__, __LINE__, "Costs need similarities");
     usearch_sequence_init_vram(&(usearch_sequence_init_vram_t) {.index = &refused,
                                                                 .outcome = &outcome,
-                                                                .metric = usearch_sequence_metric_levenshtein_bytes_k,
+                                                                .metric = usearch_sequence_metric_utf8_containment_k,
                                                                 .values_per_key = 2,
                                                                 .vram = vram});
     expect_at(outcome.status == usearch_status_unsupported_k, __FILE__, __LINE__,
@@ -2897,7 +2973,7 @@ char const* test_sequence_vram(void) {
                                                               .outcome = &outcome,
                                                               .description = &description});
     if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return NULL;
-    expect_at(description.size == 4 && description.metadata.metric == usearch_sequence_metric_levenshtein_bytes_k,
+    expect_at(description.size == 4 && description.metadata.metric == usearch_sequence_metric_utf8_containment_k,
               __FILE__, __LINE__, "A GPU index describes the rows it holds");
 
     // The matches land in device memory, which plain C cannot read; the C++ VRAM suite checks them.
@@ -2915,17 +2991,14 @@ char const* test_sequence_vram(void) {
     expect_at(matches.keys && matches.scores && matches.counts, __FILE__, __LINE__,
               "A GPU search lands its matches in the arena");
 
-    // "mitten" holds three of the four windows "kitten" has at three bytes.
-    size_t const widths[] = {3};
-    usearch_sequence_index_t overlap = NULL;
-    usearch_sequence_init_vram(&(usearch_sequence_init_vram_t) {.index = &overlap,
+    // "mitten" holds one of the two windows "kitten" has at five bytes.
+    usearch_sequence_index_t containment = NULL;
+    usearch_sequence_init_vram(&(usearch_sequence_init_vram_t) {.index = &containment,
                                                                 .outcome = &outcome,
-                                                                .metric = usearch_sequence_metric_overlap_k,
-                                                                .window_widths = widths,
-                                                                .window_widths_count = 1,
+                                                                .metric = usearch_sequence_metric_utf8_containment_k,
                                                                 .vram = vram});
     if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return NULL;
-    usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = overlap,
+    usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = containment,
                                                           .executor = executor,
                                                           .outcome = &outcome,
                                                           .count = 4,
@@ -2933,36 +3006,41 @@ char const* test_sequence_vram(void) {
                                                           .sequences = tape_of(bytes, offsets, usearch_scalar_u8_k)});
     if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return NULL;
     usearch_arena_t const host_arena = create_arena(NULL);
-    usearch_matches_view_t overlaps = {0};
-    usearch_sequence_search(&(usearch_sequence_search_t) {.index = overlap,
+    usearch_matches_view_t containments = {0};
+    usearch_sequence_search(&(usearch_sequence_search_t) {.index = containment,
                                                           .executor = executor,
                                                           .outcome = &outcome,
                                                           .count = 1,
                                                           .queries = tape_of(bytes, offsets, usearch_scalar_u8_k),
-                                                          .matches = &overlaps,
+                                                          .matches = &containments,
                                                           .arena = host_arena,
                                                           .wanted = 2});
     if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return NULL;
-    expect_at(overlaps.counts[0] == 2 && value_of(overlaps.keys[0]) == 0 && overlaps.scores[0] == 0, __FILE__, __LINE__,
-              "A stored overlap query finds itself first");
-    expect_at(value_of(overlaps.keys[1]) == 2 && overlaps.scores[1] == 0.25, __FILE__, __LINE__,
-              "Missing a quarter of windows scores 0.25");
-    usearch_sequence_free(overlap);
+    expect_at(containments.counts[0] == 2 && value_of(containments.keys[0]) == 0 && containments.scores[0] == 0,
+              __FILE__, __LINE__, "A stored containment query finds itself first");
+    // The share is fixed point over 32767 steps, so a half lands within one step of it.
+    expect_at(value_of(containments.keys[1]) == 2 && fabs(containments.scores[1] - 0.5) < 1.0 / 32767, __FILE__,
+              __LINE__, "Missing half of the windows scores a half");
+    usearch_sequence_free(containment);
 
-    // "ACGT", "ACGA", "ACG" and "TTTT" packed four nucleotides a byte behind their unused slots,
-    // scored with transitions at 1, transversions and gaps at 2.
+    // "ACGT", "ACGA", "ACG" and "TTTT" as raw bytes, scored with transitions at 1, transversions
+    // and gaps at 2: purines A and G, pyrimidines C and T.
     static int8_t similarities[256 * 256];
+    char const nucleotides[] = "ACGT";
     for (size_t first = 0; first != 4; ++first)
         for (size_t second = 0; second != 4; ++second)
-            similarities[first * 256 + second] = first == second ? 2 : (first & 1) == (second & 1) ? 1 : 0;
-    usearch_sequence_weights_t const weights = {.substitution_matrix = similarities, .gap = 2};
-    unsigned char const packed[] = {0x00, 0xE4, 0x00, 0x24, 0x01, 0x24, 0x00, 0xFF};
-    size_t const packed_offsets[] = {0, 2, 4, 6, 8};
+            similarities[(unsigned char)nucleotides[first] * 256 + (unsigned char)nucleotides[second]] =
+                first == second               ? 2
+                : (first & 1) == (second & 1) ? 1
+                                              : 0;
+    usearch_sequence_costs_t const costs = {.similarities = similarities, .gap = 2};
+    char const strands[] = "ACGTACGAACGTTTT";
+    size_t const strand_offsets[] = {0, 4, 8, 11, 15};
     usearch_sequence_index_t aligned = NULL;
     usearch_sequence_init_vram(&(usearch_sequence_init_vram_t) {.index = &aligned,
                                                                 .outcome = &outcome,
-                                                                .metric = usearch_sequence_metric_needleman_wunsch_k,
-                                                                .weights = &weights,
+                                                                .metric = usearch_sequence_metric_protein_alignment_k,
+                                                                .costs = &costs,
                                                                 .vram = vram});
     if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return NULL;
     usearch_sequence_insert(
@@ -2971,7 +3049,7 @@ char const* test_sequence_vram(void) {
                                       .outcome = &outcome,
                                       .count = 4,
                                       .keys = {keys, sizeof(usearch_key_t)},
-                                      .sequences = tape_of(packed, packed_offsets, usearch_scalar_u8_k)});
+                                      .sequences = tape_of(strands, strand_offsets, usearch_scalar_u8_k)});
     if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return NULL;
     usearch_matches_view_t alignments = {0};
     usearch_sequence_search(
@@ -2979,7 +3057,7 @@ char const* test_sequence_vram(void) {
                                       .executor = executor,
                                       .outcome = &outcome,
                                       .count = 1,
-                                      .queries = tape_of(packed, packed_offsets, usearch_scalar_u8_k),
+                                      .queries = tape_of(strands, strand_offsets, usearch_scalar_u8_k),
                                       .matches = &alignments,
                                       .arena = host_arena,
                                       .wanted = 4});
@@ -3942,7 +4020,7 @@ void test_reshard_refusals(void) {
     for (size_t which = 0; which != 4; ++which) {
         usearch_sequence_init_ram(&(usearch_sequence_init_ram_t) {.index = &sequences[which],
                                                                   .outcome = &outcome,
-                                                                  .metric = usearch_sequence_metric_levenshtein_bytes_k,
+                                                                  .metric = usearch_sequence_metric_protein_alignment_k,
                                                                   .connectivity = 8});
         if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return;
         if (which >= 2) continue;
@@ -5333,7 +5411,8 @@ void test_names_round_trip_through_the_library_and_refuse_strangers(void) {
         {usearch_phase_scatter_k, "scatter"}, {usearch_phase_health_k, "health"},
         {usearch_phase_heal_k, "heal"},       {usearch_phase_hubs_k, "hubs"},
         {usearch_phase_gather_k, "gather"},   {usearch_phase_restitch_k, "restitch"},
-        {usearch_phase_write_k, "write"},     {usearch_phase_done_k, "done"},
+        {usearch_phase_reach_k, "reach"},     {usearch_phase_write_k, "write"},
+        {usearch_phase_done_k, "done"},
     };
     named_value_t const cpu_classes[] = {
         {usearch_cpu_class_unknown_k, "unknown"},
@@ -5388,10 +5467,9 @@ void test_names_round_trip_through_the_library_and_refuse_strangers(void) {
     };
     named_value_t const sequence_metrics[] = {
         {usearch_sequence_metric_unknown_k, "unknown"},
-        {usearch_sequence_metric_levenshtein_bytes_k, "levenshtein"},
-        {usearch_sequence_metric_levenshtein_utf8_k, "levenshtein-utf8"},
-        {usearch_sequence_metric_needleman_wunsch_k, "needleman-wunsch"},
-        {usearch_sequence_metric_overlap_k, "overlap"},
+        {usearch_sequence_metric_protein_alignment_k, "protein-alignment"},
+        {usearch_sequence_metric_dna_overlap_k, "dna-overlap"},
+        {usearch_sequence_metric_utf8_containment_k, "utf8-containment"},
     };
     named_value_t const shapes_metrics[] = {
         {usearch_shapes_metric_unknown_k, "unknown"},
@@ -6141,7 +6219,7 @@ static usearch_sequence_index_t create_strings(usearch_executor_t executor) {
     usearch_sequence_index_t index = NULL;
     usearch_sequence_init_ram(&(usearch_sequence_init_ram_t) {.index = &index,
                                                               .outcome = &outcome,
-                                                              .metric = usearch_sequence_metric_levenshtein_bytes_k});
+                                                              .metric = usearch_sequence_metric_utf8_containment_k});
     if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return NULL;
     usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = index,
                                                           .executor = executor,
@@ -6363,7 +6441,7 @@ void test_arrow_tapes(void) {
         usearch_sequence_init_ram(
             &(usearch_sequence_init_ram_t) {.index = &index,
                                             .outcome = &outcome,
-                                            .metric = usearch_sequence_metric_levenshtein_bytes_k});
+                                            .metric = usearch_sequence_metric_utf8_containment_k});
         if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return;
         usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = index,
                                                               .executor = executor,
@@ -6628,6 +6706,9 @@ int main(int argc, char* argv[]) {
     finish_test_case(NULL);
     start_test_case("test_sequence_saves_and_loads_a_file");
     test_sequence_saves_and_loads_a_file();
+    finish_test_case(NULL);
+    start_test_case("test_sequence_overlaps_the_other_strand");
+    test_sequence_overlaps_the_other_strand();
     finish_test_case(NULL);
     start_test_case("test_sequence_shards");
     test_sequence_shards();

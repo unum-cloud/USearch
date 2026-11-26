@@ -168,6 +168,9 @@ struct DenseTraversalStats(ImplicitlyCopyable):
     """Re-seedings after the frontier drained prematurely - a connectivity health signal."""
     var missing_hints: c_size_t
     """Hint keys no shard held an entry under; zero unless a search was handed hints."""
+    var seeding_distances: c_size_t
+    """Of the distances computed, the sketch distances a sequence search's seeding walk spent;
+    zero for every other walk."""
 
     def __init__(out self):
         """Zeroes every counter, so an unwritten slot reads as an untaken walk."""
@@ -175,6 +178,7 @@ struct DenseTraversalStats(ImplicitlyCopyable):
         self.computed_distances = c_size_t(0)
         self.restarts = c_size_t(0)
         self.missing_hints = c_size_t(0)
+        self.seeding_distances = c_size_t(0)
 
 
 @fieldwise_init
@@ -262,9 +266,11 @@ struct Phase(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """A round gathering every entry into a neighborhood."""
     comptime RESTITCH = Self(9)
     """A round re-stitching each neighborhood."""
-    comptime WRITE = Self(10)
+    comptime REACH = Self(10)
+    """A round linking island entries by walks from the root."""
+    comptime WRITE = Self(11)
     """A round on NVMe rewriting each tile of links from what its restitch changed."""
-    comptime DONE = Self(11)
+    comptime DONE = Self(12)
     """The plan ended its round, and nothing more is pending."""
 
 
@@ -1207,6 +1213,7 @@ struct DenseLoadVramArguments(ImplicitlyCopyable):
     var completion: Completion
     var source: BytesView[ImmUntrackedOrigin]
     var vram: VramOptions[ImmUntrackedOrigin]
+    var connectivity: c_size_t
     var values_per_key: c_size_t
     var progress: ProgressArguments
 
@@ -2815,6 +2822,7 @@ struct DenseIndex(DenseVerbs, Movable):
                 Completion.BLOCKING,
                 source,
                 vram,
+                c_size_t(0),
                 c_size_t(values_per_key),
                 ProgressArguments(),
             ),

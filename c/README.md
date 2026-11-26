@@ -745,13 +745,15 @@ usearch_dense_health(&(usearch_dense_health_t) {
 
 ## Sequence Indexes
 
-A sequence index searches byte strings, UTF-8 text, DNA, RNA and proteins under edit distances and alignments, in RAM, on NVMe or on GPUs.
+A sequence index searches proteins, DNA, RNA and UTF-8 text, in RAM, on NVMe or on GPUs.
 Variable-length entries travel as Apache Arrow tapes, `usearch_tape_view_t`: the elements end to end, and `count + 1` offsets around them, 32-bit or 64-bit as its `layout` says, so sequences are bytes with byte offsets:
 
 ```c
 usearch_sequence_index_t sequences = NULL;
 usearch_sequence_init_ram(&(usearch_sequence_init_ram_t) {
-    .index = &sequences, .outcome = &outcome, .metric = usearch_sequence_metric_levenshtein_utf8_k});
+    .index = &sequences,
+    .outcome = &outcome,
+    .metric = usearch_sequence_metric_utf8_containment_k});
 
 char const tape[] = "kittensittingmitten";
 uint64_t const offsets[4] = {0, 6, 13, 19};
@@ -780,12 +782,22 @@ usearch_sequence_search(&(usearch_sequence_search_t) {.index = sequences,
                                                       .wanted = 3});
 ```
 
-The kinds are Levenshtein over bytes or UTF-8 code points, Needleman-Wunsch with a linear gap, and overlap, the share of fixed-width windows one side misses of the other.
-Needleman-Wunsch takes `usearch_sequence_weights_t`, a 256×256 substitution matrix with a gap cost, and the overlap kind takes `window_widths` in bytes, each refused by every other kind with `usearch_status_config_mismatch_k`.
+| Metric | Sequences | Score |
+| :-- | :-- | :-- |
+| `protein_alignment` | proteins, BLOSUM62 classes | global alignment with linear gaps |
+| `dna_overlap` | DNA and RNA, both strands | aligning one sequence sliding over the other, at the shift most windows vote for |
+| `utf8_containment` | UTF-8 text in any case | the share of the query's distinct windows of 5 and 8 bytes the stored side lacks |
+
+The metric names everything about the sequences, so there is no alphabet to pass; `costs`, 256×256 similarities between raw bytes and a gap, replaces a metric's own where it has them, and `utf8_containment` refuses any with `usearch_status_config_mismatch_k`.
+Inputs are raw bytes, which the library folds itself, and a stored sequence reads back folded: packed class codes for proteins, one class code a byte for DNA, and case-folded UTF-8 for text.
+A checkpoint records the classes and the costs, so loads and views take none.
+Protein alignments and containments keep a sketch in front of every sequence, `sketch_bytes` long: zero on init takes 512, any other multiple of four is kept, the checkpoint records it, and a load or a view may name other bytes, every sketch then written afresh; `dna_overlap` keeps none and refuses any.
+Builds link the graph by sketches, and every search walks twice on every residency: by the sketches first, then by the score from the nearest nodes that walk found, a neighbor list's worth, which `stats.seeding_distances` counts apart.
+`search` takes `hints` from an earlier search on RAM, ahead of the sketch walk's nodes, as shapes do.
 The verbs mirror the dense ones: `init_ram`, `init_vram`, `load_ram`, `load_vram`, `view_ram`, `reserve`, `clear`, `insert`, `refine`, `search` with a predicate, `get` writing tapes into an arena, `cursor_next` writing keys and their links, `reshard`, `save`, `metadata_read`, the `_buffer` forms of `load_ram`, `save` and `metadata_read`, and `describe`, while `count` also reports a key's total and largest byte lengths.
 A key already holding `values_per_key` entries rejects the whole insertion with `usearch_status_overflow_k`.
 The engine serves every kind in RAM, on NVMe and on NVIDIA, AMD and Apple GPUs, and answers `view_ram` with `usearch_status_unsupported_k`; `refine` and `reshard` serve every mutable index, while `sample`, `health` and cursors with `starts` and `links` serve RAM indexes and NVMe views.
-The stand-in serves every kind by textbook dynamic programming, quadratic and unbanded, and reports alignment similarities negated.
+The stand-in serves every score by a full scan over textbook kernels, aligns in quadratic time, and reports costed alignments as negated similarities.
 
 ## Shape Indexes
 

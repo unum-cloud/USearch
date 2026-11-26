@@ -986,8 +986,7 @@ typedef struct usearch_geospatial_search_t {
      *  zero derives, a scan ignores it. */
     size_t expansion_factor;
 
-    /** How entries are reached: a walk, the default, or an exact scan of every entry, on RAM and
-     *  NVMe. */
+    /** How entries are reached: a walk, the default, or an exact scan of every entry. */
     usearch_traversal_t traversal;
 
     /** The @b optional predicate, asked about a batch of candidates at a time. */
@@ -1018,7 +1017,7 @@ typedef struct usearch_geospatial_search_t {
  *  @par Statuses:
  *  - @c usearch_status_unknown_kind_k A @c relation or @c traversal this build does not know.
  *  - @c usearch_status_unsupported_k A @c visible relation on a handle without terrain, or a
- *    scan of a VRAM handle, or a @c predicate on one.
+ *    @c predicate on a VRAM handle.
  */
 USEARCH_EXPORT void usearch_geospatial_search(usearch_geospatial_search_t* arguments);
 

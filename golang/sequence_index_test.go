@@ -37,12 +37,12 @@ func randomSequences(count uint, seed int64) Tape {
 
 // region: Entries
 
-// Every sequence searched for comes back first under its own key, at distance zero, and Get hands
-// back its bytes.
+// Every text searched for comes back first under its own key, at distance zero, and Get hands
+// back its stored text.
 func TestSequenceSearchFindsTheInsertedEntry(t *testing.T) {
 	t.Parallel()
 	options := DefaultSequenceOptions()
-	options.Metric = SequenceMetricLevenshteinUTF8
+	options.Metric = SequenceMetricUTF8Containment
 	index, err := SequenceInitRam(options, nil)
 	if err != nil {
 		t.Fatalf("the index must initialize: %v", err)
@@ -52,7 +52,7 @@ func TestSequenceSearchFindsTheInsertedEntry(t *testing.T) {
 		t.Fatalf("the batch must insert: %v", err)
 	}
 	if description, err := index.Describe(); err != nil || description.Size != 3 ||
-		description.Metadata.Metric != SequenceMetricLevenshteinUTF8 {
+		description.Metadata.Metric != SequenceMetricUTF8Containment {
 		t.Errorf("the index describes %+v: %v", description, err)
 	}
 	arena := newArena(t, nil)
@@ -78,11 +78,90 @@ func TestSequenceSearchFindsTheInsertedEntry(t *testing.T) {
 	}
 }
 
+// nucleotideSimilarities scores each of A, C, G and T against itself at self, A and G against each
+// other at near, and every other pair at zero.
+func nucleotideSimilarities(self, near int8) []int8 {
+	similarities := make([]int8, 256*256)
+	for _, nucleotide := range []byte("ACGT") {
+		similarities[int(nucleotide)*256+int(nucleotide)] = self
+	}
+	similarities[int('A')*256+int('G')], similarities[int('G')*256+int('A')] = near, near
+	return similarities
+}
+
+// searchFirst inserts the sequences under keys from 1 on and answers the two nearest to the query.
+func searchFirst(t *testing.T, options SequenceOptions, query string, sequences ...string) (*SequenceIndex, []Key, []Distance) {
+	t.Helper()
+	index, err := SequenceInitRam(options, nil)
+	if err != nil {
+		t.Fatalf("the index must initialize: %v", err)
+	}
+	t.Cleanup(func() { index.Close() })
+	entries := make([][]byte, len(sequences))
+	for position, sequence := range sequences {
+		entries[position] = []byte(sequence)
+	}
+	if err := index.Insert(keysFrom(1, uint(len(sequences))), SequencesOf(entries...), nil); err != nil {
+		t.Fatalf("the batch must insert: %v", err)
+	}
+	matches, err := index.Search(SequencesOf([]byte(query)), 2, newArena(t, nil), nil)
+	if err != nil {
+		t.Fatalf("the search must run: %v", err)
+	}
+	keys, distances, err := matches.Query(0)
+	if err != nil {
+		t.Fatalf("the matches must read: %v", err)
+	}
+	if len(keys) != 2 {
+		t.Fatalf("the search found %v", keys)
+	}
+	return index, keys, distances
+}
+
+// The reverse complement of the second read finds it first at distance zero.
+func TestSequenceOverlapFindsTheReverseComplement(t *testing.T) {
+	t.Parallel()
+	options := DefaultSequenceOptions()
+	options.Metric = SequenceMetricDNAOverlap
+	_, keys, distances := searchFirst(t, options, "TGCTGCAAATCGATCGTAACCGGTTAAGCC",
+		"ACGTTGCAAGGCTTAACCGGTTACGATCGA", "GGCTTAACCGGTTACGATCGATTTGCAGCA", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTT")
+	if keys[0] != KeyFromUint64(2) || distances[0] != 0 {
+		t.Errorf("the reverse complement found %v at %v", keys, distances)
+	}
+}
+
+// Under costs that keep A near G, one A to G substitution ranks above one A to C.
+func TestSequenceAlignmentRanksByCosts(t *testing.T) {
+	t.Parallel()
+	options := DefaultSequenceOptions()
+	options.Costs = &SequenceCosts{Similarities: nucleotideSimilarities(4, 3), Gap: 4}
+	_, keys, distances := searchFirst(t, options, "ACGTTGCAACGT", "GCGTTGCAACGT", "CCGTTGCAACGT")
+	if keys[0] != KeyFromUint64(1) || distances[0] >= distances[1] {
+		t.Errorf("the near substitution found %v at %v", keys, distances)
+	}
+}
+
+// Text containment finds the entry holding the query whatever the case, and takes no costs.
+func TestSequenceContainmentFindsTheHoldingText(t *testing.T) {
+	t.Parallel()
+	options := DefaultSequenceOptions()
+	options.Metric = SequenceMetricUTF8Containment
+	_, keys, distances := searchFirst(t, options, "BROWN FOX jumps",
+		"the quick brown fox jumps over the lazy dog", "a journey of a thousand miles begins with a single step")
+	if keys[0] != KeyFromUint64(1) {
+		t.Errorf("the holding text found %v at %v", keys, distances)
+	}
+	options.Costs = &SequenceCosts{Similarities: make([]int8, 256*256), Gap: 1}
+	if _, err := SequenceInitRam(options, nil); !errors.Is(err, StatusConfigMismatch) {
+		t.Errorf("a containment with costs initializes with %v", err)
+	}
+}
+
 // Metrics print as the library spells them.
 func TestSequenceMetricsSpellTheLibrarysNames(t *testing.T) {
 	t.Parallel()
-	if name := SequenceMetricLevenshteinBytes.String(); name == "" || name == "unknown" {
-		t.Errorf("the byte-level Levenshtein kind prints %q", name)
+	if name := SequenceMetricProteinAlignment.String(); name == "" || name == "unknown" {
+		t.Errorf("the protein alignment prints %q", name)
 	}
 	if name := SequenceMetric(99).String(); name != "unrecognized" && name != "unknown" {
 		t.Errorf("an unknown sequence kind prints %q", name)
@@ -92,8 +171,8 @@ func TestSequenceMetricsSpellTheLibrarysNames(t *testing.T) {
 // Every metric reads back from its own spelling, and a spelling no metric holds is refused.
 func TestSequenceMetricsReadBackFromTheirNames(t *testing.T) {
 	t.Parallel()
-	for _, metric := range []SequenceMetric{SequenceMetricLevenshteinBytes, SequenceMetricLevenshteinUTF8,
-		SequenceMetricNeedlemanWunsch, SequenceMetricOverlap} {
+	for _, metric := range []SequenceMetric{SequenceMetricProteinAlignment, SequenceMetricDNAOverlap,
+		SequenceMetricUTF8Containment} {
 		if read, err := SequenceMetricFromName(metric.String()); err != nil || read != metric {
 			t.Errorf("%q reads back as %v: %v", metric.String(), read, err)
 		}
@@ -228,9 +307,9 @@ func TestSequenceSavesAndLoads(t *testing.T) {
 		t.Errorf("the monolith's metadata must read: %v", err)
 	}
 	loaded := []func() (*SequenceIndex, error){
-		func() (*SequenceIndex, error) { return SequenceLoadRam(path, nil, nil) },
-		func() (*SequenceIndex, error) { return SequenceLoadRamBuffer(buffer, nil, nil) },
-		func() (*SequenceIndex, error) { return SequenceViewRam(path, nil) },
+		func() (*SequenceIndex, error) { return SequenceLoadRam(path, nil) },
+		func() (*SequenceIndex, error) { return SequenceLoadRamBuffer(buffer, nil) },
+		func() (*SequenceIndex, error) { return SequenceViewRam(path) },
 	}
 	for position, load := range loaded {
 		copied, err := load()

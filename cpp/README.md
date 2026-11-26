@@ -540,25 +540,24 @@ std::printf("%zu entries under the key\n", entries);
 
 ## Sequence Indexes
 
-A `sequence_index_t` searches byte strings, UTF-8 text, DNA, RNA and proteins under edit distances and alignments.
+A `sequence_index_t` searches proteins by global alignment, DNA and RNA by shifted overlap on either strand, and UTF-8 text by window containment in any case.
 Its sequences cross as one `tape_view<std::uint8_t>`, the Apache Arrow `Binary` layout of bytes end to end around one more 32- or 64-bit offset than entries, so the two runs of an Arrow column pass as they are.
 
 ```cpp
-auto [index, index_status] = us::sequence_index_t::init_ram({.metric = usearch_sequence_metric_levenshtein_utf8_k});
-std::uint8_t const words[] = {'k', 'i', 't', 't', 'e', 'n', 's', 'i', 't', 't',
-                              'i', 'n', 'g', 'm', 'i', 't', 't', 'e', 'n'};
-std::uint64_t const offsets[] = {0, 6, 13, 19};
+auto [index, index_status] = us::sequence_index_t::init_ram({.metric = usearch_sequence_metric_utf8_containment_k});
+std::uint8_t const words[] = {'k', 'i', 't', 't', 'e', 'n', 's', 'i', 't', 't', 'i', 'n', 'g'};
+std::uint64_t const offsets[] = {0, 6, 13};
 us::status_t const inserted = index.insert(keys, {words, offsets});
 
-std::uint8_t const probe[] = {'s', 'i', 't', 't', 'i', 'n'};
-std::uint64_t const probe_offsets[] = {0, 6};
 auto [arena, arena_status] = us::arena_t::make();
-auto [matches, status] = index.search({probe, probe_offsets}, 1, arena);
-assert(matches.scores[0] == 1); // one edit away
+auto [matches, status] = index.search({words + 6, std::span(offsets).first(2)}, 1, arena);
+auto [stored, stored_status] = index.get(keys[1], arena); // stored.entry(0) spans "sitting"
 ```
 
-`usearch_sequence_metric_needleman_wunsch_k` takes `weights`, a 256 × 256 substitution matrix with a gap cost, and `usearch_sequence_metric_overlap_k` takes `window_widths`; every load and view names the weights again, since no checkpoint records them.
-`get` writes a key's sequences into an arena as `sequence_entries_t`, whose `entry(position)` spans one sequence's bytes, and `count` reports a key's entries with their total and largest byte lengths.
+`count` answers a key's entries with their total and largest byte lengths.
+A metric names everything about its sequences; `usearch_sequence_costs_t`, similarities between raw bytes with a gap cost, replaces a metric's own costs, and `utf8_containment` takes none.
+A checkpoint records the costs, so loads and views take none, and a stored text reads back folded.
+Protein alignments and containments keep a sketch of `sketch_bytes` in front of each sequence, 512 when the init names none; searches walk the sketches first and the score from what that walk found, and `sequence_search_config_t::hints` starts a RAM search from an earlier one's matches.
 The receivers, reports and plans work as the dense ones do: `refine` and `reshard` take a `sequence_refine_plan_t` or a `sequence_reshard_plan_t` and answer a `usearch_refine_report_t`.
 
 ## Shape Indexes

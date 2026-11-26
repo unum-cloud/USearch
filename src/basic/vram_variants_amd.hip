@@ -22,7 +22,7 @@
 #include "usearch/dense/vram_index.cuh"          // `vram_rebase_links`, the health passes' & splits' bodies
 #include "usearch/basic/vram_amd_index.hpp"
 
-#include "lib.hpp" // `gpu_class_t`, `hip_class_k` - the class this unit compiles as
+#include "classes.hpp" // `gpu_class_t`, `hip_class_k` - the class this unit compiles as
 
 namespace unum::usearch::basic {
 
@@ -93,7 +93,7 @@ void amd_instantiate() noexcept {
     amd_instantiate_kernels<node_id_type_>(std::make_index_sequence<std::size(amd_graph_kernels)> {});
 }
 
-template void amd_instantiate<u32_t>();
+template void amd_instantiate<util::u32_t>();
 
 #else
 
@@ -111,7 +111,7 @@ util::byte_t const* const* basic_bundles() noexcept {
 }
 
 template <>
-bytes_view_t hip_graph_code_object<numkong_capabilities_of(hip_class_k)>::bytes() noexcept {
+util::bytes_view_t hip_graph_code_object<numkong_capabilities_of(hip_class_k)>::bytes() noexcept {
     util::byte_t const* const* const bounds = basic_bundles<hip_class_k>();
     return {bounds[0], bounds[1]};
 }

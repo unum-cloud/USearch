@@ -127,7 +127,7 @@ pub const DenseSearchStream = dense.DenseSearchStream;
 
 // sequence
 pub const SequenceMetric = sequence.SequenceMetric;
-pub const SequenceWeights = sequence.SequenceWeights;
+pub const SequenceCosts = sequence.SequenceCosts;
 pub const SequenceOptions = sequence.SequenceOptions;
 pub const SequenceMetadata = sequence.SequenceMetadata;
 pub const SequenceIndexDescription = sequence.SequenceIndexDescription;

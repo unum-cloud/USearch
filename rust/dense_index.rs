@@ -731,6 +731,9 @@ pub struct DenseTraversalStats {
     pub restarts: usize,
     /// Hint keys no shard held an entry under; zero unless a search was handed hints.
     pub missing_hints: usize,
+    /// Of the distances computed, the sketch distances a sequence search's seeding walk spent; zero
+    /// for every other walk.
+    pub seeding_distances: usize,
 }
 
 /// One reachability audit: the population it judged, and how much of it a search reaches.

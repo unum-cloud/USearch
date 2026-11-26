@@ -245,6 +245,11 @@ public final class DenseTraversalStats: @unchecked Sendable {
     /// The starvation re-seedings - a graph-connectivity health signal rather than a cost
     /// counter.
     public var restarts: Int { raw.pointee.restarts }
+    /// The hint keys no shard held an entry under; zero unless a search was handed hints.
+    public var missingHints: Int { raw.pointee.missing_hints }
+    /// Of the distances computed, the sketch distances a sequence search's seeding walk spent;
+    /// zero for every other walk.
+    public var seedingDistances: Int { raw.pointee.seeding_distances }
 }
 
 /// Flash Attention's running maximum and partition for one query row.
@@ -1119,6 +1124,7 @@ public final class DenseIndex: @unchecked Sendable {
                         shard_capacity: 0,
                         gpu_class_ceiling: config.gpuClassCeiling?.raw ?? usearch_gpu_class_unknown_k
                     ),
+                    connectivity: 0,
                     values_per_key: config.valuesPerKey,
                     progress: progress
                 )
@@ -1184,6 +1190,7 @@ public final class DenseIndex: @unchecked Sendable {
                         shard_capacity: 0,
                         gpu_class_ceiling: config.gpuClassCeiling?.raw ?? usearch_gpu_class_unknown_k
                     ),
+                    connectivity: 0,
                     values_per_key: config.valuesPerKey,
                     progress: progress
                 )

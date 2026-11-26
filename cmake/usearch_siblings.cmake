@@ -53,11 +53,11 @@ set(SMASHTABLE_CUDA_ARCH "${USEARCH_CUDA_ARCH}")
 
 # NumKong: the distance kits and tensors, header-only, as every unit inlines the kernels its CPU or GPU class runs.
 # ForkUnion: the thread pools, the memory topology, and the ISA-specific waiters and atomic references. StringZilla: the
-# string kits behind the sequence modality, from the Levenshtein steps to the overlaps. SmashTable: the Elias-Fano row
+# string kits behind the sequence modality, from the sketches to the overlaps. SmashTable: the Elias-Fano row
 # directories of the NVMe indexes.
 usearch_sibling(
     numkong FETCHCONTENT_SOURCE_DIR_NUMKONG https://github.com/ashvardanian/NumKong
-    d8df8d51b2f6250b8f3f1b8c9999884067050023
+    f4cfb1f90b5f441914eb207a6db2dd987dad354c
 )
 usearch_sibling(
     forkunion FETCHCONTENT_SOURCE_DIR_FORKUNION https://github.com/ashvardanian/ForkUnion
@@ -65,11 +65,11 @@ usearch_sibling(
 )
 usearch_sibling(
     stringzilla FETCHCONTENT_SOURCE_DIR_STRINGZILLA https://github.com/ashvardanian/StringZilla
-    930a52c38505d37165194b72009da2df15a4dcfa
+    c539a4083d54319c522206d4af14a1a3e72ea9d7
 )
 usearch_sibling(
     smashtable FETCHCONTENT_SOURCE_DIR_SMASHTABLE https://github.com/ashvardanian/SmashTable
-    36ec681da1874d63ef4b57114405df00e426728a
+    dd4dfa9147a1957fb302c1f0e4ca89d028094d94
 )
 
 # The siblings are what `dense/`, the NVMe and VRAM tiers and the modalities are written against, while `usearch::header`

@@ -6,7 +6,10 @@ None of it is a public header: the C libraries, the C test and every binding lin
 ## Files
 
 - `types.cpp` answers the library-wide probes of `types.h`: the version, the capability levels compiled and available, an outcome's status, and the spelling of every closed set in both directions.
-- `lib.hpp` holds what every modality's dispatch shares: the CPU classes, the executor and arena handles, the holding call, and the outcome, progress and output helpers.
+- `lib.hpp` holds what every modality's dispatch shares: the executor and arena handles, the holding call, and the outcome, progress and output helpers.
+- `classes.hpp` holds the CPU and GPU classes: what each lowers to, which ones this build compiled, the ladders a dispatch walks and the class a placement picks, without asking the machine.
+- `sequence_kits.hpp`, `shapes_kits.hpp`, `geospatial_kits.hpp` and `dense_kits.hpp` name the kit each GPU class runs and the device code each vendor's unit embeds, so class units, kernel units and tests share one copy.
+- `sequence_kernels.hpp` names the family of kernels each sequence score runs, so every modality's units read it without StringZilla's kernels.
 - `dense_index.cuh` implements `dense_index.h`: the handle owning one picked variant through its residency's verb table, the ladders that pick it, and every exported verb as one visit over five residencies apiece.
 - `dense_index.cpp` compiles that header with the host compiler for every build, and includes no tower.
 - `dense_kernels.cuh` is what every dense GPU device unit compiles beside the kernels: the C value lookup's device call, the lookup a sharded attend walks through, and the ceiling of the class a pass compiles for.
@@ -45,7 +48,7 @@ The variants are aliases over those templates, keyed by the storage dtype and th
 
 - `ram_indexes<dtype, cpu_class>` → `dense::ram_indexes<uuid128_t, quads_kit_of<dtype, cpu_class>, tiles_kit_of<...>, elementwise_kit_of<cpu_class>, rmscast_kit_of<...>, visits_kit_of<cpu_class>, waiter_of<cpu_class>, ...>`, each kit its ladder's pick under the class's NumKong mask, with the class's atomic reference and cache hints last.
 - `nvme_indexes<dtype, cpu_class>` → `dense::nvme_indexes<uuid128_t, ...>` over the same five kits.
-- `vram_nvidia_indexes<dtype, gpu_class>` → `dense::vram_nvidia_indexes<uuid128_t, dtype, cuda_fatbin<gpu_class, dtype>, fu::preferred_cache_hints_t>`, the fatbin of one dtype's kernels stating the class's NumKong mask as its `capability_k`, and `vram_amd_indexes<dtype, gpu_class>` likewise over `dense::vram_amd_indexes` and `hip_code_object<gpu_class, dtype>`.
+- `vram_nvidia_indexes<dtype, gpu_class>` → `dense::vram_nvidia_indexes<uuid128_t, dtype, dense_nvidia_fatbin<gpu_class, dtype>, fu::preferred_cache_hints_t>`, the fatbin of one dtype's kernels stating the class's NumKong mask as its `capability_k`, and `vram_amd_indexes<dtype, gpu_class>` likewise over `dense::vram_amd_indexes` and `dense_amd_code_object<gpu_class, dtype>`.
 - `vram_apple_indexes<dtype, gpu_class>` → `dense::vram_apple_indexes<uuid128_t, dtype, numkong_capabilities_of(gpu_class)>`, one variant per Apple class, each compiling its own library at first use.
 
 A variant's executor type is its residency, so `vendored_residency_of`, `is_ram_index`, `is_nvme_index` and `is_vram_index` read it rather than a second tag that could disagree.
@@ -146,13 +149,13 @@ The NVMe class units score with the same kits as the RAM ones, since the transpo
 
 ## Sequences & Shapes
 
-A sequence or shapes handle holds one `basic::ram_indexes`, one shard per memory domain on the heap, with every value owned by its node record: a `sz::string` of the sequence's bytes, or an `nk::shapes_packed` of the shape's points in `f16` or `f32`.
-Their ladders are shorter than dense's, over the classes where StringZilla's Levenshtein and overlap kits or NumKong's shapes and geospatial kits advance on their parent's.
+A sequence or shapes handle holds one `basic::ram_indexes`, one shard per memory domain on the heap, with every value owned by its node record: a `sz::string` of a fixed-size sketch, where the metric has one, followed by the sequence's bytes, or an `nk::shapes_packed` of the shape's points in `f16` or `f32`.
+Their ladders are shorter than dense's, over the classes where StringZilla's overlap and minhash kits, the spectrum kits or NumKong's shapes and geospatial kits advance on their parent's.
 Sequence, shapes and geospatial compile the same classes, each into a RAM and an NVMe unit, and a modality whose kits do not advance at a class falls back through its kit chain to the next lower generation.
 
 - `insert` builds the batch's values on every thread from the index's allocator, sizes every thread's context and metric, and only then plans the batch, so nothing fails after the dispense.
 - `search` writes each query's nearest from the walk's candidates, narrowed by the predicate a quad of keys at a time when it is cheap, or once per settled round when it is expensive.
-- Overlap distances are reported as the share of missed windows, from zero to one, rather than the kernels' fixed point.
-- Checkpoints are one SafeGraphs monolith for a lone live shard, or one part per live shard beside a `.json` manifest, whose metric token is `levenshtein`, `levenshtein-utf8`, `needleman-wunsch`, `overlap`, `chamfer`, `hausdorff`, `gromov-wasserstein` or `wasserstein-procrustes`, with `connectivity`, `window_widths` and `points` in the provenance.
+- Containment and overlap distances are reported from zero to one, rather than as the kernels' fixed point.
+- Checkpoints are one SafeGraphs monolith for a lone live shard, or one part per live shard beside a `.json` manifest, whose metric token is `protein-alignment`, `dna-overlap`, `utf8-containment`, `chamfer`, `hausdorff`, `gromov-wasserstein` or `wasserstein-procrustes`, with `connectivity`, the folded costs and `points` in the provenance.
 
 `refine` and `reshard` run rounds on RAM and NVIDIA indexes, `sample` serves RAM ones, and a cursor opens at start keys and reports links there, while `view_ram` answers `usearch_status_unsupported_k`.

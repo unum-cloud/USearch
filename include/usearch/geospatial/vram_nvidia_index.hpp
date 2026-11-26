@@ -32,8 +32,10 @@ using namespace unum::usearch::utilities;
 template <typename kit_type_, typename node_id_type_, typename kernels_type_>
 struct vram_nvidia_kits {
 
-    /** Rungs of the kit's kernels: one, serving every observation. */
-    inline static constexpr std::size_t rungs_k = 1;
+    /** Rungs of the kit's canonical kernels: one, serving every observation, which its builders
+     *  compile on too. */
+    inline static constexpr std::size_t canonical_rungs_count_k = 1;
+    inline static constexpr std::size_t build_rungs_count_k = canonical_rungs_count_k;
 
   private:
     template <typename, typename, typename, typename>
@@ -43,18 +45,17 @@ struct vram_nvidia_kits {
      *  see each cone's nearest candidate, as @c surface_keep_octants_t documents. */
     inline static constexpr u32_t build_breadth_k = surface_keep_octants_t::exact_candidates_k;
 
-    /** The rung serving positions of @p longest bytes, or @c rungs_k when none does. Defined in
-     *  @c vram_nvidia_metric.cuh, as are the members below reading the kit. */
-    static std::size_t rung_serving_(std::size_t longest) noexcept;
+    /** The rung serving positions of @p longest bytes for either role, or
+     *  @c canonical_rungs_count_k when none does. Defined in @c vram_nvidia_metric.cuh, as are the
+     *  members below reading the kit. */
+    static std::size_t rung_serving_(score_role_t role, std::size_t longest) noexcept;
 
-    /** Lanes the kit scores a position with on @p rung. */
-    static u32_t lanes_per_entry_(std::size_t rung) noexcept;
+    /** How a block of the kit's kernels of @p role splits with @p walkers walkers on @p rung, its
+     *  only one. */
+    static basic::cuda_block_layout_t block_layout_(score_role_t role, std::size_t rung, u32_t walkers) noexcept;
 
-    /** Bytes the position at @p data takes once prepared. */
-    static std::size_t span_bytes_(byte_t const* data, std::size_t bytes) noexcept;
-
-    /** Bytes a loaded observation takes once prepared: none, however long. */
-    static std::size_t span_bytes_(std::size_t) noexcept { return 0; }
+    /** Bytes the position at @p data takes once prepared for either role: none, however long. */
+    static std::size_t span_bytes_(score_role_t role, byte_t const* data, std::size_t bytes) noexcept;
 
     /** Bytes the @p stored observation saves into: its own 32, as the RAM codec saves it. */
     static expected<std::size_t> saved_bytes_(bytes_view_t stored) noexcept {

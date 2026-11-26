@@ -866,6 +866,10 @@ typedef struct usearch_traversal_stats_t {
 
     /** Hint keys no shard held an entry under; zero unless a search was handed hints. */
     size_t missing_hints;
+
+    /** Of @c computed_distances, the sketch distances a sequence search's seeding walk spent before
+     *  walking by its canonical score; zero for every other walk. */
+    size_t seeding_distances;
 } usearch_traversal_stats_t;
 
 /** One reachability audit: the population it judged, and how much of it a search reaches. */
@@ -937,6 +941,9 @@ typedef enum usearch_phase_t {
 
     /** A round re-stitching each neighborhood. */
     usearch_phase_restitch_k,
+
+    /** A round linking island entries by walks from the root. */
+    usearch_phase_reach_k,
 
     /** A plan filing what its moves or rounds produced where it lands: a cut's keys, or NVMe
      *  parts. */
@@ -1035,8 +1042,8 @@ typedef struct usearch_refine_report_t {
  */
 typedef struct usearch_refine_options_t {
 
-    /** The @b optional breadth of any walk a refining verb takes beside its rounds; zero derives. A
-     *  round itself walks nothing. */
+    /** The @b optional breadth of the walks a refining verb takes: a round's reach for island
+     *  entries, and a reshard's cross-shard search; zero takes the derived breadth. */
     size_t expansion_factor;
 
     /** The @b optional bytes a loaded NVMe handle holds for the one part it rewrites: zero derives

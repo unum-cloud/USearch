@@ -154,7 +154,7 @@ export const sequence = {
   name: "sequence",
 
   /** `entries` sentences of 24 to 80 bytes from a text file sorted alphabetically - Leipzig by default - drawn from chunks
-   *  spread over the whole file, under byte-level Levenshtein distance. */
+   *  spread over the whole file, under case-folded window containment. */
   async develop(parameters, report) {
     const source = sourceOf("../data/leipzig-1m/leipzig1M_en.txt", parameters);
     const entries = Number(parameters.get("entries") ?? 5000);
@@ -186,7 +186,7 @@ export const sequence = {
     const bytes = new Uint8Array(offsets[encoded.length]);
     encoded.forEach((sentence, entry) => bytes.set(sentence, offsets[entry]));
     return {
-      options: { metric: "usearch_sequence_metric_levenshtein_bytes_k", connectivity: 16 },
+      options: { metric: "usearch_sequence_metric_utf8_containment_k", connectivity: 16 },
       identities: identitiesUpTo(encoded.length),
       payload: { count: encoded.length, bytes, scalar: "usearch_scalar_u8_k", offsets, columns: 1 },
     };

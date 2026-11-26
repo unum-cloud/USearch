@@ -829,6 +829,8 @@ const (
 	PhaseGather Phase = C.usearch_phase_gather_k
 	// PhaseRestitch is a round re-stitching each neighborhood.
 	PhaseRestitch Phase = C.usearch_phase_restitch_k
+	// PhaseReach is a round linking island entries by walks from the root.
+	PhaseReach Phase = C.usearch_phase_reach_k
 	// PhaseWrite is a round on NVMe rewriting each tile of links from what its restitch changed.
 	PhaseWrite Phase = C.usearch_phase_write_k
 	// PhaseDone means the plan ended its round, and nothing more is pending.
@@ -1834,6 +1836,9 @@ type TraversalStats struct {
 	// MissingHints counts hint keys no shard held an entry under; zero unless a search was
 	// handed hints.
 	MissingHints uint
+	// SeedingDistances counts, of ComputedDistances, the sketch distances a sequence search's
+	// seeding walk spent; zero for every other walk.
+	SeedingDistances uint
 }
 
 // Accumulate folds another call's telemetry into this one. Binding-only.
@@ -1842,6 +1847,7 @@ func (stats *TraversalStats) Accumulate(other TraversalStats) {
 	stats.ComputedDistances += other.ComputedDistances
 	stats.Restarts += other.Restarts
 	stats.MissingHints += other.MissingHints
+	stats.SeedingDistances += other.SeedingDistances
 }
 
 // Reachability is one reachability audit: the population it judged, and how much of it a

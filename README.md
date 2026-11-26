@@ -154,7 +154,7 @@ See the [C++ guide](https://github.com/unum-cloud/USearch/blob/main/include/usea
 | Modality            | Inputs                                      | Similarities & Distances                                         | Status                                |
 | :------------------ | :------------------------------------------ | :--------------------------------------------------------------- | :------------------------------------ |
 | __Dense Vectors__   | Equal-width numeric rows or packed bit sets | Inner-Product, Angular, Euclidean, Hamming, & Jaccard            | RAM, VRAM, & NVMe engines             |
-| __Sequences__       | Variable-length byte strings & UTF-8 text   | Levenshtein, overlap, & Needleman-Wunsch global alignment        | Experimental C++ engine & C interface |
+| __Sequences__       | Variable-length byte strings & UTF-8 text   | Global alignment, window containment, & shifted overlap          | Experimental C++ engine & C interface |
 | __Shapes__          | 3D point clouds of any size                 | Chamfer, Hausdorff, Wasserstein-Procrustes, & Gromov-Wasserstein | Experimental C++ engine & C interface |
 | __Geospatial Sets__ | WGS-84 points, point sets, & sampled paths  | Point proximity; declared Overlap, Shape, Coverage, & Route      | Experimental C++ engine & C interface |
 
@@ -286,8 +286,10 @@ Construction & maintenance have their own cost, & neither arbitrary data nor arb
 
 ## Sequence Modality
 
-The C++ RAM index works with variable-length byte sequences & UTF-8 text, using [StringZilla][stringzilla] for Levenshtein & overlap kernels and its own for Needleman-Wunsch global alignment, & the C interface exports it.
+A metric names what the sequences are: `protein_alignment` scores global alignments, `dna_overlap` aligns reads sliding over each other on either strand, & `utf8_containment` finds the text holding most of a query's windows, in any case, & the C interface exports them.
 Sequence search is useful when edit operations & local matches hold more meaning than a dense embedding's geometry.
+Protein alignments & containments keep a sketch in front of every sequence, `sketch_bytes` long, 512 unless the index names another multiple of four.
+Builds link the graph by the sketches, & every search walks twice: first by the sketches, then by the exact score from the nearest nodes that walk found, as many as a neighbor list holds.
 
 ## Geospatial Modality
 

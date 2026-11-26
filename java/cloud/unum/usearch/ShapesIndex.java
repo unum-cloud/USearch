@@ -1179,6 +1179,7 @@ public final class ShapesIndex implements AutoCloseable {
                 Library.padding(),
                 Library.BYTES_VIEW.withName("source"),
                 Library.placement(placement),
+                Library.SIZE.withName("connectivity"),
                 Library.SIZE.withName("values_per_key"),
                 Library.PROGRESS);
     }

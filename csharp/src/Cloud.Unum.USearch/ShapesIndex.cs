@@ -1562,6 +1562,7 @@ internal unsafe struct NativeShapesLoadRam
     public Completion Completion;
     public NativeBytesView Path;
     public NativeRamOptions Ram;
+    public nuint Connectivity;
     public nuint ValuesPerKey;
     public NativeProgress Progress;
 }
@@ -1575,6 +1576,7 @@ internal unsafe struct NativeShapesLoadRamBuffer
     public Completion Completion;
     public NativeBytesView Buffer;
     public NativeRamOptions Ram;
+    public nuint Connectivity;
     public nuint ValuesPerKey;
     public NativeProgress Progress;
 }
@@ -1588,6 +1590,7 @@ internal unsafe struct NativeShapesLoadVram
     public Completion Completion;
     public NativeBytesView Path;
     public NativeVramOptions Vram;
+    public nuint Connectivity;
     public nuint ValuesPerKey;
     public NativeProgress Progress;
 }
@@ -1601,6 +1604,7 @@ internal unsafe struct NativeShapesLoadVramBuffer
     public Completion Completion;
     public NativeBytesView Buffer;
     public NativeVramOptions Vram;
+    public nuint Connectivity;
     public nuint ValuesPerKey;
     public NativeProgress Progress;
 }

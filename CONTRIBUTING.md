@@ -908,8 +908,8 @@ Unset, the SPDK suite saves `usearch-nvme-spdk.safegraphs` under `TMPDIR` for a 
 
 These test files include a header from `src/`, which no public header declares, each for what that surface lacks:
 
-- `test/placement.cpp` includes `src/lib.hpp` for `resolve_placement`, `gpu_placement_t` and `gpu_class_bit`, the placement rules the C interface applies but does not export.
-- `test/dense/vram_nvidia.hpp`, `test/shapes/vram_index.cpp` and `test/sequence/vram_index.cpp` include `src/lib.hpp` for `gpu_class_t`, `pick_gpu_class` and `stringzilla_capabilities_of`, the class the library picks a GPU unit by, which the cells compare against.
+- `test/placement.cpp` includes `src/classes.hpp` for `resolve_placement`, `gpu_placement_t` and `gpu_class_bit`, the placement rules the C interface applies but does not export.
+- `test/dense/vram_nvidia.hpp`, `test/shapes/vram_index.cpp` and `test/sequence/vram_index.cpp` include `src/classes.hpp` and their modality's `src/<modality>_kits.hpp` for the class each vendor's cells run and the kit and device code the library declares for it.
 - `test/dense/ram_indexes.hpp` includes `src/dense_specializations.cuh` for `quads_kit_of` and its kin, the kits a CPU class runs a dtype on.
 
 ## Bindings
