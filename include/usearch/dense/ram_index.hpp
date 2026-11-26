@@ -3408,10 +3408,9 @@ struct ram_index {
         }
 
         /** Links every unreached or stranded island whose first rank falls in @p task through the
-         *  root's component, with no distance: an unreached one's entry from the first of its own
-         *  links inside the component that takes it, a stranded one's entry to the entry of the
-         *  component linking to it. A component with neither waits for a later round, which its
-         *  restitch gives the links to heal through. */
+         *  root's component, with no distance: an unreached one's entry as @ref link_unreached_
+         *  does, a stranded one's entry to the entry of the component linking to it. A component
+         *  with neither waits for a later round, whose restitch gives it the links to heal by. */
         void heal_(task_t const& task) noexcept {
             auto keeps_none = [](node_id_t) noexcept { return false; };
             std::size_t healed = 0, waiting = 0;
@@ -3419,20 +3418,9 @@ struct ram_index {
                 if (!health.island_first(rank)) continue;
                 u8_t const roles = health.island_roles(rank);
                 node_id_t const entry = health.island_entry(rank);
-                if (roles & health_plan_t::unreached_island_k) {
-                    // A full owner row may refuse, so the next link inside the component
-                    // offers its own.
-                    node_id_t owner = node_id_unknown_k;
-                    bool linked = false, owned = false;
-                    index_->for_each_member_(entry, [&](node_id_t link) noexcept {
-                        if (linked || link >= health.visible || !health.in_component(link)) return;
-                        owned = true;
-                        linked = add_or_swap_link_(link, entry, keeps_none) == taken_t::written_k;
-                        if (linked) owner = link;
-                    });
-                    if (linked) health.record_heal_link(owner, entry), ++healed;
-                    waiting += !owned;
-                }
+                if (roles & health_plan_t::unreached_island_k)
+                    if (node_id_t const owner = link_unreached_(entry, waiting); owner != node_id_unknown_k)
+                        health.record_heal_link(owner, entry), ++healed;
                 node_id_t const parent = health.island_entry_parent(rank);
                 if ((roles & health_plan_t::stranded_island_k) && parent != node_id_unknown_k &&
                     add_or_swap_link_(entry, parent, keeps_none) == taken_t::written_k)
@@ -3441,6 +3429,29 @@ struct ram_index {
             }
             add_(tally_.islands_reconnected, healed);
             add_(islands_waiting_, waiting);
+        }
+
+        /** Links unreached island entry @p entry from the first of its own links inside the root's
+         *  component that takes it, else, as full hubs refuse every link, from a free slot of the
+         *  first row of the component its links link to; answers the owner or none, and an entry
+         *  with no owner either way adds to @p waiting. */
+        node_id_t link_unreached_(node_id_t entry, std::size_t& waiting) noexcept {
+            auto keeps_none = [](node_id_t) noexcept { return false; };
+            auto keeps_all = [](node_id_t) noexcept { return true; };
+            node_id_t owner = node_id_unknown_k;
+            std::size_t owners = 0;
+            auto offer = [&](node_id_t link, auto const& keeps) noexcept {
+                if (owner != node_id_unknown_k || link >= health.visible || !health.in_component(link)) return;
+                ++owners;
+                if (add_or_swap_link_(link, entry, keeps) == taken_t::written_k) owner = link;
+            };
+            index_->for_each_member_(entry, [&](node_id_t link) noexcept { offer(link, keeps_none); });
+            auto offer_free = [&](node_id_t link) noexcept { offer(link, keeps_all); };
+            index_->for_each_member_(entry, [&](node_id_t hop) noexcept {
+                if (owner == node_id_unknown_k && hop < health.visible) index_->for_each_member_(hop, offer_free);
+            });
+            waiting += !owners;
+            return owner;
         }
 
         /**

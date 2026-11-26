@@ -1497,12 +1497,14 @@ inline metal_health_t metal_health(constant metal_arguments_t& arguments, device
         warp_t::fetch_add_relaxed(counters + metal_round_stranded_islands_k, counted[1]);
 }
 
-/** Links @p member from @p owner 's row, as the RAM round's @c add_or_swap_link_ does keeping none:
- *  a free slot first; else, inside the root's component, the slot whose resident is linked to by
- *  the most entries, when it stays linked to by more than @p member and the reach rule releases it.
- *  The heal runs alone, so it writes rows with plain stores; answers whether it wrote. */
+/** Links @p member from @p owner 's row, as the RAM round's @c add_or_swap_link_ does: a free slot
+ *  first; else, inside the root's component, the slot whose resident is linked to by the most
+ *  entries, when it stays linked to by more than @p member, @p keeps does not hold it and the reach
+ *  rule releases it. The heal runs alone, writing rows with plain stores, and answers whether it
+ *  wrote the link. */
+template <typename keeps_type_>
 inline bool metal_add_or_swap_link(thread metal_health_t& health, device uint* changed, uint owner, uint member,
-                                   thread uint& changed_rows) {
+                                   thread uint& changed_rows, thread keeps_type_ const& keeps) {
     if (owner == member || owner >= health.rows_count || member >= health.rows_count) return false;
     device uint* const row = health.row(owner);
     uint const connectivity = health.connectivity, first = row[0];
@@ -1526,6 +1528,7 @@ inline bool metal_add_or_swap_link(thread metal_health_t& health, device uint* c
             if (resident >= health.rows_count || health.in_links_of(resident) <= richest_links + 1u) continue;
             richest = slot, richest_links = health.in_links_of(resident);
         }
+        if (richest != connectivity && keeps(richest ? row[richest] : first)) richest = connectivity;
         uint const displaced = richest == connectivity ? metal_unknown_k : richest ? row[richest] : first;
         if (present) {}
         else if (free_slot != connectivity) row[free_slot] = member, written = true;
@@ -1541,10 +1544,36 @@ inline bool metal_add_or_swap_link(thread metal_health_t& health, device uint* c
     return true;
 }
 
+/** Links unreached island entry @p entry as the RAM round's @c link_unreached_ does: from the first
+ *  of its own links inside the root's component, else, as a full hub refuses, from a free slot of
+ *  the first row of the component its links link to; answers the owner or none. */
+inline uint metal_link_unreached(thread metal_health_t& health, device uint* changed, uint entry,
+                                 thread uint& changed_rows) {
+    auto keeps_none = [](uint) { return false; };
+    auto keeps_all = [](uint) { return true; };
+    auto owns = [&](uint link) { return link < health.rows_count && link != entry && health.in_component(link); };
+    device uint* const row = health.row(entry);
+    uint owner = metal_unknown_k;
+    for (uint slot = 0; slot != health.connectivity && owner == metal_unknown_k && row[slot] != metal_unknown_k; ++slot)
+        if (owns(row[slot])) owner = row[slot];
+    if (owner != metal_unknown_k && metal_add_or_swap_link(health, changed, owner, entry, changed_rows, keeps_none))
+        return owner;
+    for (uint slot = 0; slot != health.connectivity && row[slot] != metal_unknown_k; ++slot) {
+        uint const hop = row[slot];
+        if (hop == entry || hop >= health.rows_count) continue;
+        device uint* const hop_row = health.row(hop);
+        for (uint hop_slot = 0; hop_slot != health.connectivity; ++hop_slot)
+            if (owns(hop_row[hop_slot]) &&
+                metal_add_or_swap_link(health, changed, hop_row[hop_slot], entry, changed_rows, keeps_all))
+                return hop_row[hop_slot];
+    }
+    return metal_unknown_k;
+}
+
 /** Links every unreached or stranded island component through the root's component with no
  *  distance, in rank order on one lane, as the RAM round's @c heal_ does: an unreached one's entry
- *  from the first of its own links inside the component, a stranded one's entry to the entry of the
- *  component linking to it. */
+ *  as @ref metal_link_unreached does, and a stranded one's entry to the entry of the root's
+ *  component that links to that island. */
 [[host_name("metal_heal_islands_kernel")]] kernel void metal_heal_islands_kernel(
     constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
     device uint* neighbors [[buffer(metal_neighbors_buffer_k)]],
@@ -1566,23 +1595,17 @@ inline bool metal_add_or_swap_link(thread metal_health_t& health, device uint* c
     metal_health_t health = metal_health(arguments, neighbors, counters, depths_from_root, depths_to_root, in_links,
                                          shallower_in_links, reached, reaches_root, two_ways_to_root);
     uint healed = 0, changed_rows = 0;
+    auto keeps_none = [](uint) { return false; };
     for (uint rank = 0; rank != arguments.islands; ++rank) {
         if (island_components[rank] != rank) continue;
         uint const roles = island_roles[rank], member = island_entries[2 * rank], entry = island_nodes[member];
         if (roles & metal_unreached_island_k) {
-            device uint* const row = health.row(entry);
-            uint owner = metal_unknown_k;
-            for (uint slot = 0; slot != health.connectivity && owner == metal_unknown_k; ++slot) {
-                uint const link = row[slot];
-                if (link == metal_unknown_k) break;
-                if (link < health.rows_count && link != entry && health.in_component(link)) owner = link;
-            }
-            if (owner != metal_unknown_k && metal_add_or_swap_link(health, changed, owner, entry, changed_rows))
-                health.record_heal_link(owner, entry), ++healed;
+            uint const owner = metal_link_unreached(health, changed, entry, changed_rows);
+            if (owner != metal_unknown_k) health.record_heal_link(owner, entry), ++healed;
         }
         uint const parent = island_parents[member];
         if ((roles & metal_stranded_island_k) && parent != metal_unknown_k &&
-            metal_add_or_swap_link(health, changed, entry, parent, changed_rows))
+            metal_add_or_swap_link(health, changed, entry, parent, changed_rows, keeps_none))
             health.record_heal_link(entry, parent), ++healed;
     }
     counters[metal_round_healed_k] += healed;

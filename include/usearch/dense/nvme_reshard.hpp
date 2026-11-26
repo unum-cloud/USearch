@@ -2229,52 +2229,85 @@ struct [[nodiscard]] nvme_reshard_plan {
         open_round_(round_part_ + 1);
     }
 
-    /** Links every unreached or stranded island the health check named through the root's
-     *  component with no distance, as the RAM round heals: an unreached one's entry from the first
-     *  of its own links inside the component that takes it, a stranded one's entry to the entry of
-     *  the component linking to it, each row read, changed and written alone. A component with
-     *  neither counts as waiting for the links a restitch gives it. */
+    /** Links every unreached or stranded island the health check named through the root's component
+     *  with no distance, as the RAM round heals: an unreached one's entry as @ref link_unreached_
+     *  does, a stranded one's entry to the entry of the component linking to it, each row read,
+     *  changed and written alone. A component with neither counts as waiting for the links a
+     *  restitch gives it. */
     status_t heal_(target_t& target, islands_t const& islands) noexcept {
-        std::size_t const nodes = target.view.size(), connectivity = connectivity_();
+        std::size_t const connectivity = connectivity_();
         workspace_arena_t arena = arena_over_(round_spare_);
         carver_t carver {&arena};
         node_id_t* const links = carve_<node_id_t>(carver, connectivity);
+        node_id_t* const hop_links = carve_<node_id_t>(carver, connectivity);
         node_id_t* const row = carve_<node_id_t>(carver, connectivity);
         if (carver.bytes > round_spare_.size()) return status_code_t::out_of_memory_k;
+        auto keeps_none = [](node_id_t) noexcept { return false; };
         for (std::size_t rank = 0; rank != islands.islands(); ++rank) {
             if (!islands.island_first(rank)) continue;
             u8_t const roles = islands.island_roles(rank);
             node_id_t const entry = islands.island_entry(rank);
-            if (roles & islands_t::unreached_island_k) {
-                if (status_t const read = read_row_(target, entry, links); failed(read)) return read;
-                // A full owner row may refuse, so the next link inside the component offers its
-                // own; a row led by its own entry is a forgotten one, as the health check reads it.
-                bool linked = false, owned = false;
-                for (std::size_t slot = 0; slot != connectivity && links[0] != entry && !linked; ++slot) {
-                    node_id_t const owner = links[slot];
-                    if (owner >= nodes || owner == entry || !in_component_(owner)) continue;
-                    owned = true;
-                    auto const [written, status] = link_island_(target, owner, entry, row);
-                    if (failed(status)) return status;
-                    linked = written;
-                }
-                islands_waiting_ += !owned;
-            }
+            if (roles & islands_t::unreached_island_k)
+                if (status_t const status = link_unreached_(target, entry, links, hop_links, row); failed(status))
+                    return status;
             node_id_t const parent = islands.island_entry_parent(rank);
             bool const stranded = (roles & islands_t::stranded_island_k) != 0;
             if (stranded && parent != node_id_unknown_k)
-                if (status_t const status = link_island_(target, entry, parent, row).status; failed(status))
+                if (status_t const status = link_island_(target, entry, parent, row, keeps_none).status; failed(status))
                     return status;
             islands_waiting_ += stranded && parent == node_id_unknown_k;
         }
         return status_code_t::success_k;
     }
 
+    /** Links unreached island entry @p entry as the RAM heal does: from the first of its own links
+     *  inside the root's component that takes it, else, as full hubs refuse every link, from a
+     *  free slot of the first row of the component its links link to. A row led by its own entry
+     *  is a forgotten one, as the health check reads it, and an entry with no owner either way
+     *  counts as waiting. @p links, @p hop_links and @p row stage the rows it reads. */
+    status_t link_unreached_(target_t& target, node_id_t entry, node_id_t* links, node_id_t* hop_links,
+                             node_id_t* row) noexcept {
+        std::size_t const nodes = target.view.size(), connectivity = connectivity_();
+        auto keeps_none = [](node_id_t) noexcept { return false; };
+        auto keeps_all = [](node_id_t) noexcept { return true; };
+        if (status_t const read = read_row_(target, entry, links); failed(read)) return read;
+        if (links[0] == entry) {
+            ++islands_waiting_;
+            return status_code_t::success_k;
+        }
+        std::size_t owners = 0;
+        bool linked = false;
+        auto offer = [&](node_id_t const* candidates, auto const& keeps) noexcept -> status_t {
+            for (std::size_t slot = 0; slot != connectivity && !linked; ++slot) {
+                node_id_t const owner = candidates[slot];
+                if (owner >= nodes || owner == entry || !in_component_(owner)) continue;
+                ++owners;
+                auto const [written, status] = link_island_(target, owner, entry, row, keeps);
+                if (failed(status)) return status;
+                linked = written;
+            }
+            return status_code_t::success_k;
+        };
+        if (status_t const status = offer(links, keeps_none); failed(status)) return status;
+        for (std::size_t slot = 0; slot != connectivity && !linked; ++slot) {
+            node_id_t const hop = links[slot];
+            if (hop >= nodes || hop == entry) continue;
+            if (status_t const read = read_row_(target, hop, hop_links); failed(read)) return read;
+            if (hop_links[0] == hop) continue;
+            if (status_t const status = offer(hop_links, keeps_all); failed(status)) return status;
+        }
+        islands_waiting_ += !owners;
+        return status_code_t::success_k;
+    }
+
     /** Links @p member from @p owner 's row, as the RAM heal does: a free slot first; else, inside
      *  the root's component, the slot whose resident is linked to by the most entries, when it
-     *  stays linked to by more than @p member and the reach rule releases it. The owner's row
-     *  stages in @p row, and a written link counts the member's in-link and files its depths. */
-    expected<bool> link_island_(target_t& target, node_id_t owner, node_id_t member, node_id_t* row) noexcept {
+     *  stays linked to by more than @p member, @p keeps does not hold it and the reach rule
+     *  releases it. The owner's row stages in @p row, and a written link counts the member's
+     *  in-link and files its depths. */
+    template <typename keeps_type_>
+    expected<bool> link_island_(target_t& target, node_id_t owner, node_id_t member, node_id_t* row,
+                                keeps_type_ const& keeps) noexcept {
         std::size_t const nodes = target.view.size(), connectivity = connectivity_();
         if (owner == member || owner >= nodes || member >= nodes) return {false, status_code_t::success_k};
         if (status_t const read = read_row_(target, owner, row); failed(read)) return {false, read};
@@ -2289,7 +2322,7 @@ struct [[nodiscard]] nvme_reshard_plan {
             std::size_t richest = connectivity;
             unsigned richest_links = in_links_(member);
             for (std::size_t slot = 0; slot != connectivity; ++slot) {
-                if (row[slot] >= nodes || in_links_(row[slot]) <= richest_links + 1u) continue;
+                if (row[slot] >= nodes || in_links_(row[slot]) <= richest_links + 1u || keeps(row[slot])) continue;
                 richest = slot, richest_links = in_links_(row[slot]);
             }
             if (richest == connectivity || !take_link_under_lock_if_spare_(owner, row[richest]))

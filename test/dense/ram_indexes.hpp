@@ -530,6 +530,78 @@ static void test_ram_indexes_recut(u64_t seed) {
     expect_true(self_hits(single) + recall_margin_k * recall_samples_k >= hits_before);
 }
 
+/** Four even shards over rows whose norms spread a hundredfold recut in place under a bound of half
+ *  the entries into two. The long rows' full rows refuse most of the links a heal offers them, so
+ *  it reaches one link past them: the recut graph reaches all but a hundredth of the entries, and
+ *  its walks rank as many of each query's exact nearest as a fresh build of two shards ranks,
+ *  within the margin. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+static void test_ram_indexes_recut_spread(u64_t seed) {
+    using scalar_t = typename indexes_type_::index_t::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    using distance_t = typename indexes_type_::distance_t;
+    using search_config_t = typename indexes_type_::search_config_t;
+    std::size_t const rows = dense_growth_nodes_k;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    dense_indexes_executor<indexes_type_> driver;
+    if (failed(driver.status)) return void(expect_true(false));
+    auto& executor = driver.executor;
+    nk::matrix<scalar_t> const vectors = make_spread_vectors<scalar_t>(rows, dimensions,
+                                                                       stream_key(seed, "indexes_recut_spread"));
+    nk::matrix<scalar_t> const queries = make_spread_vectors<scalar_t>(recall_samples_k, dimensions,
+                                                                       stream_key(seed, "indexes_recut_spread", 1));
+    nk::vector<key_t> keys = make_vector<key_t>(rows);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
+
+    struct ranked_t {
+        nk::matrix<key_t> keys = make_matrix<key_t>(recall_samples_k, recall_wanted_k);
+        nk::matrix<distance_t> distances = make_matrix<distance_t>(recall_samples_k, recall_wanted_k);
+        nk::vector<std::size_t> counts = make_vector<std::size_t>(recall_samples_k);
+    };
+    auto search = [&](indexes_type_& indexes, ranked_t& ranked, search_config_t config) {
+        expect_true(succeeded(drive_search(indexes, queries.view(), ranked.keys.span(), ranked.distances.span(),
+                                           to_writable_span(ranked.counts), config, driver)
+                                  .status));
+    };
+    // The matches a walk ranked no farther than the query's last exact one.
+    auto hits = [](ranked_t const& walked, ranked_t const& exact) {
+        std::size_t hits = 0;
+        for (std::size_t query = 0; query != recall_samples_k; ++query) {
+            f64_t const farthest = exact.distances(query, recall_wanted_k - 1);
+            f64_t const tolerance = 1e-3 * max_of(std::fabs(farthest), 1.0);
+            for (std::size_t rank = 0; rank != walked.counts[query]; ++rank)
+                hits += walked.distances(query, rank) <= farthest + tolerance;
+        }
+        return hits;
+    };
+
+    indexes_type_ fresh {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
+    expect_true(succeeded(place_shards(fresh)));
+    expect_true(succeeded(fresh.reserve({rows}).status));
+    expect_true(succeeded(fresh.insert(to_span(keys), vectors.view(), executor).status));
+    ranked_t exact, fresh_walked, recut_walked;
+    search(fresh, exact, search_config_t {.traversal = traversal_t::scan_k});
+    search(fresh, fresh_walked, {});
+
+    indexes_type_ indexes {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
+    expect_true(succeeded(place_shards(indexes)) && succeeded(place_shards(indexes)));
+    expect_true(succeeded(indexes.reserve({rows}).status));
+    expect_true(succeeded(indexes.insert(to_span(keys), vectors.view(), executor).status));
+    std::array<indexes_type_*, 1> const in_place {&indexes};
+    reshard_config_t halves;
+    halves.shard_capacity = rows / 2;
+    auto const [packed, packed_status] = reshard(std::span<indexes_type_* const> {in_place},
+                                                 std::span<indexes_type_* const> {in_place}, executor, halves);
+    expect_equal(packed_status, status_code_t::success_k);
+    expect_true(packed.source_shards == 4 && packed.target_shards == 2 && packed.moved_entries == rows / 2);
+    auto const [health, health_status] = indexes.health(executor);
+    expect_true(succeeded(health_status));
+    expect_true(health.reachable_nodes * 100 >= rows * 99);
+    search(indexes, recut_walked, {});
+    expect_true(hits(recut_walked, exact) + recall_margin_k * recall_samples_k * recall_wanted_k >=
+                hits(fresh_walked, exact));
+}
+
 /** Every verb is safe beside a clear: searches racing one return their own rows or
  *  @c contended_k, an insertion plan holding claims refuses a clear and a gather with
  *  @c contended_k until it dies, and a cursor opened before a clear answers @c contended_k. */
@@ -1080,6 +1152,21 @@ static case_result_t test_ram_indexes_configuration(u64_t seed) {
     test_ram_indexes_exact_scans<indexes_t, kernel_>(seed);
     test_ram_indexes_hints<indexes_t, kernel_>(seed);
     return {};
+}
+
+/** The recut of rows whose norms spread alone over shards the kits of @p cpu_class_ serve, skipped
+ *  where the build lacks the kit or the host its capabilities. */
+template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, cpu_class_t cpu_class_ = cpu_class_t::serial_k>
+case_result_t test_ram_recut_spread_configuration(u64_t seed) {
+    constexpr nk_capability_t caps_k = numkong_capabilities_of(cpu_class_);
+    using indexes_t = ram_indexes_for<dtype_, cpu_class_>;
+    if constexpr (!a_testable_dense_cell<dtype_, kernel_, caps_k>) return case_result_t::skipped(needs_kit_target_k);
+    else if (!dense_cell_admitted<caps_k, fu::standard_atomic_ref>())
+        return case_result_t::skipped(needs_capabilities_k);
+    else {
+        test_ram_indexes_recut_spread<indexes_t, kernel_>(seed);
+        return {};
+    }
 }
 
 /** The exact scans, attention and MaxSim alone over shards the kits of @p cpu_class_ stream,

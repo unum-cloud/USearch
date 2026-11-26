@@ -20,7 +20,7 @@
 
 #include <csignal> // `std::signal`, `std::raise`, `SIGSEGV`, `SIGABRT`, `SIGTRAP`
 #include <cctype>  // `std::tolower` - a setting's flag spelling
-#include <cmath>   // `std::fabs`, `std::fmax`, `std::sqrt`, `std::llround` - error statistics, scaling
+#include <cmath>   // `std::fabs`, `std::fmax`, `std::pow`, `std::sqrt`, `std::llround` - error statistics, scaling
 #include <cstdio>  // `std::FILE`, `std::fflush`, `std::remove` - the run's lines, a viewed checkpoint's files
 #include <cstdlib> // `std::malloc`, `std::free`, `std::abort`, `std::getenv`
 #include <cstring> // `std::memset`, `std::memcmp`, `std::strcmp` - a freed block's scribble, the keys, the settings
@@ -1211,6 +1211,27 @@ nk::matrix<scalar_> make_vectors(std::size_t count, std::size_t dimensions, util
         auto values = row.as_vector();
         for (std::size_t dimension = 0; dimension != dimensions; ++dimension)
             values[dimension] = make_scalar<scalar_>(component_distribution(random_generator));
+    }
+    return std::move(made);
+}
+
+/** Fills a row-major matrix with rows drawn around the origin, each scaled by a length of its own
+ *  drawn log-uniformly across a hundredfold, so an inner product favors the long rows far past
+ *  what @ref make_vectors draws. Only floats of sixteen bits or more hold that spread: an integer
+ *  or a byte-wide float folds the short rows into one. */
+template <typename scalar_>
+    requires(sizeof(scalar_) >= 2 && requires { scalar_::from_f32(0.0f); })
+nk::matrix<scalar_> make_spread_vectors(std::size_t count, std::size_t dimensions, util::u64_t seed) {
+    auto [made, status] = nk::matrix<scalar_>::zeros({count, dimensions});
+    if (nk::failed(status)) std::abort();
+    split_mix_generator_t random_generator {seed};
+    uniform_between<util::f64_t> const centered {-1, 1}, decades {0, 2};
+    // Filled before the move, as in `make_vectors`, past the same MSVC 14.51 `/O2` miscompile.
+    for (auto row : made.rows()) {
+        util::f64_t const length = std::pow(10.0, decades(random_generator));
+        auto values = row.as_vector();
+        for (std::size_t dimension = 0; dimension != dimensions; ++dimension)
+            values[dimension] = scalar_::from_f32(static_cast<float>(length * centered(random_generator)));
     }
     return std::move(made);
 }

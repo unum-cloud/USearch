@@ -5,8 +5,8 @@
  *  @brief The bf16 cells of the CPU-resident dense residency.
  *
  *  The metric, the full single-index suite over the allocation ledger, again under a flaky waiter
- *  and over starved scratch, the sharded suite at the serial floor and under a flaky waiter, and
- *  the SME and AMX scans.
+ *  and over starved scratch, the sharded suite at the serial floor and under a flaky waiter, the
+ *  dot recut of rows whose norms spread, and the SME and AMX scans.
  *
  *  CMake compiles the unit only when @c USEARCH_DENSE_DTYPES keeps bf16, and the unit registers
  *  itself with the runner, which names no dtype.
@@ -31,6 +31,8 @@ static void run_ram_bf16_cases(gpu_device_t const&) {
                   test_ram_indexes_configuration<nk_bf16_k, nk_kernel_angular_k>, seed);
     run_test_case("test_ram_indexes_configuration<nk_bf16_k, nk_kernel_angular_k, flaky_waiter_t>",
                   test_ram_indexes_configuration<nk_bf16_k, nk_kernel_angular_k, flaky_waiter_t>, seed);
+    run_test_case("test_ram_recut_spread_configuration<nk_bf16_k, nk_kernel_dot_k>",
+                  test_ram_recut_spread_configuration<nk_bf16_k, nk_kernel_dot_k>, seed);
     // The tiled scans: Arm SME, Intel AMX and IBM MMA, each skipped where build or host lacks it.
     run_test_case("test_ram_scan_configuration<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::apple_m4_k>",
                   test_ram_scan_configuration<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::apple_m4_k>, seed);

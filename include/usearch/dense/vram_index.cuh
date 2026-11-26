@@ -3383,14 +3383,14 @@ __device__ __forceinline__ void vram_record_heal_link(vram_health_t const& healt
         warp_type_::store_relaxed(health.depths_to_root[owner], static_cast<u8_t>(member_to_root + 1));
 }
 
-/** Links @p member from @p owner 's row as RAM's @c add_or_swap_link_ does keeping none: a free
- *  slot first; else, inside the root's component, the slot whose resident is linked to by the most
- *  entries, when it stays linked to by more than @p member and the reach rule releases it. The
- *  in-link counts and the changed bits follow every write; answers whether it wrote. One thread of
- *  a launch running alone calls it, so the row takes plain stores. */
-template <typename warp_type_>
+/** Links @p member from @p owner 's row as RAM's @c add_or_swap_link_ does: a free slot first;
+ *  else, inside the root's component, the slot whose resident is linked to by the most entries,
+ *  when it stays linked to by more than @p member, @p keeps does not hold it and the reach rule
+ *  releases it. The in-link counts and the changed bits follow every write; answers whether it
+ *  wrote. One thread of a launch running alone calls it, so the row takes plain stores. */
+template <typename warp_type_, typename keeps_type_>
 __device__ __forceinline__ bool vram_add_or_swap_link(vram_health_t const& health, u32_t owner, u32_t member,
-                                                      u32_t& changed) noexcept {
+                                                      u32_t& changed, keeps_type_ const& keeps) noexcept {
     u32_t const rows = health.rows_count, connectivity = health.connectivity;
     if (owner == member || owner >= rows || member >= rows) return false;
     auto in_links = [&](u32_t node) noexcept { return min_of(warp_type_::load_relaxed(health.in_links[node]), 255u); };
@@ -3417,6 +3417,7 @@ __device__ __forceinline__ bool vram_add_or_swap_link(vram_health_t const& healt
                 if (resident >= rows || in_links(resident) <= richest_links + 1u) continue;
                 richest = slot, richest_links = in_links(resident);
             }
+        if (richest != connectivity && keeps(row[richest])) richest = connectivity;
         if (present) {}
         else if (free_slot != connectivity) warp_type_::store_relaxed(row[free_slot], member), written = true;
         else if (richest != connectivity &&
@@ -3433,34 +3434,57 @@ __device__ __forceinline__ bool vram_add_or_swap_link(vram_health_t const& healt
     return true;
 }
 
+/** Links unreached island entry @p entry as RAM's @c link_unreached_ does: from the first of its
+ *  own links inside the root's component, else, as a full hub refuses, from a free slot of the
+ *  first row of the component its links link to; answers the owner or none. */
+template <typename warp_type_>
+__device__ __forceinline__ u32_t vram_link_unreached(vram_health_t const& health, u32_t entry,
+                                                     u32_t& changed) noexcept {
+    auto keeps_none = [](u32_t) noexcept { return false; };
+    auto keeps_all = [](u32_t) noexcept { return true; };
+    auto owns = [&](u32_t link) noexcept {
+        return link != node_id_unknown_k && link != entry && link < health.rows_count &&
+               vram_in_component<warp_type_>(health, link);
+    };
+    u32_t const* const links = vram_row(health.neighbors, entry, health.connectivity);
+    u32_t owner = node_id_unknown_k;
+    for (u32_t slot = 0; slot != health.connectivity && owner == node_id_unknown_k; ++slot)
+        if (owns(links[slot])) owner = links[slot];
+    if (owner != node_id_unknown_k && vram_add_or_swap_link<warp_type_>(health, owner, entry, changed, keeps_none))
+        return owner;
+    for (u32_t slot = 0; slot != health.connectivity; ++slot) {
+        u32_t const hop = links[slot];
+        if (hop == node_id_unknown_k || hop == entry || hop >= health.rows_count) continue;
+        u32_t const* const hop_links = vram_row(health.neighbors, hop, health.connectivity);
+        for (u32_t hop_slot = 0; hop_slot != health.connectivity; ++hop_slot)
+            if (owns(hop_links[hop_slot]) &&
+                vram_add_or_swap_link<warp_type_>(health, hop_links[hop_slot], entry, changed, keeps_all))
+                return hop_links[hop_slot];
+    }
+    return node_id_unknown_k;
+}
+
 /** Links every unreached or stranded island component through the root's component with no
- *  distance, in rank order, as RAM's @c heal_ does: an unreached one's entry from the first of its
- *  own links inside the component, a stranded one's entry to the entry of the component linking to
+ *  distance, in rank order, as RAM's @c heal_ does: an unreached one's entry as
+ *  @ref vram_link_unreached does, a stranded one's entry to the entry of the component linking to
  *  it. One thread runs it, the launch alone, writing rows with plain stores. */
 template <typename warp_type_>
 __device__ __forceinline__ void vram_heal_islands(vram_health_t const& health) {
     if (blockIdx.x || threadIdx.x) return;
     u32_t const islands = health.counters->islands;
     u32_t healed = 0, changed = 0;
+    auto keeps_none = [](u32_t) noexcept { return false; };
     for (u32_t rank = 0; rank != islands; ++rank) {
         if (health.island_components[rank] != rank) continue;
         u32_t const roles = health.island_roles[rank];
         u32_t const entry_rank = static_cast<u32_t>(health.island_entries[rank]);
         u32_t const entry = health.island_nodes[entry_rank];
-        if (roles & vram_unreached_island_k) {
-            u32_t const* const links = vram_row(health.neighbors, entry, health.connectivity);
-            u32_t owner = node_id_unknown_k;
-            for (u32_t slot = 0; slot != health.connectivity && owner == node_id_unknown_k; ++slot)
-                if (u32_t const link = links[slot]; link != node_id_unknown_k && link != entry &&
-                                                    link < health.rows_count &&
-                                                    vram_in_component<warp_type_>(health, link))
-                    owner = link;
-            if (owner != node_id_unknown_k && vram_add_or_swap_link<warp_type_>(health, owner, entry, changed))
+        if (roles & vram_unreached_island_k)
+            if (u32_t const owner = vram_link_unreached<warp_type_>(health, entry, changed); owner != node_id_unknown_k)
                 vram_record_heal_link<warp_type_>(health, owner, entry), ++healed;
-        }
         u32_t const parent = health.island_parents[entry_rank];
         if ((roles & vram_stranded_island_k) && parent != node_id_unknown_k &&
-            vram_add_or_swap_link<warp_type_>(health, entry, parent, changed))
+            vram_add_or_swap_link<warp_type_>(health, entry, parent, changed, keeps_none))
             vram_record_heal_link<warp_type_>(health, entry, parent), ++healed;
     }
     health.counters->healed += healed;
