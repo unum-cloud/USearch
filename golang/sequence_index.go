@@ -755,7 +755,7 @@ func (on SequenceIndexOn) Reserve(entries, payloadBytes uint) error {
 // Reserve submits SequenceIndexOn.Reserve.
 func (on SequenceIndexDeferredOn) Reserve(entries, payloadBytes uint) (*Deferred[struct{}], error) {
 	deferred := new(Deferred[struct{}])
-	return submitted(deferred, on.reserve(&deferred.pending, C.usearch_completion_deferred_k, entries, payloadBytes))
+	return submitted(deferred, on.reserve(&deferred.call, C.usearch_completion_deferred_k, entries, payloadBytes))
 }
 
 // Clear erases all entries, keeping the reserved capacity. No other verb may overlap it on the
@@ -769,7 +769,7 @@ func (on SequenceIndexOn) Clear() error {
 // Clear submits SequenceIndexOn.Clear.
 func (on SequenceIndexDeferredOn) Clear() (*Deferred[struct{}], error) {
 	deferred := new(Deferred[struct{}])
-	return submitted(deferred, on.clear(&deferred.pending, C.usearch_completion_deferred_k))
+	return submitted(deferred, on.clear(&deferred.call, C.usearch_completion_deferred_k))
 }
 
 // Describe reports the frozen metadata and the current counters in one call.
@@ -781,7 +781,7 @@ func (on SequenceIndexOn) Describe() (SequenceIndexDescription, error) {
 // Describe submits SequenceIndexOn.Describe.
 func (on SequenceIndexDeferredOn) Describe() (*Deferred[SequenceIndexDescription], error) {
 	deferred := new(Deferred[SequenceIndexDescription])
-	return submitted(deferred, on.describe(&deferred.pending, C.usearch_completion_deferred_k))
+	return submitted(deferred, on.describe(&deferred.call, C.usearch_completion_deferred_k))
 }
 
 // Count reports how many entries are stored under a key, with the extent of their bytes.
@@ -793,7 +793,7 @@ func (on SequenceIndexOn) Count(key Key) (SequenceKeyStats, error) {
 // Count submits SequenceIndexOn.Count.
 func (on SequenceIndexDeferredOn) Count(key Key) (*Deferred[SequenceKeyStats], error) {
 	deferred := new(Deferred[SequenceKeyStats])
-	return submitted(deferred, on.count(&deferred.pending, C.usearch_completion_deferred_k, key))
+	return submitted(deferred, on.count(&deferred.call, C.usearch_completion_deferred_k, key))
 }
 
 // Contains reports whether the index holds at least one entry under a key, as a nonzero Count.
@@ -814,7 +814,7 @@ func (on SequenceIndexOn) Get(key Key, arena *Arena) (TapeView, error) {
 // Get submits SequenceIndexOn.Get.
 func (on SequenceIndexDeferredOn) Get(key Key, arena *Arena) (*Deferred[TapeView], error) {
 	deferred := new(Deferred[TapeView])
-	return submitted(deferred, on.get(&deferred.pending, C.usearch_completion_deferred_k, key, arena))
+	return submitted(deferred, on.get(&deferred.call, C.usearch_completion_deferred_k, key, arena))
 }
 
 // Insert adds a tape of sequences under their keys - the native batch operation, where a single
@@ -829,7 +829,7 @@ func (on SequenceIndexOn) Insert(keys []Key, sequences Tape, config *SequenceIns
 func (on SequenceIndexDeferredOn) Insert(keys []Key, sequences Tape, config *SequenceInsertConfig) (*Deferred[struct{}],
 	error) {
 	deferred := new(Deferred[struct{}])
-	return submitted(deferred, on.insert(&deferred.pending, C.usearch_completion_deferred_k, keys, sequences, config))
+	return submitted(deferred, on.insert(&deferred.call, C.usearch_completion_deferred_k, keys, sequences, config))
 }
 
 // Refine re-selects the neighbors of every stored entry against the finished graph, as the dense
@@ -842,7 +842,7 @@ func (on SequenceIndexOn) Refine(config *SequenceRefineConfig) (RefineReport, er
 // Refine submits SequenceIndexOn.Refine.
 func (on SequenceIndexDeferredOn) Refine(config *SequenceRefineConfig) (*Deferred[RefineReport], error) {
 	deferred := new(Deferred[RefineReport])
-	return submitted(deferred, on.refine(&deferred.pending, C.usearch_completion_deferred_k, config))
+	return submitted(deferred, on.refine(&deferred.call, C.usearch_completion_deferred_k, config))
 }
 
 // Health measures how much of the graph a search reaches from the root. Read-only.
@@ -854,7 +854,7 @@ func (on SequenceIndexOn) Health() (Reachability, error) {
 // Health submits SequenceIndexOn.Health.
 func (on SequenceIndexDeferredOn) Health() (*Deferred[Reachability], error) {
 	deferred := new(Deferred[Reachability])
-	return submitted(deferred, on.health(&deferred.pending, C.usearch_completion_deferred_k))
+	return submitted(deferred, on.health(&deferred.call, C.usearch_completion_deferred_k))
 }
 
 // Search resolves a tape of queries into up to wanted nearest matches apiece, written into arena,
@@ -869,7 +869,7 @@ func (on SequenceIndexOn) Search(queries Tape, wanted uint, arena *Arena, config
 func (on SequenceIndexDeferredOn) Search(queries Tape, wanted uint, arena *Arena,
 	config *SequenceSearchConfig) (*Deferred[MatchesView], error) {
 	deferred := new(Deferred[MatchesView])
-	return submitted(deferred, on.search(&deferred.pending, C.usearch_completion_deferred_k, queries, wanted, arena,
+	return submitted(deferred, on.search(&deferred.call, C.usearch_completion_deferred_k, queries, wanted, arena,
 		config))
 }
 
@@ -887,7 +887,7 @@ func (on SequenceIndexOn) Reshard(sources, targets []*SequenceIndex, config *Seq
 func (on SequenceIndexDeferredOn) Reshard(sources, targets []*SequenceIndex,
 	config *SequenceReshardConfig) (*Deferred[RefineReport], error) {
 	deferred := new(Deferred[RefineReport])
-	return submitted(deferred, on.reshard(&deferred.pending, C.usearch_completion_deferred_k, sources, targets, config))
+	return submitted(deferred, on.reshard(&deferred.call, C.usearch_completion_deferred_k, sources, targets, config))
 }
 
 // RefinePlanFinish closes a live refine plan and frees it whatever the call answers, reporting
@@ -900,7 +900,7 @@ func (on SequenceIndexOn) RefinePlanFinish(plan *SequenceRefinePlan) (RefineRepo
 // RefinePlanFinish submits SequenceIndexOn.RefinePlanFinish.
 func (on SequenceIndexDeferredOn) RefinePlanFinish(plan *SequenceRefinePlan) (*Deferred[RefineReport], error) {
 	deferred := new(Deferred[RefineReport])
-	return submitted(deferred, on.refinePlanFinish(&deferred.pending, C.usearch_completion_deferred_k, plan))
+	return submitted(deferred, on.refinePlanFinish(&deferred.call, C.usearch_completion_deferred_k, plan))
 }
 
 // ReshardPlanFinish closes a live reshard plan on this receiver's executor and frees it whatever
@@ -913,7 +913,7 @@ func (on SequenceIndexOn) ReshardPlanFinish(plan *SequenceReshardPlan) (RefineRe
 // ReshardPlanFinish submits SequenceIndexOn.ReshardPlanFinish.
 func (on SequenceIndexDeferredOn) ReshardPlanFinish(plan *SequenceReshardPlan) (*Deferred[RefineReport], error) {
 	deferred := new(Deferred[RefineReport])
-	return submitted(deferred, on.reshardPlanFinish(&deferred.pending, C.usearch_completion_deferred_k, plan))
+	return submitted(deferred, on.reshardPlanFinish(&deferred.call, C.usearch_completion_deferred_k, plan))
 }
 
 // Sample draws up to wanted keys around the config's Focus, or across the whole index, each
@@ -927,7 +927,7 @@ func (on SequenceIndexOn) Sample(wanted uint, arena *Arena, config *SequenceSamp
 func (on SequenceIndexDeferredOn) Sample(wanted uint, arena *Arena, config *SequenceSampleConfig) (*Deferred[DenseDraws],
 	error) {
 	deferred := new(Deferred[DenseDraws])
-	return submitted(deferred, on.sample(&deferred.pending, C.usearch_completion_deferred_k, wanted, arena, config))
+	return submitted(deferred, on.sample(&deferred.call, C.usearch_completion_deferred_k, wanted, arena, config))
 }
 
 // Save writes the index under a path, in the layout its extension picks - one .safegraphs
@@ -941,7 +941,7 @@ func (on SequenceIndexOn) Save(path string, config *SequenceSaveConfig) error {
 // Save submits SequenceIndexOn.Save.
 func (on SequenceIndexDeferredOn) Save(path string, config *SequenceSaveConfig) (*Deferred[struct{}], error) {
 	deferred := new(Deferred[struct{}])
-	return submitted(deferred, on.save(&deferred.pending, C.usearch_completion_deferred_k, path, config))
+	return submitted(deferred, on.save(&deferred.call, C.usearch_completion_deferred_k, path, config))
 }
 
 // SaveBuffer serializes the index as one monolith into arena.
@@ -953,7 +953,7 @@ func (on SequenceIndexOn) SaveBuffer(arena *Arena, config *SequenceSaveBufferCon
 // SaveBuffer submits SequenceIndexOn.SaveBuffer.
 func (on SequenceIndexDeferredOn) SaveBuffer(arena *Arena, config *SequenceSaveBufferConfig) (*Deferred[Monolith], error) {
 	deferred := new(Deferred[Monolith])
-	return submitted(deferred, on.saveBuffer(&deferred.pending, C.usearch_completion_deferred_k, arena, config))
+	return submitted(deferred, on.saveBuffer(&deferred.call, C.usearch_completion_deferred_k, arena, config))
 }
 
 // endregion: Receivers

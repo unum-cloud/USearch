@@ -693,7 +693,7 @@ func (on ShapesIndexOn) Reserve(entries, points uint) error {
 // Reserve submits ShapesIndexOn.Reserve.
 func (on ShapesIndexDeferredOn) Reserve(entries, points uint) (*Deferred[struct{}], error) {
 	deferred := new(Deferred[struct{}])
-	return submitted(deferred, on.reserve(&deferred.pending, C.usearch_completion_deferred_k, entries, points))
+	return submitted(deferred, on.reserve(&deferred.call, C.usearch_completion_deferred_k, entries, points))
 }
 
 // Clear erases all entries, keeping the reserved capacity. No other verb may overlap it on the
@@ -707,7 +707,7 @@ func (on ShapesIndexOn) Clear() error {
 // Clear submits ShapesIndexOn.Clear.
 func (on ShapesIndexDeferredOn) Clear() (*Deferred[struct{}], error) {
 	deferred := new(Deferred[struct{}])
-	return submitted(deferred, on.clear(&deferred.pending, C.usearch_completion_deferred_k))
+	return submitted(deferred, on.clear(&deferred.call, C.usearch_completion_deferred_k))
 }
 
 // Describe reports the frozen metadata and the current counters in one call.
@@ -719,7 +719,7 @@ func (on ShapesIndexOn) Describe() (ShapesIndexDescription, error) {
 // Describe submits ShapesIndexOn.Describe.
 func (on ShapesIndexDeferredOn) Describe() (*Deferred[ShapesIndexDescription], error) {
 	deferred := new(Deferred[ShapesIndexDescription])
-	return submitted(deferred, on.describe(&deferred.pending, C.usearch_completion_deferred_k))
+	return submitted(deferred, on.describe(&deferred.call, C.usearch_completion_deferred_k))
 }
 
 // Count reports how many entries are stored under a key, with the extent of their points.
@@ -731,7 +731,7 @@ func (on ShapesIndexOn) Count(key Key) (ShapesKeyStats, error) {
 // Count submits ShapesIndexOn.Count.
 func (on ShapesIndexDeferredOn) Count(key Key) (*Deferred[ShapesKeyStats], error) {
 	deferred := new(Deferred[ShapesKeyStats])
-	return submitted(deferred, on.count(&deferred.pending, C.usearch_completion_deferred_k, key))
+	return submitted(deferred, on.count(&deferred.call, C.usearch_completion_deferred_k, key))
 }
 
 // Contains reports whether the index holds at least one entry under a key, as a nonzero Count.
@@ -753,7 +753,7 @@ func (on ShapesIndexOn) Get(key Key, outputsScalar Scalar, arena *Arena) (TapeVi
 // Get submits ShapesIndexOn.Get.
 func (on ShapesIndexDeferredOn) Get(key Key, outputsScalar Scalar, arena *Arena) (*Deferred[TapeView], error) {
 	deferred := new(Deferred[TapeView])
-	return submitted(deferred, on.get(&deferred.pending, C.usearch_completion_deferred_k, key, outputsScalar, arena))
+	return submitted(deferred, on.get(&deferred.call, C.usearch_completion_deferred_k, key, outputsScalar, arena))
 }
 
 // Insert adds a tape of shapes under their keys - the native batch operation, where a single
@@ -769,7 +769,7 @@ func (on ShapesIndexOn) Insert(keys []Key, shapes Tape, config *ShapesInsertConf
 func (on ShapesIndexDeferredOn) Insert(keys []Key, shapes Tape, config *ShapesInsertConfig) (*Deferred[struct{}],
 	error) {
 	deferred := new(Deferred[struct{}])
-	return submitted(deferred, on.insert(&deferred.pending, C.usearch_completion_deferred_k, keys, shapes, config))
+	return submitted(deferred, on.insert(&deferred.call, C.usearch_completion_deferred_k, keys, shapes, config))
 }
 
 // Refine re-selects the neighbors of every stored entry against the finished graph, as the dense
@@ -782,7 +782,7 @@ func (on ShapesIndexOn) Refine(config *ShapesRefineConfig) (RefineReport, error)
 // Refine submits ShapesIndexOn.Refine.
 func (on ShapesIndexDeferredOn) Refine(config *ShapesRefineConfig) (*Deferred[RefineReport], error) {
 	deferred := new(Deferred[RefineReport])
-	return submitted(deferred, on.refine(&deferred.pending, C.usearch_completion_deferred_k, config))
+	return submitted(deferred, on.refine(&deferred.call, C.usearch_completion_deferred_k, config))
 }
 
 // Health measures how much of the graph a search reaches from the root. Read-only.
@@ -794,7 +794,7 @@ func (on ShapesIndexOn) Health() (Reachability, error) {
 // Health submits ShapesIndexOn.Health.
 func (on ShapesIndexDeferredOn) Health() (*Deferred[Reachability], error) {
 	deferred := new(Deferred[Reachability])
-	return submitted(deferred, on.health(&deferred.pending, C.usearch_completion_deferred_k))
+	return submitted(deferred, on.health(&deferred.call, C.usearch_completion_deferred_k))
 }
 
 // Search resolves a tape of queries into up to wanted nearest matches apiece, written into arena,
@@ -809,7 +809,7 @@ func (on ShapesIndexOn) Search(queries Tape, wanted uint, arena *Arena, config *
 func (on ShapesIndexDeferredOn) Search(queries Tape, wanted uint, arena *Arena,
 	config *ShapesSearchConfig) (*Deferred[MatchesView], error) {
 	deferred := new(Deferred[MatchesView])
-	return submitted(deferred, on.search(&deferred.pending, C.usearch_completion_deferred_k, queries, wanted, arena,
+	return submitted(deferred, on.search(&deferred.call, C.usearch_completion_deferred_k, queries, wanted, arena,
 		config))
 }
 
@@ -826,7 +826,7 @@ func (on ShapesIndexOn) Reshard(sources, targets []*ShapesIndex, config *ShapesR
 func (on ShapesIndexDeferredOn) Reshard(sources, targets []*ShapesIndex,
 	config *ShapesReshardConfig) (*Deferred[RefineReport], error) {
 	deferred := new(Deferred[RefineReport])
-	return submitted(deferred, on.reshard(&deferred.pending, C.usearch_completion_deferred_k, sources, targets, config))
+	return submitted(deferred, on.reshard(&deferred.call, C.usearch_completion_deferred_k, sources, targets, config))
 }
 
 // RefinePlanFinish closes a live refine plan and frees it whatever the call answers, reporting
@@ -839,7 +839,7 @@ func (on ShapesIndexOn) RefinePlanFinish(plan *ShapesRefinePlan) (RefineReport, 
 // RefinePlanFinish submits ShapesIndexOn.RefinePlanFinish.
 func (on ShapesIndexDeferredOn) RefinePlanFinish(plan *ShapesRefinePlan) (*Deferred[RefineReport], error) {
 	deferred := new(Deferred[RefineReport])
-	return submitted(deferred, on.refinePlanFinish(&deferred.pending, C.usearch_completion_deferred_k, plan))
+	return submitted(deferred, on.refinePlanFinish(&deferred.call, C.usearch_completion_deferred_k, plan))
 }
 
 // ReshardPlanFinish closes a live reshard plan on this receiver's executor and frees it whatever
@@ -852,7 +852,7 @@ func (on ShapesIndexOn) ReshardPlanFinish(plan *ShapesReshardPlan) (RefineReport
 // ReshardPlanFinish submits ShapesIndexOn.ReshardPlanFinish.
 func (on ShapesIndexDeferredOn) ReshardPlanFinish(plan *ShapesReshardPlan) (*Deferred[RefineReport], error) {
 	deferred := new(Deferred[RefineReport])
-	return submitted(deferred, on.reshardPlanFinish(&deferred.pending, C.usearch_completion_deferred_k, plan))
+	return submitted(deferred, on.reshardPlanFinish(&deferred.call, C.usearch_completion_deferred_k, plan))
 }
 
 // Sample draws up to wanted keys around the config's Focus, or across the whole index, each
@@ -866,7 +866,7 @@ func (on ShapesIndexOn) Sample(wanted uint, arena *Arena, config *ShapesSampleCo
 func (on ShapesIndexDeferredOn) Sample(wanted uint, arena *Arena, config *ShapesSampleConfig) (*Deferred[DenseDraws],
 	error) {
 	deferred := new(Deferred[DenseDraws])
-	return submitted(deferred, on.sample(&deferred.pending, C.usearch_completion_deferred_k, wanted, arena, config))
+	return submitted(deferred, on.sample(&deferred.call, C.usearch_completion_deferred_k, wanted, arena, config))
 }
 
 // Save writes the index under a path, in the layout its extension picks - one .safegraphs
@@ -880,7 +880,7 @@ func (on ShapesIndexOn) Save(path string, config *ShapesSaveConfig) error {
 // Save submits ShapesIndexOn.Save.
 func (on ShapesIndexDeferredOn) Save(path string, config *ShapesSaveConfig) (*Deferred[struct{}], error) {
 	deferred := new(Deferred[struct{}])
-	return submitted(deferred, on.save(&deferred.pending, C.usearch_completion_deferred_k, path, config))
+	return submitted(deferred, on.save(&deferred.call, C.usearch_completion_deferred_k, path, config))
 }
 
 // SaveBuffer serializes the index as one monolith into arena.
@@ -892,7 +892,7 @@ func (on ShapesIndexOn) SaveBuffer(arena *Arena, config *ShapesSaveBufferConfig)
 // SaveBuffer submits ShapesIndexOn.SaveBuffer.
 func (on ShapesIndexDeferredOn) SaveBuffer(arena *Arena, config *ShapesSaveBufferConfig) (*Deferred[Monolith], error) {
 	deferred := new(Deferred[Monolith])
-	return submitted(deferred, on.saveBuffer(&deferred.pending, C.usearch_completion_deferred_k, arena, config))
+	return submitted(deferred, on.saveBuffer(&deferred.call, C.usearch_completion_deferred_k, arena, config))
 }
 
 // endregion: Receivers

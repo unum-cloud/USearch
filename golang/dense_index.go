@@ -975,7 +975,7 @@ func (on DenseIndexOn) Reserve(capacity uint) error {
 // Reserve submits DenseIndexOn.Reserve.
 func (on DenseIndexDeferredOn) Reserve(capacity uint) (*Deferred[struct{}], error) {
 	deferred := new(Deferred[struct{}])
-	return submitted(deferred, on.reserve(&deferred.pending, C.usearch_completion_deferred_k, capacity))
+	return submitted(deferred, on.reserve(&deferred.call, C.usearch_completion_deferred_k, capacity))
 }
 
 // Clear erases all entries, keeping the reserved capacity and the frozen geometry. No other verb
@@ -989,7 +989,7 @@ func (on DenseIndexOn) Clear() error {
 // Clear submits DenseIndexOn.Clear.
 func (on DenseIndexDeferredOn) Clear() (*Deferred[struct{}], error) {
 	deferred := new(Deferred[struct{}])
-	return submitted(deferred, on.clear(&deferred.pending, C.usearch_completion_deferred_k))
+	return submitted(deferred, on.clear(&deferred.call, C.usearch_completion_deferred_k))
 }
 
 // Describe reports the frozen metadata and the current counters in one call.
@@ -1001,7 +1001,7 @@ func (on DenseIndexOn) Describe() (DenseIndexDescription, error) {
 // Describe submits DenseIndexOn.Describe.
 func (on DenseIndexDeferredOn) Describe() (*Deferred[DenseIndexDescription], error) {
 	deferred := new(Deferred[DenseIndexDescription])
-	return submitted(deferred, on.describe(&deferred.pending, C.usearch_completion_deferred_k))
+	return submitted(deferred, on.describe(&deferred.call, C.usearch_completion_deferred_k))
 }
 
 // Count reports how many entries are stored under a key; zero means the index holds none.
@@ -1013,7 +1013,7 @@ func (on DenseIndexOn) Count(key Key) (uint, error) {
 // Count submits DenseIndexOn.Count.
 func (on DenseIndexDeferredOn) Count(key Key) (*Deferred[uint], error) {
 	deferred := new(Deferred[uint])
-	return submitted(deferred, on.count(&deferred.pending, C.usearch_completion_deferred_k, key))
+	return submitted(deferred, on.count(&deferred.call, C.usearch_completion_deferred_k, key))
 }
 
 // Contains reports whether the index holds at least one entry under a key, as a nonzero Count.
@@ -1034,7 +1034,7 @@ func (on DenseIndexOn) Get(key Key, outputsScalar Scalar, arena *Arena) (DenseVe
 // Get submits DenseIndexOn.Get.
 func (on DenseIndexDeferredOn) Get(key Key, outputsScalar Scalar, arena *Arena) (*Deferred[DenseVectors], error) {
 	deferred := new(Deferred[DenseVectors])
-	return submitted(deferred, on.get(&deferred.pending, C.usearch_completion_deferred_k, key, outputsScalar, arena))
+	return submitted(deferred, on.get(&deferred.call, C.usearch_completion_deferred_k, key, outputsScalar, arena))
 }
 
 // Insert adds a matrix of vectors under their keys - the native batch operation, where a
@@ -1057,7 +1057,7 @@ func (on DenseIndexOn) Insert(keys []Key, vectors RowsView, config *DenseInsertC
 func (on DenseIndexDeferredOn) Insert(keys []Key, vectors RowsView, config *DenseInsertConfig) (*Deferred[struct{}],
 	error) {
 	deferred := new(Deferred[struct{}])
-	return submitted(deferred, on.insert(&deferred.pending, C.usearch_completion_deferred_k, keys, vectors, config))
+	return submitted(deferred, on.insert(&deferred.call, C.usearch_completion_deferred_k, keys, vectors, config))
 }
 
 // Refine re-selects the neighbors of every stored entry against the finished graph, improving
@@ -1079,7 +1079,7 @@ func (on DenseIndexOn) Refine(config *DenseRefineConfig) (RefineReport, error) {
 // Refine submits DenseIndexOn.Refine.
 func (on DenseIndexDeferredOn) Refine(config *DenseRefineConfig) (*Deferred[RefineReport], error) {
 	deferred := new(Deferred[RefineReport])
-	return submitted(deferred, on.refine(&deferred.pending, C.usearch_completion_deferred_k, config))
+	return submitted(deferred, on.refine(&deferred.call, C.usearch_completion_deferred_k, config))
 }
 
 // Health measures how much of the graph a search reaches from the root, swept level by level.
@@ -1092,7 +1092,7 @@ func (on DenseIndexOn) Health() (Reachability, error) {
 // Health submits DenseIndexOn.Health.
 func (on DenseIndexDeferredOn) Health() (*Deferred[Reachability], error) {
 	deferred := new(Deferred[Reachability])
-	return submitted(deferred, on.health(&deferred.pending, C.usearch_completion_deferred_k))
+	return submitted(deferred, on.health(&deferred.call, C.usearch_completion_deferred_k))
 }
 
 // Search resolves a matrix of queries into up to wanted nearest matches apiece, written into arena
@@ -1110,7 +1110,7 @@ func (on DenseIndexOn) Search(queries RowsView, wanted uint, arena *Arena, confi
 func (on DenseIndexDeferredOn) Search(queries RowsView, wanted uint, arena *Arena,
 	config *DenseSearchConfig) (*Deferred[MatchesView], error) {
 	deferred := new(Deferred[MatchesView])
-	return submitted(deferred, on.search(&deferred.pending, C.usearch_completion_deferred_k, queries, wanted, arena,
+	return submitted(deferred, on.search(&deferred.call, C.usearch_completion_deferred_k, queries, wanted, arena,
 		config))
 }
 
@@ -1133,7 +1133,7 @@ func (on DenseIndexOn) Maxsim(queries RowsView, rowsPerQuery, wanted uint, arena
 func (on DenseIndexDeferredOn) Maxsim(queries RowsView, rowsPerQuery, wanted uint, arena *Arena,
 	config *DenseMaxsimConfig) (*Deferred[MatchesTape], error) {
 	deferred := new(Deferred[MatchesTape])
-	return submitted(deferred, on.maxsim(&deferred.pending, C.usearch_completion_deferred_k, queries, rowsPerQuery, wanted,
+	return submitted(deferred, on.maxsim(&deferred.call, C.usearch_completion_deferred_k, queries, rowsPerQuery, wanted,
 		arena, config))
 }
 
@@ -1153,7 +1153,7 @@ func (on DenseIndexOn) Multiply(left RowsView, arena *Arena, config *DenseMultip
 func (on DenseIndexDeferredOn) Multiply(left RowsView, arena *Arena,
 	config *DenseMultiplyConfig) (*Deferred[MatchesTape], error) {
 	deferred := new(Deferred[MatchesTape])
-	return submitted(deferred, on.multiply(&deferred.pending, C.usearch_completion_deferred_k, left, arena, config))
+	return submitted(deferred, on.multiply(&deferred.call, C.usearch_completion_deferred_k, left, arena, config))
 }
 
 // Attend is softmax attention of every query row over every indexed key its walk scores, folded
@@ -1175,7 +1175,7 @@ func (on DenseIndexOn) Attend(queries RowsView, lookup ValueLookup, arena *Arena
 func (on DenseIndexDeferredOn) Attend(queries RowsView, lookup ValueLookup, arena *Arena,
 	config *DenseAttendConfig) (*Deferred[DenseVectors], error) {
 	deferred := new(Deferred[DenseVectors])
-	return submitted(deferred, on.attend(&deferred.pending, C.usearch_completion_deferred_k, queries, lookup, arena,
+	return submitted(deferred, on.attend(&deferred.call, C.usearch_completion_deferred_k, queries, lookup, arena,
 		config))
 }
 
@@ -1197,7 +1197,7 @@ func (on DenseIndexOn) Reshard(sources, targets []*DenseIndex, config *DenseResh
 func (on DenseIndexDeferredOn) Reshard(sources, targets []*DenseIndex,
 	config *DenseReshardConfig) (*Deferred[RefineReport], error) {
 	deferred := new(Deferred[RefineReport])
-	return submitted(deferred, on.reshard(&deferred.pending, C.usearch_completion_deferred_k, sources, targets, config))
+	return submitted(deferred, on.reshard(&deferred.call, C.usearch_completion_deferred_k, sources, targets, config))
 }
 
 // RefinePlanFinish closes a live refine plan and frees it whatever the call answers, reporting what
@@ -1210,7 +1210,7 @@ func (on DenseIndexOn) RefinePlanFinish(plan *DenseRefinePlan) (RefineReport, er
 // RefinePlanFinish submits DenseIndexOn.RefinePlanFinish.
 func (on DenseIndexDeferredOn) RefinePlanFinish(plan *DenseRefinePlan) (*Deferred[RefineReport], error) {
 	deferred := new(Deferred[RefineReport])
-	return submitted(deferred, on.refinePlanFinish(&deferred.pending, C.usearch_completion_deferred_k, plan))
+	return submitted(deferred, on.refinePlanFinish(&deferred.call, C.usearch_completion_deferred_k, plan))
 }
 
 // ReshardPlanFinish closes a live reshard plan on this receiver's executor and frees it
@@ -1224,7 +1224,7 @@ func (on DenseIndexOn) ReshardPlanFinish(plan *DenseReshardPlan) (RefineReport, 
 // ReshardPlanFinish submits DenseIndexOn.ReshardPlanFinish.
 func (on DenseIndexDeferredOn) ReshardPlanFinish(plan *DenseReshardPlan) (*Deferred[RefineReport], error) {
 	deferred := new(Deferred[RefineReport])
-	return submitted(deferred, on.reshardPlanFinish(&deferred.pending, C.usearch_completion_deferred_k, plan))
+	return submitted(deferred, on.reshardPlanFinish(&deferred.call, C.usearch_completion_deferred_k, plan))
 }
 
 // Sample draws up to wanted keys around the config's Focus, or across the whole index, each
@@ -1240,7 +1240,7 @@ func (on DenseIndexOn) Sample(wanted uint, arena *Arena, config *DenseSampleConf
 func (on DenseIndexDeferredOn) Sample(wanted uint, arena *Arena, config *DenseSampleConfig) (*Deferred[DenseDraws],
 	error) {
 	deferred := new(Deferred[DenseDraws])
-	return submitted(deferred, on.sample(&deferred.pending, C.usearch_completion_deferred_k, wanted, arena, config))
+	return submitted(deferred, on.sample(&deferred.call, C.usearch_completion_deferred_k, wanted, arena, config))
 }
 
 // Save writes the index under a path, in the layout its extension picks - one .safegraphs
@@ -1255,7 +1255,7 @@ func (on DenseIndexOn) Save(path string, config *DenseSaveConfig) error {
 // Save submits DenseIndexOn.Save.
 func (on DenseIndexDeferredOn) Save(path string, config *DenseSaveConfig) (*Deferred[struct{}], error) {
 	deferred := new(Deferred[struct{}])
-	return submitted(deferred, on.save(&deferred.pending, C.usearch_completion_deferred_k, path, config))
+	return submitted(deferred, on.save(&deferred.call, C.usearch_completion_deferred_k, path, config))
 }
 
 // SaveBuffer serializes the index as one monolith into arena, a size only the call itself can
@@ -1268,7 +1268,7 @@ func (on DenseIndexOn) SaveBuffer(arena *Arena, config *DenseSaveBufferConfig) (
 // SaveBuffer submits DenseIndexOn.SaveBuffer.
 func (on DenseIndexDeferredOn) SaveBuffer(arena *Arena, config *DenseSaveBufferConfig) (*Deferred[Monolith], error) {
 	deferred := new(Deferred[Monolith])
-	return submitted(deferred, on.saveBuffer(&deferred.pending, C.usearch_completion_deferred_k, arena, config))
+	return submitted(deferred, on.saveBuffer(&deferred.call, C.usearch_completion_deferred_k, arena, config))
 }
 
 // endregion: Receivers

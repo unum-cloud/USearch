@@ -275,7 +275,7 @@ Tools and benchmarks open one executor and pass it to every call, and nothing ou
 Every executor creates its own threads and pins them to the first cores the creating thread may run on, so a caller sharing a machine between executors narrows its affinity mask before creating each.
 An NVMe executor serves RAM-resident handles through its threads too, so one executor drives a RAM index beside the views it reads.
 
-No engine compares executor addresses to pick a path; the C layer may refuse an arena or plan used on another executor than its own, and `.githooks/pre-commit` refuses any other added `executor ==` or `executor !=` under `src/` and `include/`.
+No engine compares executor addresses to pick a path; the C layer may refuse an arena or plan used on another executor than its own in a one-line `if (... ->executor != ...)` guard, and `.githooks/pre-commit` refuses any other added `executor ==` or `executor !=` under `src/` and `include/`.
 An index owns its media, never an executor: it keys its media list by a `media_list_key_t`, 64 bits from `media_identity_from_entropy()` drawn when it opens the list and the swap epoch its readers bracket, which a view leaves at zero.
 An io_uring queue registers the list in its ring's file table only when the key differs from the one it holds, so a warm call registers nothing, and `nvme_begin_call` refuses a list with no identity as uninitialized.
 The table keeps the descriptors of the last list registered, so the kernel keeps those files open after their index closes them, until the executor registers another list or is freed.
@@ -306,11 +306,12 @@ One word names one concept in every U* library, and no word hands a thing over: 
 - No static, global, shared or thread-local pool, executor, queue set, stream or handle exists, stateless ones included: whoever needs one creates it and frees it.
 - A `*_free` waits for the calls naming its handle and releases memory; it reads and writes no drive, and durability comes only from the flush verb.
 - An executor owns its streams, created with it; a call without one uses the null legacy stream or is refused, and no second origin sits beside the owner.
+- An engine creates, synchronizes and frees its own CUDA, HIP and Metal streams and allocates its own device and pinned memory; NumKong and StringZilla only provide kernels, which may still take an `nk_stream_t` or `sz_stream_t` handle.
 - Every arena is freed before its executor; a binding enforces the order by lifetime where its language can and documents it otherwise, never by reference counts.
 - A C struct change lands with every binding that lays the struct out by hand, checked field by field in review.
 - Tests never restate a struct's layout that the compiler already pins, so no binding asserts a mirror's size or offsets.
 - A handler the engine may call from several threads at once is safe to call concurrently in every binding: predicates and terrain callbacks.
-- Every executor is equal; a handle owns its media, cache and epochs, never an executor, so no engine compares executor addresses to pick a path; the C layer may refuse an arena or plan used on another executor than its own.
+- Every executor is equal; a handle owns its media, cache and epochs, never an executor, so no engine compares executor addresses to pick a path; the C layer may refuse an arena or plan used on another executor than its own, in a one-line `if (... ->executor != ...)` guard.
 - Names say who owns a thing and until when a view is valid; no identifier in any language hands a thing over.
 - A fix lands on every residency and vendor that has the bug, or its message names the ones left and why.
 - A commit message names only what its diff shows.
@@ -328,7 +329,7 @@ Those per-thread buffers are the only buffers a predicate ever holds, and an eng
 
 A batched kernel takes its queries as one flat transparent view over a static extent, like a `std::array` of views sized by the batch's extent, never as a span of pointers it chases one query at a time.
 A query type that owns packed storage exposes a view of it, and the kernel reads that view.
-`.githooks/pre-commit` refuses a `std::span` of pointers to const under `include/`, except a span of C strings, which names things rather than batching queries.
+`.githooks/pre-commit` refuses a `std::span` of pointers to const under `include/`, except a span of C strings, which names things, and a span of runs such as `std::span<run_t const* const>`, which lists the sorted runs a store merges; neither batches queries.
 
 ### Planned Operations
 
@@ -510,6 +511,8 @@ A tower never takes a lock to make a shared design fit; it redesigns the protoco
 - `cpp/usearch/` includes only `c/usearch/`, the C ABI in C++ clothes.
 - `tools/` includes `c/usearch/`, `cpp/` and `utilities/`.
   Tools use the C ABI and never include an engine header.
+- In every U* library, a file never includes both a library's SDK umbrella `<X/X.hpp>` and its native umbrella `<X.hpp>`, and nothing under `include/` includes a header that resolves under `cpp/`.
+  C headers are the ABI every SDK sits on, so they are free everywhere.
 
 ### CPU Classes
 

@@ -1179,7 +1179,7 @@ type frame[Arguments, Result any] struct {
 }
 
 // call is one verb crossing into the library: the pins that keep every Go pointer its argument
-// structure holds in place until the call is final, and the slots it reports through. cgo lets C
+// structure carries in place until the call is final, and the slots it reports through. cgo lets C
 // keep a Go pointer only while it is pinned, and pinning is also what keeps every pointee on the
 // heap, which the noescape promises rely on.
 type call struct {
@@ -1284,7 +1284,7 @@ func view(text string) C.usearch_bytes_view_t {
 // dropped without Wait or Close is released by the collector once the call is final, never
 // blocking on it: until then every later collection checks it again.
 type Deferred[Result any] struct {
-	pending callWithResult[Result]
+	call    callWithResult[Result]
 	cleanup runtime.Cleanup
 }
 
@@ -1294,7 +1294,7 @@ func submitted[Result any](deferred *Deferred[Result], refusal error) (*Deferred
 	if refusal != nil {
 		return nil, refusal
 	}
-	deferred.cleanup = runtime.AddCleanup(deferred, release, deferred.pending.call)
+	deferred.cleanup = runtime.AddCleanup(deferred, release, deferred.call.call)
 	return deferred, nil
 }
 
@@ -1309,20 +1309,20 @@ func release(call call) {
 }
 
 // Status reports StatusDeferred until the call is final, then its final status, without blocking.
-func (deferred *Deferred[Result]) Status() Status { return deferred.pending.status() }
+func (deferred *Deferred[Result]) Status() Status { return deferred.call.status() }
 
 // Wait blocks until the call is final, releases its pins, then hands back its result, the same
 // every time it is asked.
 func (deferred *Deferred[Result]) Wait() (Result, error) {
 	deferred.cleanup.Stop()
-	return block(&deferred.pending, nil)
+	return block(&deferred.call, nil)
 }
 
 // Close blocks until the call is final, releases its pins, and reports the call's failure. It is
 // idempotent and safe after Wait.
 func (deferred *Deferred[Result]) Close() error {
 	deferred.cleanup.Stop()
-	return deferred.pending.settle()
+	return deferred.call.settle()
 }
 
 // endregion: Calls
@@ -1367,9 +1367,8 @@ func (executor *Executor) lower() (C.usearch_executor_t, error) {
 	return executor.handle, nil
 }
 
-// Close waits out the call holding the executor and its devices, then releases its threads, rings,
-// streams and scratch; every arena it made must be closed first. It is idempotent; a closed
-// executor must not be used again.
+// Close waits out the call holding the executor, then releases its threads, rings or streams; every
+// arena it made must be closed first. It is idempotent; a closed executor must not be used again.
 func (executor *Executor) Close() error {
 	if executor == nil || executor.handle == nil {
 		return nil
