@@ -40,11 +40,11 @@
 #include <forkunion/atomics.hpp>   // `fu::standard_atomic_ref` - the flags and counters threads share
 #include <forkunion/forkunion.hpp> // `fu::topology_t`, `fu::pool_t` - the threads a case races
 #include <numkong/numkong.h>
-#include <numkong/numkong.hpp>
+#include <numkong/tensor.hpp>
 
 #include "harness.hpp"
 #include "usearch/utilities/types.hpp"
-#include "usearch/utilities/ram_device.hpp"        // `ram_executor_t` - the RAM residency's executor
+#include "usearch/utilities/ram_device.hpp"        // `ram_executor` - the RAM residency's executor
 #include "usearch/utilities/sanitizers.hpp"        // `assert_no_locks_held` - the racing threads' tail check
 #include "usearch/utilities/safegraphs_format.hpp" // `save_config_t`, `safegraphs_read_header` - the checkpoints' surface
 #include "usearch/dense/ram_metric.hpp"            // `dense::distance`, `dense::norms` - the oracle's kernels
@@ -115,7 +115,7 @@ constexpr std::size_t dense_reader_minimal_searches_k = 16;
 /** The capability ceiling an oracle's kernels match @p index_type_ bit for bit under: the CPU
  *  shard's own quads kit's, or the serial floor for a device shard, whose kernels agree with it. */
 template <typename index_type_>
-constexpr nk_capability_t dense_oracle_capability() noexcept {
+constexpr nk_capability_t dense_reference_capability() noexcept {
     if constexpr (requires { typename index_type_::quads_kit_t; }) return index_type_::quads_kit_t::capability_k;
     else return nk_cap_serial_k;
 }
@@ -348,7 +348,8 @@ struct counting_device_allocator {
 
 /** Whether a sharded index runs on ForkUnion threads - the RAM residency. */
 template <typename indexes_type_>
-concept a_ram_collection = std::is_same_v<typename indexes_type_::executor_t, ram_executor_t>;
+concept a_ram_collection =
+    std::is_same_v<typename indexes_type_::executor_t, ram_executor<typename indexes_type_::executor_t::threads_t>>;
 
 /** The executor one sharded scenario drives, owned together with whatever it was spawned
  *  over; @c status reports the spawn. Defined per residency, each built from the @c placement
@@ -357,9 +358,9 @@ concept a_ram_collection = std::is_same_v<typename indexes_type_::executor_t, ra
 template <typename indexes_type_>
 struct dense_indexes_executor;
 
-/** The RAM form: two threads, or @p threads_count, over a topology of its own, both released with
- *  it, and one traversal context per thread over an arena of its own, built once and handed to
- *  every batched verb, so the executor's own rewinds never reach them. */
+/** The RAM form: two threads, or @p threads_count, the caller outside them, over a topology of its
+ *  own, both released with it, and one traversal context per thread over an arena of its own,
+ *  built once and handed to every batched verb, so the executor's own rewinds never reach them. */
 template <a_ram_collection indexes_type_>
 struct dense_indexes_executor<indexes_type_> {
     using executor_t = typename indexes_type_::executor_t;
@@ -530,7 +531,7 @@ void dense_widened_rows(nk::matrix_view<scalar_type_> view, nk_dtype_t dtype, nk
 }
 
 /** An exact dot beside the magnitude a float accumulation's rounding scales with. */
-struct dense_oracle_dot_t {
+struct dense_dot_reference_t {
 
     /** The dot, exact in @c f64 for every widened pair of rows. */
     f64_t dot;
@@ -541,9 +542,9 @@ struct dense_oracle_dot_t {
 
 /** The exact dot of two widened rows. */
 template <typename widened_type_>
-dense_oracle_dot_t dense_widened_dot(widened_type_ const* first, widened_type_ const* second,
-                                     std::size_t columns) noexcept {
-    dense_oracle_dot_t oracle {0, 0};
+dense_dot_reference_t dense_widened_dot(widened_type_ const* first, widened_type_ const* second,
+                                        std::size_t columns) noexcept {
+    dense_dot_reference_t oracle {0, 0};
     for (std::size_t column = 0; column != columns; ++column) {
         f64_t const product = static_cast<f64_t>(first[column]) * second[column];
         oracle.dot += product;
@@ -553,8 +554,8 @@ dense_oracle_dot_t dense_widened_dot(widened_type_ const* first, widened_type_ c
 }
 
 /** Oracle dots of every query row against every stored row into @p dots, @b [queries,rows]. */
-inline void dense_oracle_dots(nk::matrix_view<f32_t> widened_queries, nk::matrix_view<f32_t> widened_rows,
-                              nk::matrix_span<dense_oracle_dot_t> dots) {
+inline void dense_dots_reference(nk::matrix_view<f32_t> widened_queries, nk::matrix_view<f32_t> widened_rows,
+                                 nk::matrix_span<dense_dot_reference_t> dots) {
     for (std::size_t query = 0; query != dots.extent(0); ++query)
         for (std::size_t row = 0; row != dots.extent(1); ++row)
             dots(query, row) = dense_widened_dot(widened_queries.row(query).data(), widened_rows.row(row).data(),
@@ -855,7 +856,7 @@ void dense_expect_scan(make_index_type_ const& make_index, allocation_ledger_t& 
     using search_config_t = typename index_type_::search_config_t;
     using candidates_count_t = typename index_type_::candidates_count_t;
     constexpr bool device_k = requires { make_index.context(); };
-    using oracle_kit_t = typename quads_ladder<scalar_t, dense_oracle_capability<index_type_>()>::kit_t;
+    using oracle_kit_t = typename quads_ladder<scalar_t, dense_reference_capability<index_type_>()>::kit_t;
     constexpr std::size_t rows_count = dense_growth_nodes_k, wanted = 10, wide = rows_count + 5;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
@@ -942,7 +943,7 @@ void test_dense_scan(make_index_type_ const& make_index, u64_t seed) {
 
 /** A float dot against its oracle, within accumulation rounding. */
 template <typename dot_result_type_>
-void dense_expect_dot(dot_result_type_ found, dense_oracle_dot_t oracle) {
+void dense_expect_dot(dot_result_type_ found, dense_dot_reference_t oracle) {
     expect_true(std::fabs(static_cast<f64_t>(found) - oracle.dot) <= 1e-4 * oracle.magnitude + 1e-6);
 }
 
@@ -955,10 +956,10 @@ void dense_expect_top_logits(nk::matrix_view<scalar_type_> keys, nk::vector_view
     if (!expect_true(!picks.empty() && picks.size() <= rows_count)) return;
     nk::matrix<f32_t> widened_query = make_matrix<f32_t>(1, keys.extent(1));
     nk::matrix<f32_t> widened_keys = make_matrix<f32_t>(rows_count, keys.extent(1));
-    nk::matrix<dense_oracle_dot_t> dots = make_matrix<dense_oracle_dot_t>(1, rows_count);
+    nk::matrix<dense_dot_reference_t> dots = make_matrix<dense_dot_reference_t>(1, rows_count);
     dense_widened_query(query, widened_query.span());
     dense_widened_rows(keys, scalar_type_::dtype(), widened_keys.span());
-    dense_oracle_dots(widened_query.view(), widened_keys.view(), dots.span());
+    dense_dots_reference(widened_query.view(), widened_keys.view(), dots.span());
     nk::vector<f64_t> ranked = make_vector<f64_t>(rows_count);
     for (std::size_t row = 0; row != rows_count; ++row) ranked[row] = dots(0, row).dot;
     std::span<f64_t> const descending = to_writable_span(ranked);
@@ -1022,16 +1023,16 @@ dense_indexer_inputs<scalar_type_> dense_make_indexer_inputs(nk::matrix_view<sca
 
 /** Σₕ wₕ·ReLU(⟨qₕ, k⟩) of stored row @p row against the heads of query @p query, in @c f64. */
 template <typename scalar_type_>
-dense_oracle_dot_t dense_indexer_score(dense_indexer_inputs<scalar_type_> const& inputs, std::size_t query,
-                                       std::size_t row) noexcept {
+dense_dot_reference_t dense_indexer_score(dense_indexer_inputs<scalar_type_> const& inputs, std::size_t query,
+                                          std::size_t row) noexcept {
     using inputs_t = dense_indexer_inputs<scalar_type_>;
-    dense_oracle_dot_t score {0, 0};
+    dense_dot_reference_t score {0, 0};
     for (std::size_t head = 0; head != inputs_t::heads_count_k; ++head) {
         std::size_t const head_row = query * inputs_t::heads_count_k + head;
         f64_t const weight = inputs.weights(query, head);
-        dense_oracle_dot_t const oracle = dense_widened_dot(inputs.heads_widened.view().row(head_row).data(),
-                                                            inputs.widened.view().row(row).data(),
-                                                            inputs.widened.extent(1));
+        dense_dot_reference_t const oracle = dense_widened_dot(inputs.heads_widened.view().row(head_row).data(),
+                                                               inputs.widened.view().row(row).data(),
+                                                               inputs.widened.extent(1));
         score.dot += weight * max_of(oracle.dot, f64_t {});
         score.magnitude += std::fabs(weight) * oracle.magnitude;
     }
@@ -1056,7 +1057,7 @@ void dense_expect_indexer_matches(dense_indexer_inputs<scalar_type_> const& inpu
         expect_true(row < rows_count && !found[row]);
         if (row >= rows_count || found[row]) continue;
         found[row] = true;
-        dense_oracle_dot_t const score = dense_indexer_score(inputs, query, row);
+        dense_dot_reference_t const score = dense_indexer_score(inputs, query, row);
         dense_expect_dot(1 - static_cast<f64_t>(distances[rank]), score);
         expect_true(score.dot + 1e-4 * score.magnitude + 1e-6 >= threshold);
     }
@@ -1172,7 +1173,7 @@ void test_dense_indexes_scan(u64_t seed, placement_types_&... placement) {
     using distance_t = typename indexes_type_::distance_t;
     constexpr bool device_k = !a_ram_collection<indexes_type_>;
     using oracle_kit_t =
-        typename quads_ladder<scalar_t, dense_oracle_capability<typename indexes_type_::index_t>()>::kit_t;
+        typename quads_ladder<scalar_t, dense_reference_capability<typename indexes_type_::index_t>()>::kit_t;
     constexpr std::size_t rows_count = 2100, queries_count = 520, wanted = 10, wide_queries_count = 3;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
 
@@ -2278,7 +2279,7 @@ void test_dense_cut(make_index_type_ const& make_index, u64_t seed) {
 #pragma region Algebra
 
 /** A logit scale spreading the oracle's dots over @c [-4,4], so no scored row's weight underflows. */
-inline f32_t dense_attend_scale(nk::matrix_view<dense_oracle_dot_t> dots) noexcept {
+inline f32_t dense_attend_scale(nk::matrix_view<dense_dot_reference_t> dots) noexcept {
     f64_t widest = 0;
     for (std::size_t query = 0; query != dots.extent(0); ++query)
         for (std::size_t row = 0; row != dots.extent(1); ++row)
@@ -2289,8 +2290,9 @@ inline f32_t dense_attend_scale(nk::matrix_view<dense_oracle_dot_t> dots) noexce
 /** Every head's attended row and carry equal exact softmax attention over every key, in f64, from
  *  the oracle @p dots of every task against every key, @b [tasks,keys], and the @p widened_values
  *  row of every key. Rows of @p dots, @p outputs and @p carry are tasks t · @p head_count + h. */
-inline void dense_expect_full_attention(nk::matrix_view<dense_oracle_dot_t> dots, nk::matrix_view<f32_t> widened_values,
-                                        std::size_t head_count, f32_t score_scale, nk::matrix_view<f32_t> outputs,
+inline void dense_expect_full_attention(nk::matrix_view<dense_dot_reference_t> dots,
+                                        nk::matrix_view<f32_t> widened_values, std::size_t head_count,
+                                        f32_t score_scale, nk::matrix_view<f32_t> outputs,
                                         std::span<softmax_state_t const> carry) {
     std::size_t const rows_count = dots.extent(1), columns = widened_values.extent(1), tasks = dots.extent(0);
     if (!expect_true(rows_count != 0 && head_count != 0 && tasks % head_count == 0) ||
@@ -2325,7 +2327,7 @@ inline void dense_expect_full_attention(nk::matrix_view<dense_oracle_dot_t> dots
  *  hull of the @p widened_values rows, and every carry's partition counts its own maximum's key and
  *  at most one unit per key, that maximum no larger than the exact one over every key by the oracle
  *  @p dots, @b [tasks,keys]. */
-inline void dense_expect_attention_bounds(nk::matrix_view<dense_oracle_dot_t> dots,
+inline void dense_expect_attention_bounds(nk::matrix_view<dense_dot_reference_t> dots,
                                           nk::matrix_view<f32_t> widened_values, f32_t score_scale,
                                           nk::matrix_view<f32_t> outputs, std::span<softmax_state_t const> carry) {
     std::size_t const rows_count = dots.extent(1), columns = widened_values.extent(1), tasks = dots.extent(0);
@@ -2493,10 +2495,10 @@ void dense_expect_attend(make_index_type_ const& make_index, allocation_ledger_t
 
     nk::matrix<f32_t> widened_queries = make_matrix<f32_t>(rows_count, dimensions);
     nk::matrix<f32_t> widened_vectors = make_matrix<f32_t>(nodes_count, dimensions);
-    nk::matrix<dense_oracle_dot_t> dots = make_matrix<dense_oracle_dot_t>(rows_count, nodes_count);
+    nk::matrix<dense_dot_reference_t> dots = make_matrix<dense_dot_reference_t>(rows_count, nodes_count);
     dense_widened_rows(queries.view(), index_type_::vector_dtype_k, widened_queries.span());
     dense_widened_rows(vectors.view(), index_type_::vector_dtype_k, widened_vectors.span());
-    dense_oracle_dots(widened_queries.view(), widened_vectors.view(), dots.span());
+    dense_dots_reference(widened_queries.view(), widened_vectors.view(), dots.span());
     f32_t const score_scale = dense_attend_scale(dots.view());
     nk::matrix<f32_t> widened_values = make_matrix<f32_t>(nodes_count, dimensions);
     dense_widened_rows(values.view(), index_type_::vector_dtype_k, widened_values.span());
@@ -2802,10 +2804,10 @@ void test_dense_indexes_attend(u64_t seed) {
         };
         nk::matrix<f32_t> widened_queries = make_matrix<f32_t>(rows_count, dimensions);
         nk::matrix<f32_t> widened_vectors = make_matrix<f32_t>(nodes_count, dimensions);
-        nk::matrix<dense_oracle_dot_t> dots = make_matrix<dense_oracle_dot_t>(rows_count, nodes_count);
+        nk::matrix<dense_dot_reference_t> dots = make_matrix<dense_dot_reference_t>(rows_count, nodes_count);
         dense_widened_rows(queries.view(), index_t::vector_dtype_k, widened_queries.span());
         dense_widened_rows(vectors.view(), index_t::vector_dtype_k, widened_vectors.span());
-        dense_oracle_dots(widened_queries.view(), widened_vectors.view(), dots.span());
+        dense_dots_reference(widened_queries.view(), widened_vectors.view(), dots.span());
         f32_t const score_scale = dense_attend_scale(dots.view());
         nk::matrix<f32_t> widened_values = make_matrix<f32_t>(nodes_count, dimensions);
         dense_widened_rows(values.view(), index_t::vector_dtype_k, widened_values.span());
@@ -3627,7 +3629,7 @@ void test_dense_indexes_cut(u64_t seed, placement_types_&... placement) {
     using key_t = typename indexes_type_::key_t;
     using distance_t = typename indexes_type_::distance_t;
     using oracle_kit_t =
-        typename quads_ladder<scalar_t, dense_oracle_capability<typename indexes_type_::index_t>()>::kit_t;
+        typename quads_ladder<scalar_t, dense_reference_capability<typename indexes_type_::index_t>()>::kit_t;
     constexpr std::size_t wanted_k = 10;
     constexpr nk_kernel_kind_t other_kernel_k = kernel_ == nk_kernel_euclidean_k ? nk_kernel_angular_k
                                                                                  : nk_kernel_euclidean_k;

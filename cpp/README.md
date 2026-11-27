@@ -8,7 +8,7 @@ Every symbol is documented in its header under `cpp/usearch/`, and `usearch/usea
 ## Installation
 
 ```sh
-cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D USEARCH_BUILD_SHARED=1 && cmake --build build_release
+cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D USEARCH_BUILD_LIBRARIES=1 && cmake --build build_release
 ```
 
 That build compiles the four most common dense storage types, `bf16`, `u1x8`, `i8` and `e4m3`, and an index over any other is refused with `status_code_t::unsupported_k`; `-D USEARCH_DENSE_DTYPES=11` compiles all eleven.

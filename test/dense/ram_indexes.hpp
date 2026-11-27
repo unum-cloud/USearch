@@ -21,7 +21,7 @@
 
 #include <fmt/format.h>
 
-#include <numkong/numkong.hpp>
+#include <numkong/tensor.hpp>
 
 #include "usearch/dense/ram_indexes.hpp"
 #include "usearch/dense/ram_reshard.hpp"
@@ -34,9 +34,10 @@ namespace unum::usearch::test::dense {
 /** A behavior cell: the kits of @p cpu_class_ under a waiter or atomic it would not pick. */
 template <nk_dtype_t dtype_, cpu_class_t cpu_class_, typename waiter_type_ = fu::standard_yield_t,
           template <typename> class atomic_ref_ = fu::standard_atomic_ref>
-using ram_indexes_for = ram_indexes<uuid128_t, quads_kit_of<dtype_, cpu_class_>, tiles_kit_of<dtype_, cpu_class_>,
-                                    elementwise_kit_of<cpu_class_>, rmscast_kit_of<dtype_, cpu_class_>,
-                                    visits_kit_of<cpu_class_>, waiter_type_, atomic_ref_>;
+using ram_indexes_for =
+    ram_indexes<uuid128_t, quads_kit_of<dtype_, cpu_class_>, tiles_kit_of<dtype_, cpu_class_>,
+                elementwise_kit_of<cpu_class_>, rmscast_kit_of<dtype_, cpu_class_>, visits_kit_of<cpu_class_>,
+                waiter_type_, atomic_ref_, dummy_cache_hints_t, std::hash<uuid128_t>, ram_executor<fu::pool_t>>;
 
 /** Reshards @p source into @p target, which leads its own sources and keeps its shards. */
 template <typename indexes_type_>
@@ -972,11 +973,11 @@ static void test_ram_indexes_exact_scans(u64_t seed) {
         nk::matrix<f32_t> widened_queries = make_matrix<f32_t>(attended_count, dimensions);
         nk::matrix<f32_t> widened_vectors = make_matrix<f32_t>(rows_count, dimensions);
         nk::matrix<f32_t> widened_values = make_matrix<f32_t>(rows_count, dimensions);
-        nk::matrix<dense_oracle_dot_t> dots = make_matrix<dense_oracle_dot_t>(attended_count, rows_count);
+        nk::matrix<dense_dot_reference_t> dots = make_matrix<dense_dot_reference_t>(attended_count, rows_count);
         dense_widened_rows(queries.view(), index_t::vector_dtype_k, widened_queries.span());
         dense_widened_rows(vectors.view(), index_t::vector_dtype_k, widened_vectors.span());
         dense_widened_rows(values.view(), index_t::vector_dtype_k, widened_values.span());
-        dense_oracle_dots(widened_queries.view(), widened_vectors.view(), dots.span());
+        dense_dots_reference(widened_queries.view(), widened_vectors.view(), dots.span());
         f32_t const score_scale = dense_attend_scale(dots.view());
         nk::matrix<f32_t> outputs = make_matrix<f32_t>(attended_count, dimensions);
         nk::vector<softmax_state_t> carry = make_vector<softmax_state_t>(attended_count);

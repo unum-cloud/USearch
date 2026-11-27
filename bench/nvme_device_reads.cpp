@@ -33,6 +33,8 @@
 
 #include <fmt/format.h>
 
+#include <forkunion/forkunion.hpp> // `fu::pool_t` - the threads every queue is driven from
+
 #include "usearch/utilities/nvme_walks.hpp" // `nvme_begin_call`, `nvme_covering_read`, `nvme_read_header`
 #include "usearch/utilities/sample.hpp"     // `splitmix64_at`
 
@@ -42,7 +44,7 @@ namespace unum::usearch::bench {
 using namespace unum::usearch::tools;
 
 /** The executor over every queue the build admits, yielding between polls as the library does. */
-using nvme_executor_t = util::nvme_executor<util::default_io_queue<fu::standard_yield_t>>;
+using nvme_executor_t = util::nvme_executor<util::default_io_queue<fu::standard_yield_t>, fu::pool_t>;
 
 /** What one table row reads: the column's rows on the medium, the block reads round to, and the
  *  depth and count of reads the threads share. */
@@ -221,6 +223,10 @@ int bench_nvme_device_reads(int argc, char const* const* argv) {
     fu_topology_t topology = nullptr;
     if (fu_topology_new(&topology) != fu_success_k) return fmt::println(stderr, "Topology discovery failed"), 1;
     std::unique_ptr<void, void (*)(fu_topology_t)> const topology_owner {topology, &fu_topology_delete};
+    // Zero threads takes the default count over the machine's cores.
+    std::size_t threads_count = settings.threads.value;
+    if (!threads_count && fu_logical_cores_count(topology, &threads_count) == fu_success_k)
+        threads_count = fu::default_threads_count(threads_count);
     std::optional<std::string> const memory_cap = cgroup_text("memory.max");
     util::u64_t memory_limit = 0;
     if (memory_cap) std::from_chars(memory_cap->data(), memory_cap->data() + memory_cap->size(), memory_limit);
@@ -267,7 +273,12 @@ int bench_nvme_device_reads(int argc, char const* const* argv) {
         util::media_list_key_t const media_list_key {identity, 0};
         // Rings poll from creation when the medium does, since they keep their polling for life.
         config.polling = nvme_polling<nvme_executor_t::medium_t>(media);
-        auto [spawned, spawn_status] = nvme_executor_t::spawn(topology, settings.threads.value, config);
+        auto [pooled_threads, pooled_status] = nvme_executor_t::threads_t::spawn(topology, threads_count);
+        if (failed(pooled_status)) {
+            fmt::println("- {}: skipped, {} threads do not spawn", queue.name, threads_count);
+            continue;
+        }
+        auto [spawned, spawn_status] = nvme_executor_t::acquire(std::move(pooled_threads), config);
         if (failed(spawn_status)) {
             fmt::println("- {}: skipped, the queue does not open: {}", queue.name, status_to_string(spawn_status));
             continue;

@@ -42,7 +42,8 @@ using ram_indexes =
     dense::ram_indexes<util::uuid128_t, quads_kit_of<dtype_, cpu_class_>, tiles_kit_of<dtype_, cpu_class_>,
                        elementwise_kit_of<cpu_class_>, rmscast_kit_of<dtype_, cpu_class_>, visits_kit_of<cpu_class_>,
                        waiter_of<cpu_class_>, atomic_ref_for_cpu_class<cpu_class_>::template type,
-                       typename cache_hints_for_cpu_class<cpu_class_>::type>;
+                       typename cache_hints_for_cpu_class<cpu_class_>::type, std::hash<util::uuid128_t>,
+                       util::ram_executor<fu::pool_t>>;
 
 /** One NVMe variant: scoring and the words its threads share compile per CPU class, while the
  *  metric comes from the parts' headers and the transport is the executor's runtime choice. */
@@ -50,7 +51,8 @@ template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
 using nvme_indexes =
     dense::nvme_indexes<util::uuid128_t, quads_kit_of<dtype_, cpu_class_>, tiles_kit_of<dtype_, cpu_class_>,
                         elementwise_kit_of<cpu_class_>, rmscast_kit_of<dtype_, cpu_class_>, visits_kit_of<cpu_class_>,
-                        default_io_queue_t, atomic_ref_for_cpu_class<cpu_class_>::template type, waiter_of<cpu_class_>>;
+                        default_io_queue_t, fu::pool_t, atomic_ref_for_cpu_class<cpu_class_>::template type,
+                        waiter_of<cpu_class_>>;
 
 #if USEARCH_ARCH_CUDA_
 
@@ -129,12 +131,12 @@ struct dense_scratch<indexes_type_> {
 
     util::growing_buffer<traversal_context_t, thread_allocator_t> traversals;
 
-    explicit dense_scratch(util::ram_executor_t& executor) noexcept
+    explicit dense_scratch(util::ram_executor<fu::pool_t>& executor) noexcept
         : traversals(thread_allocator_t {executor.arena(0)}) {}
 
     /** Rewinds every arena, keeping the high-water mark of earlier calls, and carves one context
      *  per thread; the verb sizes them. */
-    util::status_t prepare(util::ram_executor_t& executor) noexcept {
+    util::status_t prepare(util::ram_executor<fu::pool_t>& executor) noexcept {
         if (util::status_t const rewound = executor.reserve(0); failed(rewound)) return rewound;
         if (failed(traversals.reserve_exactly(executor.size()))) return util::status_code_t::out_of_memory_k;
         for (std::size_t thread = 0; thread != executor.size(); ++thread)

@@ -44,7 +44,7 @@
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the default reference
 
-#include <stringzilla/stringzilla.hpp> // `sz::string`, `sz::status_t` - the stored values
+#include <stringzilla/string.hpp> // `sz::string`, `sz::status_t` - the stored values
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/safegraphs_format.hpp" // SafeGraphs monoliths - the checkpoints

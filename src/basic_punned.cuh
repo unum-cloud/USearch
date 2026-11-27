@@ -168,7 +168,7 @@ inline util::expected<counted_tape_t> counted_tape_of(
  *  are any and on the caller otherwise. */
 using fold_texts_t = util::expected<counted_tape_t> (*)(counted_tape_t texts,
                                                         util::growing_arena<util::forkunion_allocator_t>& memory,
-                                                        util::ram_executor_t* threads) noexcept;
+                                                        util::ram_executor<fu::pool_t>* threads) noexcept;
 
 /** Entry @p entry of a byte tape, as the view every string type converts from. */
 inline std::string_view chars_at(counted_tape_t const& tape, std::size_t entry) noexcept {

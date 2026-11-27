@@ -1045,7 +1045,7 @@ struct ram_index {
 
     // The sharded index walks every shard under one token's attention heads, so one running state spans them.
     template <typename, typename, typename, typename, typename, typename, typename, template <typename> class, typename,
-              typename>
+              typename, typename>
     friend struct ram_indexes;
     template <typename, template <typename> class shards_atomic_ref_template_, typename, typename>
     friend struct util::shard_set;

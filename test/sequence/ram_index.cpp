@@ -120,7 +120,7 @@ static std::vector<sequence_value_t> generate_values(std::size_t count, u64_t se
 /** The containment distance by brute force: each distinct window of @p query at one width is a hit
  *  when @p stored holds its bytes, and the hits and @p stored 's own windows lay out as
  *  @c containment_distance lays them. */
-static sz_size_t containment_oracle(std::string_view query, std::string_view stored) noexcept {
+static sz_size_t containment_reference(std::string_view query, std::string_view stored) noexcept {
     u64_t distinct = 0, held = 0, windows = 0;
     for (std::size_t const width : containment_window_widths_k) {
         windows += stored.size() >= width ? stored.size() - width + 1 : 0;
@@ -180,7 +180,7 @@ static std::string packed_sequence(std::span<u32_t const> codes) {
 
 /** The alignment cost between two packed sequences under @p costs through the two-row
  *  recurrence: the oracle, sharing no code with the metric's kernels or unpacking. */
-static sz_size_t alignment_oracle(std::string_view first, std::string_view second, alignment_costs_t const& costs) {
+static sz_size_t alignment_reference(std::string_view first, std::string_view second, alignment_costs_t const& costs) {
     std::vector<u32_t> const rows = unpacked_codes(first), columns = unpacked_codes(second);
     std::vector<sz_size_t> previous_row(columns.size() + 1), current_row(columns.size() + 1);
     for (std::size_t column = 0; column <= columns.size(); ++column) previous_row[column] = column * costs.gap;
@@ -225,7 +225,7 @@ struct containment_fixture_t {
     static codec_t make_codec() noexcept { return {}; }
     static util::uuid128_t make_key(std::size_t ordinal) noexcept { return uuid_of(0x0E7E1A90ull + ordinal); }
     static sz_size_t oracle(std::string_view query, std::string_view stored) noexcept {
-        return containment_oracle(query, stored);
+        return containment_reference(query, stored);
     }
     static bool value_equals(std::string_view first, std::string_view second) noexcept { return first == second; }
 
@@ -265,7 +265,7 @@ struct alignment_fixture_t {
     static codec_t make_codec() noexcept { return {}; }
     static util::uuid128_t make_key(std::size_t ordinal) noexcept { return uuid_of(0x0A11C0DEull + ordinal); }
     static sz_size_t oracle(std::string_view query, std::string_view stored) {
-        return alignment_oracle(query, stored, nucleotide_costs_k);
+        return alignment_reference(query, stored, nucleotide_costs_k);
     }
     static bool value_equals(std::string_view first, std::string_view second) noexcept { return first == second; }
 
@@ -319,7 +319,7 @@ struct unit_alignment_fixture_t {
     static codec_t make_codec() noexcept { return {}; }
     static util::uuid128_t make_key(std::size_t ordinal) noexcept { return uuid_of(0x0C0DE5ull + ordinal); }
     static sz_size_t oracle(std::string_view query, std::string_view stored) {
-        return alignment_oracle(query, stored, unit_costs_k);
+        return alignment_reference(query, stored, unit_costs_k);
     }
     static bool value_equals(std::string_view first, std::string_view second) noexcept { return first == second; }
 
@@ -385,7 +385,8 @@ void test_containment_kit(u64_t seed) {
             metric.drain(batched, radius);
             expect_equal(metric.status(), status_code_t::success_k);
             for (std::size_t slot = 0; slot != batched.size(); ++slot) {
-                sz_size_t const truth = containment_oracle(batch[slot / candidates_k], candidates[slot % candidates_k]);
+                sz_size_t const truth = containment_reference(batch[slot / candidates_k],
+                                                              candidates[slot % candidates_k]);
                 truth <= radius ? expect_equal(batched[slot], truth) : expect_true(batched[slot] > radius);
             }
             for (std::size_t const query : {candidates_k - 1, std::size_t {0}}) {
@@ -396,7 +397,7 @@ void test_containment_kit(u64_t seed) {
                 metric.drain(distances, radius);
                 expect_equal(metric.status(), status_code_t::success_k);
                 for (std::size_t candidate = 0; candidate != candidates_k; ++candidate) {
-                    sz_size_t const truth = containment_oracle(candidates[query], candidates[candidate]);
+                    sz_size_t const truth = containment_reference(candidates[query], candidates[candidate]);
                     truth <= radius ? expect_equal(distances[candidate], truth)
                                     : expect_true(distances[candidate] > radius);
                 }
@@ -472,7 +473,7 @@ void test_alignment_kit(u64_t seed) {
             metric.drain(distances, radius);
             expect_equal(metric.status(), status_code_t::success_k);
             for (std::size_t candidate = 0; candidate != generated_k; ++candidate) {
-                sz_size_t const truth = alignment_oracle(candidates[query], candidates[candidate], costs);
+                sz_size_t const truth = alignment_reference(candidates[query], candidates[candidate], costs);
                 truth <= radius ? expect_equal(distances[candidate], truth)
                                 : expect_true(distances[candidate] > radius);
             }
@@ -694,8 +695,8 @@ void test_hash_sketch_kit(u64_t seed) {
  *  band, every cell of it kept. Symbols are class codes charged through @p costs, and the query
  *  also scores as its reverse complement.
  */
-static sz_size_t banded_overlap_oracle(std::string_view query, std::string_view stored,
-                                       alignment_costs_t const& costs) {
+static sz_size_t banded_overlap_reference(std::string_view query, std::string_view stored,
+                                          alignment_costs_t const& costs) {
     constexpr u64_t ceiling_k = 32767 * 256 + 255, outside_k = u64_t {1} << 40;
     u64_t const gap = costs.gap;
     u64_t best = ceiling_k;
@@ -823,7 +824,7 @@ void test_banded_overlap_kit(u64_t seed) {
         metric.drain(batched, radius);
         expect_equal(metric.status(), status_code_t::success_k);
         for (std::size_t slot = 0; slot != batched.size(); ++slot) {
-            sz_size_t const truth = banded_overlap_oracle(batch[slot / reads_k], stored[slot % reads_k], costs);
+            sz_size_t const truth = banded_overlap_reference(batch[slot / reads_k], stored[slot % reads_k], costs);
             truth <= radius ? expect_equal(batched[slot], truth) : expect_true(batched[slot] > radius);
         }
         for (std::size_t const query : {std::size_t {3}, reads_k - 2, std::size_t {11}}) {
@@ -834,7 +835,7 @@ void test_banded_overlap_kit(u64_t seed) {
             metric.drain(distances, radius);
             expect_equal(metric.status(), status_code_t::success_k);
             for (std::size_t read = 0; read != reads_k; ++read) {
-                sz_size_t const truth = banded_overlap_oracle(stored[query], stored[read], costs);
+                sz_size_t const truth = banded_overlap_reference(stored[query], stored[read], costs);
                 truth <= radius ? expect_equal(distances[read], truth) : expect_true(distances[read] > radius);
             }
         }
@@ -863,7 +864,8 @@ struct alignment_nvme_fixture_t {
     using coordinates_t = no_fixed_coordinates_t;
     static constexpr std::string_view metric_token_k = "protein-alignment";
     template <typename engine_type_, typename node_id_type_ = u32_t>
-    using nvme_t = us::basic::nvme_indexes<codec_t, util::uuid128_t, node_id_type_, sz_size_t, engine_type_>;
+    using nvme_t =
+        us::basic::nvme_indexes<codec_t, util::uuid128_t, node_id_type_, sz_size_t, engine_type_, fu::pool_t>;
 
     std::vector<std::string> texts;
 
@@ -1563,11 +1565,11 @@ void test_alignment_costs(u64_t seed) {
                                                                           : (first & 1) == (second & 1) ? 1
                                                                                                         : 0;
     usearch_sequence_costs_t const costs {similarities.data(), 2};
-    auto const costed_oracle = [](std::string_view query, std::string_view stored) {
-        return alignment_oracle(packed_nucleotides(query), packed_nucleotides(stored), nucleotide_costs_k);
+    auto const costed_reference = [](std::string_view query, std::string_view stored) {
+        return alignment_reference(packed_nucleotides(query), packed_nucleotides(stored), nucleotide_costs_k);
     };
     expect_scores_through_abi(seed, usearch_sequence_metric_protein_alignment_k, &costs,
-                              containment_fixture_t::make_values(entries_k, seed, allocator), costed_oracle);
+                              containment_fixture_t::make_values(entries_k, seed, allocator), costed_reference);
 }
 
 /** The metrics' own similarities fold into their classes: 24 for proteins and four for DNA, whose

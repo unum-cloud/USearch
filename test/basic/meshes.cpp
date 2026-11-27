@@ -74,7 +74,7 @@ static f64_t spectra_distance(std::span<f32_t const> first, std::span<f32_t cons
 /** The hand-rolled scalar twin of @c spectra_distance - the independent oracle:
  *  plain f64 accumulation, no library kernels, so a NumKong dispatch bug cannot
  *  cancel out of the scenarios' distance audits. */
-static f64_t scalar_spectra_distance(std::span<f32_t const> first, std::span<f32_t const> second) noexcept {
+static f64_t spectra_distance_reference(std::span<f32_t const> first, std::span<f32_t const> second) noexcept {
     f64_t sum_of_squares = 0;
     for (std::size_t pair = 0; pair != first.size(); ++pair) {
         f64_t const gap = static_cast<f64_t>(first[pair]) - static_cast<f64_t>(second[pair]);
@@ -180,7 +180,7 @@ struct meshes_fixture {
         return std::bit_cast<util::uuid128_t>(std::array<u64_t, 2> {split_mix_bits(ordinal ^ 0x3D3D3Dull), ordinal});
     }
     static f64_t oracle(mesh_t const& query, mesh_t const& stored) noexcept {
-        return scalar_spectra_distance(query.spectrum, stored.spectrum);
+        return spectra_distance_reference(query.spectrum, stored.spectrum);
     }
     static bool value_equals(mesh_t const& first, mesh_t const& second) noexcept {
         if (first.points.size() != second.points.size()) return false;
@@ -276,7 +276,7 @@ static void test_meshes_kernel_parity(u64_t seed) {
     for (std::size_t pair = 0; pair + 1 < values.size(); pair += 2) {
         auto const& first = values[pair].spectrum;
         auto const& second = values[pair + 1].spectrum;
-        kernel_errors.add(spectra_distance(first, second), scalar_spectra_distance(first, second));
+        kernel_errors.add(spectra_distance(first, second), spectra_distance_reference(first, second));
     }
     expect_errors("spectra kernel parity", comparison_family_t::approximate_k, comparison_verdict_t::assert_k,
                   kernel_errors, 0);

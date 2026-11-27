@@ -49,6 +49,7 @@
 
 #include <fmt/format.h>
 
+#include <numkong/cast.h> // `nk_f32_to_f16_best` & kin - the narrow floats a fixture draws
 #include <numkong/tensor.hpp>
 #include <numkong/vector.hpp>
 
@@ -502,13 +503,17 @@ inline int finish_test_run() noexcept {
 inline st::vector<std::int32_t> parse_devices(char const* text) noexcept {
     st::vector<std::int32_t> devices;
     if (!text) return devices;
-    for (std::string_view const item : sz::split(std::string_view {text}, ",")) {
+    for (std::string_view rest = text;;) {
+        std::size_t const comma = rest.find(',');
+        std::string_view const item = rest.substr(0, comma);
         std::uint32_t ordinal = 0;
         auto const [parsed_end, parse_status] = std::from_chars(item.data(), item.data() + item.size(), ordinal);
         if (item.empty() || parse_status != std::errc {} || parsed_end != item.data() + item.size() ||
             ordinal > static_cast<std::uint32_t>((std::numeric_limits<std::int32_t>::max)()))
             exit_unparsed("USEARCH_DEVICES", text, "unsigned integers like 0,1");
         if (st::failed(devices.push_back(static_cast<std::int32_t>(ordinal)))) tools::exit_out_of_memory("the devices");
+        if (comma == std::string_view::npos) break;
+        rest.remove_prefix(comma + 1);
     }
     return devices;
 }
@@ -517,10 +522,14 @@ inline st::vector<std::int32_t> parse_devices(char const* text) noexcept {
 inline st::vector<std::string_view> parse_nvme_paths(char const* text) noexcept {
     st::vector<std::string_view> paths;
     if (!text) return paths;
-    for (std::string_view const path : sz::split(std::string_view {text}, ",")) {
+    for (std::string_view rest = text;;) {
+        std::size_t const comma = rest.find(',');
+        std::string_view const path = rest.substr(0, comma);
         if (path.empty())
             exit_unparsed("USEARCH_NVME_PATHS", text, "comma-separated files, block devices or transport IDs");
         if (st::failed(paths.push_back(std::string_view {path}))) tools::exit_out_of_memory("the NVMe paths");
+        if (comma == std::string_view::npos) break;
+        rest.remove_prefix(comma + 1);
     }
     return paths;
 }
@@ -1119,12 +1128,65 @@ constexpr util::u32_t random_component_levels() noexcept {
     else return 8;
 }
 
-/** Builds a scalar from a small unsigned - sub-byte types go through the raw nibble path,
- *  float wrappers via @c from_f32, byte-or-larger integers via the integral constructor. */
+/** Whether @p scalar_ is a float narrower than 32 bits, which converts only through NumKong's
+ *  dispatched exports. */
+template <typename scalar_>
+constexpr bool is_narrow_float() noexcept {
+    return std::is_same_v<scalar_, nk::f16_t> || std::is_same_v<scalar_, nk::bf16_t> ||
+           std::is_same_v<scalar_, nk::e4m3_t> || std::is_same_v<scalar_, nk::e5m2_t> ||
+           std::is_same_v<scalar_, nk::e2m3_t> || std::is_same_v<scalar_, nk::e3m2_t>;
+}
+
+/** The value of one narrow float as a @c float, through its dispatched conversion export. */
+template <typename scalar_>
+float narrow_to_f32(scalar_ value) noexcept {
+    float result;
+    if constexpr (std::is_same_v<scalar_, nk::f16_t>) nk_f16_to_f32_best(&value.raw_, &result, nk_cap_serial_k);
+    else if constexpr (std::is_same_v<scalar_, nk::bf16_t>) nk_bf16_to_f32_best(&value.raw_, &result, nk_cap_serial_k);
+    else if constexpr (std::is_same_v<scalar_, nk::e4m3_t>) nk_e4m3_to_f32_best(&value.raw_, &result, nk_cap_serial_k);
+    else if constexpr (std::is_same_v<scalar_, nk::e5m2_t>) nk_e5m2_to_f32_best(&value.raw_, &result, nk_cap_serial_k);
+    else if constexpr (std::is_same_v<scalar_, nk::e2m3_t>) nk_e2m3_to_f32_best(&value.raw_, &result, nk_cap_serial_k);
+    else if constexpr (std::is_same_v<scalar_, nk::e3m2_t>) nk_e3m2_to_f32_best(&value.raw_, &result, nk_cap_serial_k);
+    else static_assert(sizeof(scalar_) == 0, "not a narrow float");
+    return result;
+}
+
+/** One @c float rounded into a narrow float, through its dispatched conversion export. */
+template <typename scalar_>
+scalar_ f32_to_narrow(float value) noexcept {
+    scalar_ result;
+    if constexpr (std::is_same_v<scalar_, nk::f16_t>) nk_f32_to_f16_best(&value, &result.raw_, nk_cap_serial_k);
+    else if constexpr (std::is_same_v<scalar_, nk::bf16_t>) nk_f32_to_bf16_best(&value, &result.raw_, nk_cap_serial_k);
+    else if constexpr (std::is_same_v<scalar_, nk::e4m3_t>) nk_f32_to_e4m3_best(&value, &result.raw_, nk_cap_serial_k);
+    else if constexpr (std::is_same_v<scalar_, nk::e5m2_t>) nk_f32_to_e5m2_best(&value, &result.raw_, nk_cap_serial_k);
+    else if constexpr (std::is_same_v<scalar_, nk::e2m3_t>) nk_f32_to_e2m3_best(&value, &result.raw_, nk_cap_serial_k);
+    else if constexpr (std::is_same_v<scalar_, nk::e3m2_t>) nk_f32_to_e3m2_best(&value, &result.raw_, nk_cap_serial_k);
+    else static_assert(sizeof(scalar_) == 0, "not a narrow float");
+    return result;
+}
+
+/** One element of a @p scalar_ vector as an @c f64: narrow floats through @ref narrow_to_f32, the
+ *  rest through the value their wrapper or bit proxy reads. */
+template <typename scalar_, typename element_type_ = scalar_>
+util::f64_t widened_value(element_type_ const& element) noexcept {
+    if constexpr (is_narrow_float<scalar_>()) return narrow_to_f32<scalar_>(element);
+    else return static_cast<util::f64_t>(element);
+}
+
+/** One @c f64 rounded into @p scalar_: narrow floats through @ref f32_to_narrow, the rest through
+ *  their constructors. */
+template <typename scalar_>
+scalar_ narrowed_value(util::f64_t value) noexcept {
+    if constexpr (is_narrow_float<scalar_>()) return f32_to_narrow<scalar_>(static_cast<float>(value));
+    else return scalar_(value);
+}
+
+/** Builds a scalar from a small unsigned - sub-byte types go through the raw nibble path, narrow
+ *  floats through @ref f32_to_narrow, wider ones and integers through their constructors. */
 template <typename scalar_>
 auto make_scalar(unsigned value) noexcept {
     if constexpr (nk::dimensions_per_value<scalar_>() > 1) return static_cast<util::i8_t>(value);
-    else if constexpr (requires { scalar_::from_f32(0.0f); }) return scalar_::from_f32(static_cast<float>(value));
+    else if constexpr (is_narrow_float<scalar_>()) return f32_to_narrow<scalar_>(static_cast<float>(value));
     else return scalar_(value);
 }
 
@@ -1232,7 +1294,7 @@ nk::matrix<scalar_> make_vectors(std::size_t count, std::size_t dimensions, util
  *  what @ref make_vectors draws. Only floats of sixteen bits or more hold that spread: an integer
  *  or a byte-wide float folds the short rows into one. */
 template <typename scalar_>
-    requires(sizeof(scalar_) >= 2 && requires { scalar_::from_f32(0.0f); })
+    requires(sizeof(scalar_) >= 2 && is_narrow_float<scalar_>())
 nk::matrix<scalar_> make_spread_vectors(std::size_t count, std::size_t dimensions, util::u64_t seed) {
     auto [made, status] = nk::matrix<scalar_>::zeros({count, dimensions});
     if (nk::failed(status)) std::abort();
@@ -1243,7 +1305,7 @@ nk::matrix<scalar_> make_spread_vectors(std::size_t count, std::size_t dimension
         util::f64_t const length = std::pow(10.0, decades(random_generator));
         auto values = row.as_vector();
         for (std::size_t dimension = 0; dimension != dimensions; ++dimension)
-            values[dimension] = scalar_::from_f32(static_cast<float>(length * centered(random_generator)));
+            values[dimension] = f32_to_narrow<scalar_>(static_cast<float>(length * centered(random_generator)));
     }
     return std::move(made);
 }
@@ -1577,7 +1639,7 @@ template <typename verbs_type_>
 void expect_walk_recall(handle<verbs_type_>& index, typename verbs_type_::queries_t queries, std::size_t count,
                         std::size_t expansion, double floor) {
     copied_matches_t oracle;
-    usearch_outcome_t const scanned = scan_oracle(index, queries, count, cell_wanted_k, cell_batch_k, oracle);
+    usearch_outcome_t const scanned = scan_reference(index, queries, count, cell_wanted_k, cell_batch_k, oracle);
     if (scanned.status == usearch_status_unsupported_k) return;
     double recall = 0;
     if (!expect_success(scanned) || !expect_success(walk_recall(index, queries, count, expansion, oracle, recall)))
@@ -2082,9 +2144,9 @@ void expect_refined(handle<verbs_type_>& index, typename verbs_type_::queries_t 
     double recall_before = 0, recall_after = 0;
     usearch_traversal_stats_t spent_before {}, spent_after {};
     char const* refused = nullptr;
-    usearch_outcome_t oracle_outcome = scan_oracle(index, queries, count, cell_wanted_k, cell_batch_k, oracle);
+    usearch_outcome_t oracle_outcome = scan_reference(index, queries, count, cell_wanted_k, cell_batch_k, oracle);
     usearch_status_t const scanned = oracle_outcome.status;
-    if (scanned != usearch_status_success_k) refused = "scan_oracle";
+    if (scanned != usearch_status_success_k) refused = "scan_reference";
     else if (oracle_outcome = walk_recall(index, queries, count, expansion, oracle, recall_before, &spent_before);
              oracle_outcome.status != usearch_status_success_k)
         refused = "walk_recall";

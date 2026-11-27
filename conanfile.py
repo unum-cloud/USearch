@@ -65,7 +65,7 @@ class USearchConan(ConanFile):
         toolchain = CMakeToolchain(self)
         # Off by default in the tree, so the headers and the CMake package files would be absent.
         toolchain.cache_variables["USEARCH_INSTALL"] = True
-        toolchain.cache_variables["USEARCH_BUILD_SHARED"] = True
+        toolchain.cache_variables["USEARCH_BUILD_LIBRARIES"] = True
         toolchain.cache_variables["USEARCH_CUDA_ARCH"] = "all" if self.options.with_cuda else ""
         toolchain.generate()
         CMakeDeps(self).generate()

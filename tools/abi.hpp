@@ -71,7 +71,7 @@
 
 #include <forkunion/forkunion.h> // `fu_topology_new`, `fu_memory_domain_id_at_index` - the domains shards repeat over
 #include <smashtable/basic_vector.hpp> // `st::vector`
-#include <stringzilla/stringzilla.hpp> // `sz::split`
+#include <stringzilla/string.hpp>      // `sz::string_t`
 
 #include "usearch/usearch.h"
 #include "usearch/utilities/blocking_files.hpp" // `mapped_file_t` - the dataset parts, the compared checkpoints
@@ -183,13 +183,17 @@ inline st::vector<std::int32_t> devices_from_environment() noexcept {
     st::vector<std::int32_t> devices;
     std::optional<std::string_view> const text = environment_text("USEARCH_DEVICES");
     if (!text) return devices;
-    for (std::string_view const item : sz::split(*text, ",")) {
+    for (std::string_view rest = *text;;) {
+        std::size_t const comma = rest.find(',');
+        std::string_view const item = rest.substr(0, comma);
         std::uint32_t ordinal = 0;
         auto const [end, parse_status] = std::from_chars(item.data(), item.data() + item.size(), ordinal);
         if (item.empty() || parse_status != std::errc {} || end != item.data() + item.size() ||
             ordinal > static_cast<std::uint32_t>((std::numeric_limits<std::int32_t>::max)()))
             exit_unparsed("USEARCH_DEVICES", *text, "unsigned integers like 0,1");
         if (st::failed(devices.push_back(static_cast<std::int32_t>(ordinal)))) exit_out_of_memory("the devices");
+        if (comma == std::string_view::npos) break;
+        rest.remove_prefix(comma + 1);
     }
     return devices;
 }
@@ -410,12 +414,16 @@ inline settings_t read_environment() {
     }
     settings.devices = devices_from_environment();
     if (std::optional<std::string_view> const paths_text = environment_text("USEARCH_NVME_PATHS"))
-        for (std::string_view const path : sz::split(*paths_text, ",")) {
+        for (std::string_view rest = *paths_text;;) {
+            std::size_t const comma = rest.find(',');
+            std::string_view const path = rest.substr(0, comma);
             if (path.empty())
                 exit_unparsed("USEARCH_NVME_PATHS", *paths_text,
                               "comma-separated files, block devices or transport IDs");
             if (st::failed(settings.nvme_paths.push_back(std::string_view {path})))
                 exit_out_of_memory("the NVMe paths");
+            if (comma == std::string_view::npos) break;
+            rest.remove_prefix(comma + 1);
         }
 #if !USEARCH_OS_WINDOWS_
     settings.terminal = isatty(fileno(stdout)) != 0;
@@ -2277,8 +2285,8 @@ usearch_outcome_t search_queries(handle<verbs_type_>& index, typename verbs_type
 /** Fills @p oracle with the exact top @p wanted of the first @p judged queries of @p queries,
  *  nearest first with their distances, by a scan of every entry @p index holds. */
 template <typename verbs_type_>
-usearch_outcome_t scan_oracle(handle<verbs_type_>& index, typename verbs_type_::queries_t queries, std::size_t judged,
-                              std::size_t wanted, std::size_t batch, copied_matches_t& oracle) {
+usearch_outcome_t scan_reference(handle<verbs_type_>& index, typename verbs_type_::queries_t queries,
+                                 std::size_t judged, std::size_t wanted, std::size_t batch, copied_matches_t& oracle) {
     usearch_traversal_stats_t stats {};
     return search_queries(index, queries, judged, batch, wanted, 0, usearch_traversal_scan_k, stats, oracle);
 }
@@ -2290,8 +2298,8 @@ enum class truth_distances_t { reported_k, squared_k };
  *  each row's neighbor offsets keyed by @ref key_of_offset under @p seed, at the @c f32 distances
  *  RetriEval and BigANN store past the rows, rooted when @p stored says they hold the square of
  *  the Euclidean distance the index reports; false for a file storing none. */
-inline bool truth_oracle(util::u64_t seed, mapped_rows_t const& truth, std::size_t queries, truth_distances_t stored,
-                         copied_matches_t& oracle) noexcept {
+inline bool truth_reference(util::u64_t seed, mapped_rows_t const& truth, std::size_t queries, truth_distances_t stored,
+                            copied_matches_t& oracle) noexcept {
     std::size_t const depth = truth.columns(), listed = queries * depth;
     util::bytes_view_t const distances = truth.trailing();
     if (distances.size() < truth.rows() * depth * sizeof(float)) return false;
@@ -2831,8 +2839,8 @@ int run_search_bench(settings_t const& settings, search_bench_settings_t const& 
     copied_matches_t oracle;
     std::size_t const judged = util::min_of(search.oracle_queries.value, queries_count);
     std::chrono::steady_clock::time_point const scan_start = std::chrono::steady_clock::now();
-    if (judged &&
-        report_failure(scan_oracle(index, queries, judged, search.top_k.value, search.batch.value, oracle), "Scanning"))
+    if (judged && report_failure(scan_reference(index, queries, judged, search.top_k.value, search.batch.value, oracle),
+                                 "Scanning"))
         return 1;
     fmt::println("- Exact scan: {} queries in {:.2f} s", judged,
                  std::chrono::duration<double>(std::chrono::steady_clock::now() - scan_start).count());

@@ -36,10 +36,10 @@ harness = false
 [dependencies]
 # Each `rev` is the one `cmake/usearch_siblings.cmake` pins, so the crates and the C library hold one
 # copy of every sibling; CMake builds each crate's tree in place of downloading it again.
-forkunion = { version = "4.0.0-rc.1", git = "https://github.com/ashvardanian/ForkUnion", rev = "94969cc654e6a8855dfb27f85e3c19a92ca85212", default-features = false }
-numkong = { version = "8.0.0-rc.1", git = "https://github.com/ashvardanian/NumKong", rev = "f4cfb1f90b5f441914eb207a6db2dd987dad354c" }
+forkunion = { version = "4.0.0-rc.1", git = "https://github.com/ashvardanian/ForkUnion", rev = "2797304869337c41500e8e2d1ca9bbc278c351c5", default-features = false }
+numkong = { version = "8.0.0-rc.1", git = "https://github.com/ashvardanian/NumKong", rev = "f85bdd47ca28d03c3c82716a1a1e44c465587928" }
 smashtable = { version = "1.0.0-rc.1", git = "https://github.com/ashvardanian/SmashTable", rev = "dd4dfa9147a1957fb302c1f0e4ca89d028094d94" }
-stringzilla = { version = "6.0.0-rc.1", git = "https://github.com/ashvardanian/StringZilla", rev = "c539a4083d54319c522206d4af14a1a3e72ea9d7", default-features = false }
+stringzilla = { version = "6.0.0-rc.1", git = "https://github.com/ashvardanian/StringZilla", rev = "e0bf6b066bd7f966e6eb302458c4f2d863e77f2b", default-features = false }
 
 # Which implementation of the C interface gets linked. Each is a whole implementation rather than
 # a knob on one, so they are mutually exclusive and `build.rs` refuses a pair rather than choosing.

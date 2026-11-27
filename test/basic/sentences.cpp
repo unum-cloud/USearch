@@ -314,10 +314,10 @@ static u64_t myers_levenshtein_distance(std::string_view first, std::string_view
 
 /** The independent-oracle audit over sampled pairs, truncated to the bit-parallel
  *  form's 64-character bound. */
-static void test_sentences_independent_oracle(u64_t seed) {
+static void test_sentences_independent_reference(u64_t seed) {
     std::vector<u64_t> previous_row, current_row;
     allocation_ledger_t ledger;
-    auto values = sentences_fixture_t::make_values(24, stream_key(seed, "independent_oracle"),
+    auto values = sentences_fixture_t::make_values(24, stream_key(seed, "independent_reference"),
                                                    counting_allocator_t {ledger});
     for (std::size_t pair = 0; pair + 1 < values.size(); pair += 2) {
         std::string_view const first = std::string_view {values[pair]}.substr(0, 64);
@@ -337,7 +337,7 @@ void test::basic::run_sentences_cases() {
     run_test_case("test_sentences_transparent_search", test_sentences_transparent_search, seed);
     run_test_case("test_sentences_codec_poison", test_sentences_codec_poison, seed);
     run_test_case("test_sentences_whole_batch", test_sentences_whole_batch, seed);
-    run_test_case("test_sentences_independent_oracle", test_sentences_independent_oracle, seed);
+    run_test_case("test_sentences_independent_reference", test_sentences_independent_reference, seed);
     run_test_case("test_basic_safegraphs_round_trip<sentences_fixture_t>",
                   test_basic_safegraphs_round_trip<sentences_fixture_t>, seed, "u64", "levenshtein");
     run_test_case("test_basic_safegraphs_hostile<sentences_fixture_t>",

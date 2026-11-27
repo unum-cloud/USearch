@@ -2,7 +2,7 @@
 # and the smoke test that proves the two agree. Both library flavors take the punned objects rather than compiling a
 # boundary of their own.
 
-if (USEARCH_BUILD_TEST AND USEARCH_BUILD_SHARED)
+if (USEARCH_BUILD_TEST AND USEARCH_BUILD_LIBRARIES)
     add_executable(usearch_test_c test.c)
     usearch_setup_target(usearch_test_c)
     target_link_libraries(usearch_test_c PRIVATE ${USEARCH_PUNNED_LIBRARIES})
@@ -24,9 +24,9 @@ if (USEARCH_BUILD_TEST AND USEARCH_BUILD_STUB)
     set_target_properties(usearch_test_c_stub PROPERTIES ENABLE_EXPORTS ON)
 endif ()
 
-# Both libraries are always declared and build only for the targets that link them; `USEARCH_BUILD_SHARED` puts them in
-# the default build and the install.
-if (NOT USEARCH_BUILD_SHARED)
+# Both libraries are always declared and build only for the targets that link them; `USEARCH_BUILD_LIBRARIES` puts them
+# in the default build and the install.
+if (NOT USEARCH_BUILD_LIBRARIES)
     set(usearch_library_exclusion_ EXCLUDE_FROM_ALL)
 endif ()
 
@@ -37,64 +37,73 @@ endif ()
 # dependencies; the archive takes the objects themselves, since an archive links nothing - and linking a library instead
 # would drop every symbol nothing inside referenced, which is the entire C interface.
 #
-# For the same reason the archive holds its dependencies' objects: one leaving yyjson, NumKong or ForkUnion undefined
-# makes every consumer hunt more archives out of the dependency tree to link one of ours.
-add_library(usearch_shared SHARED ${usearch_library_exclusion_})
-target_link_libraries(usearch_shared PRIVATE ${USEARCH_PUNNED_LIBRARIES})
+# For the same reason the archive holds its dependencies' objects: one leaving yyjson or ForkUnion undefined makes every
+# consumer hunt more archives out of the dependency tree to link one of ours. NumKong's kernels are inlined, so its
+# library holds nothing the archive needs.
+#
+# Each flavor joins an export set, which the root's install lists name, so `find_package(usearch)` names them
+# `usearch::shared` and `usearch::static`.
 add_library(
     usearch_static STATIC ${usearch_library_exclusion_} ${USEARCH_PUNNED_OBJECTS} $<TARGET_OBJECTS:yyjson>
-                          $<TARGET_OBJECTS:numkong_static> $<TARGET_OBJECTS:forkunion_static>
+                          $<TARGET_OBJECTS:forkunion_static>
 )
-add_library(${PROJECT_NAME}::shared ALIAS usearch_shared)
 add_library(${PROJECT_NAME}::static ALIAS usearch_static)
-set_target_properties(usearch_shared usearch_static PROPERTIES LINKER_LANGUAGE CXX)
+set_target_properties(usearch_static PROPERTIES LINKER_LANGUAGE CXX EXPORT_NAME static)
 # Installs name the include directory through `INCLUDES DESTINATION`; `FetchContent` consumers need the source tree's.
-target_include_directories(usearch_shared INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
 target_include_directories(usearch_static INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
-# Consumers of the shared flavor import its entry points on Windows; the archive needs no decoration.
-target_compile_definitions(usearch_shared INTERFACE USEARCH_SHARED=1)
 # MSVC reads BOM-less UTF-8 in the system code page, so consumers of these Unicode-commented headers need `/utf-8`.
-target_compile_options(
-    usearch_shared INTERFACE "$<$<OR:$<COMPILE_LANG_AND_ID:C,MSVC>,$<COMPILE_LANG_AND_ID:CXX,MSVC>>:/utf-8>"
-)
 target_compile_options(
     usearch_static INTERFACE "$<$<OR:$<COMPILE_LANG_AND_ID:C,MSVC>,$<COMPILE_LANG_AND_ID:CXX,MSVC>>:/utf-8>"
 )
-
-usearch_setup_target(usearch_shared)
 usearch_setup_target(usearch_static)
 
-# The objects compile with hidden visibility, so the shared flavor exports the `USEARCH_EXPORT` entry points alone, and
-# the static siblings it links, ForkUnion and yyjson, stay inside it too.
-set_target_properties(
-    usearch_shared
-    PROPERTIES C_VISIBILITY_PRESET hidden
-               CXX_VISIBILITY_PRESET hidden
-               VISIBILITY_INLINES_HIDDEN ON
-)
-if (APPLE)
-    target_link_options(usearch_shared PRIVATE "LINKER:-exported_symbol,_usearch_*")
-elseif (CMAKE_SYSTEM_NAME MATCHES "Emscripten|WASI")
-    # `wasm-ld` has no `--exclude-libs`.
-elseif (CMAKE_SYSTEM_NAME MATCHES "^(Linux|Android|FreeBSD)$")
-    # The standard library's inline definitions, like `std::bad_variant_access`, keep default visibility under any
-    # preset, so only a version script keeps them in.
-    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/usearch_shared.map" "{ global: usearch_*; local: *; };\n")
-    target_link_options(usearch_shared PRIVATE "LINKER:--version-script=${CMAKE_CURRENT_BINARY_DIR}/usearch_shared.map")
-elseif (NOT MSVC)
-    target_link_options(usearch_shared PRIVATE "LINKER:--exclude-libs,ALL")
+# WASI SDK's `libc++.a` is not position-independent, so WASI builds the static flavor alone.
+if (CMAKE_SYSTEM_NAME STREQUAL "WASI")
+    set(usearch_libraries_ usearch_static)
+else ()
+    add_library(usearch_shared SHARED ${usearch_library_exclusion_})
+    target_link_libraries(usearch_shared PRIVATE ${USEARCH_PUNNED_LIBRARIES})
+    add_library(${PROJECT_NAME}::shared ALIAS usearch_shared)
+    set_target_properties(usearch_shared PROPERTIES LINKER_LANGUAGE CXX EXPORT_NAME shared)
+    target_include_directories(usearch_shared INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
+    # Consumers of the shared flavor import its entry points on Windows; the archive needs no decoration.
+    target_compile_definitions(usearch_shared INTERFACE USEARCH_SHARED=1)
+    target_compile_options(
+        usearch_shared INTERFACE "$<$<OR:$<COMPILE_LANG_AND_ID:C,MSVC>,$<COMPILE_LANG_AND_ID:CXX,MSVC>>:/utf-8>"
+    )
+    usearch_setup_target(usearch_shared)
+
+    # The objects compile with hidden visibility, so the shared flavor exports the `USEARCH_EXPORT` entry points alone,
+    # and the static siblings it links, ForkUnion and yyjson, stay inside it too.
+    set_target_properties(
+        usearch_shared
+        PROPERTIES C_VISIBILITY_PRESET hidden
+                   CXX_VISIBILITY_PRESET hidden
+                   VISIBILITY_INLINES_HIDDEN ON
+    )
+    if (APPLE)
+        target_link_options(usearch_shared PRIVATE "LINKER:-exported_symbol,_usearch_*")
+    elseif (CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
+        # `wasm-ld` has no `--exclude-libs`.
+    elseif (CMAKE_SYSTEM_NAME MATCHES "^(Linux|Android|FreeBSD)$")
+        # The standard library's inline definitions, like `std::bad_variant_access`, keep default visibility under any
+        # preset, so only a version script keeps them in.
+        file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/usearch_shared.map" "{ global: usearch_*; local: *; };\n")
+        target_link_options(
+            usearch_shared PRIVATE "LINKER:--version-script=${CMAKE_CURRENT_BINARY_DIR}/usearch_shared.map"
+        )
+    elseif (NOT MSVC)
+        target_link_options(usearch_shared PRIVATE "LINKER:--exclude-libs,ALL")
+    endif ()
+
+    # The shared flavor brings JeMalloc into the processes that load it, as `usearch_setup_target` does for executables;
+    # an archive links nothing.
+    if (USEARCH_WITH_JEMALLOC)
+        target_link_libraries(usearch_shared PRIVATE ${USEARCH_JEMALLOC_LIBRARY})
+    endif ()
+
+    # `SOVERSION` holds the major alone, the only break the C ABI admits.
+    set_target_properties(usearch_shared PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
+    set(usearch_libraries_ usearch_static usearch_shared)
 endif ()
-
-# The shared flavor brings JeMalloc into the processes that load it, as `usearch_setup_target` does for executables; an
-# archive links nothing.
-if (USEARCH_WITH_JEMALLOC)
-    target_link_libraries(usearch_shared PRIVATE ${USEARCH_JEMALLOC_LIBRARY})
-endif ()
-
-# `SOVERSION` holds the major alone, the only break the C ABI admits.
-set_target_properties(usearch_shared PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
-
-# Each flavor joins an export set, which the root's install lists name, so `find_package(usearch)` names them
-# `usearch::shared` and `usearch::static`.
-set_target_properties(usearch_shared PROPERTIES EXPORT_NAME shared)
-set_target_properties(usearch_static PROPERTIES EXPORT_NAME static)
+return(PROPAGATE usearch_libraries_)

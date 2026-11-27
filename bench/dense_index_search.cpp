@@ -275,7 +275,7 @@ int bench_dense_index_search(int argc, char const* const* argv) {
         truth_distances_t const distances = geometry.metric == usearch_dense_metric_euclidean_k
                                                 ? truth_distances_t::squared_k
                                                 : truth_distances_t::reported_k;
-        if (!truth_oracle(settings.seed, truth, queries_count, distances, oracle))
+        if (!truth_reference(settings.seed, truth, queries_count, distances, oracle))
             return fmt::println(stderr, "--query-neighbors=\"{}\" stores no distances past its neighbors",
                                 search.query_neighbors),
                    1;
@@ -285,7 +285,7 @@ int bench_dense_index_search(int argc, char const* const* argv) {
             fmt::println("- Ground truth ignored: --first-vector or --max-base-vectors reshapes its graph");
         std::chrono::steady_clock::time_point const scan_start = std::chrono::steady_clock::now();
         std::size_t const judged = util::min_of(search.oracle_queries.value, queries_count);
-        if (report_failure(scan_oracle(index, queries, judged, top_k, search.batch.value, oracle), "Scanning"))
+        if (report_failure(scan_reference(index, queries, judged, top_k, search.batch.value, oracle), "Scanning"))
             return 1;
         fmt::println("- Exact scan: {} queries in {:.2f} s", judged, seconds_since(scan_start));
     }

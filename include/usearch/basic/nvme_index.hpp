@@ -69,10 +69,11 @@ struct nvme_indexes_cursor;
  *      with; @c u32_t or @c u64_t.
  *  @tparam distance_type_ The distance the metrics drain and the walks rank by.
  *  @tparam queue_type_ The I/O queue every executor thread drives.
+ *  @tparam threads_type_ The pool the executor's threads come from.
  */
 template <typename codec_type_, typename key_type_ = uuid128_t, typename node_id_type_ = u32_t,
           typename distance_type_ = f64_t, typename queue_type_ = default_io_queue<dummy_waiter_t>,
-          typename row_kit_type_ = st::serial_row_kit_t,
+          typename threads_type_ = fu::dummy_pool_t, typename row_kit_type_ = st::serial_row_kit_t,
           template <typename> class atomic_ref_template_ = fu::standard_atomic_ref,
           typename wait_type_ = dummy_waiter_t>
     requires std::same_as<node_id_type_, u32_t> || std::same_as<node_id_type_, u64_t>
@@ -85,7 +86,7 @@ class nvme_parts_catalog {
     using key_t = key_type_;
     using distance_t = distance_type_;
     using queue_t = queue_type_;
-    using executor_t = nvme_executor<queue_t>;
+    using executor_t = nvme_executor<queue_t, threads_type_>;
     using medium_t = typename queue_t::medium_t;
     using arena_t = typename executor_t::arena_t;
 
@@ -2025,10 +2026,11 @@ class nvme_parts_catalog {
  *      @c u32_t or @c u64_t.
  *  @tparam distance_type_ The distance the metrics drain and the walks rank by.
  *  @tparam queue_type_ The I/O queue every executor thread drives.
+ *  @tparam threads_type_ The pool the executor's threads come from.
  */
 template <typename codec_type_, typename key_type_ = uuid128_t, typename node_id_type_ = u32_t,
           typename distance_type_ = f64_t, typename queue_type_ = default_io_queue<dummy_waiter_t>,
-          typename row_kit_type_ = st::serial_row_kit_t,
+          typename threads_type_ = fu::dummy_pool_t, typename row_kit_type_ = st::serial_row_kit_t,
           template <typename> class atomic_ref_template_ = fu::standard_atomic_ref,
           typename wait_type_ = dummy_waiter_t>
     requires std::same_as<node_id_type_, u32_t> || std::same_as<node_id_type_, u64_t>
@@ -2040,7 +2042,7 @@ class nvme_index {
 
     /** The walks every verb runs over this index's one part. */
     using catalog_t = nvme_parts_catalog<codec_type_, key_type_, node_id_type_, distance_type_, queue_type_,
-                                         row_kit_type_, atomic_ref_template_, wait_type_>;
+                                         threads_type_, row_kit_type_, atomic_ref_template_, wait_type_>;
 
     using codec_t = typename catalog_t::codec_t;
     using key_t = typename catalog_t::key_t;

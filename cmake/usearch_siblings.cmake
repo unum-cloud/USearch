@@ -57,15 +57,15 @@ set(SMASHTABLE_CUDA_ARCH "${USEARCH_CUDA_ARCH}")
 # directories of the NVMe indexes.
 usearch_sibling(
     numkong FETCHCONTENT_SOURCE_DIR_NUMKONG https://github.com/ashvardanian/NumKong
-    f4cfb1f90b5f441914eb207a6db2dd987dad354c
+    f85bdd47ca28d03c3c82716a1a1e44c465587928
 )
 usearch_sibling(
     forkunion FETCHCONTENT_SOURCE_DIR_FORKUNION https://github.com/ashvardanian/ForkUnion
-    94969cc654e6a8855dfb27f85e3c19a92ca85212
+    2797304869337c41500e8e2d1ca9bbc278c351c5
 )
 usearch_sibling(
     stringzilla FETCHCONTENT_SOURCE_DIR_STRINGZILLA https://github.com/ashvardanian/StringZilla
-    c539a4083d54319c522206d4af14a1a3e72ea9d7
+    e0bf6b066bd7f966e6eb302458c4f2d863e77f2b
 )
 usearch_sibling(
     smashtable FETCHCONTENT_SOURCE_DIR_SMASHTABLE https://github.com/ashvardanian/SmashTable
@@ -78,9 +78,9 @@ usearch_sibling(
 # pure-C ones; each `header` carries the C ABI it links. ForkUnion's `cpp/` holds `fu::pool_t`, which the executors own,
 # and its archive comes with the engine that links `forkunion::cpp`.
 set(usearch_sibling_includes_
-    $<TARGET_PROPERTY:numkong::header,INTERFACE_INCLUDE_DIRECTORIES>
+    $<TARGET_PROPERTY:numkong::types,INTERFACE_INCLUDE_DIRECTORIES>
     $<TARGET_PROPERTY:forkunion::header,INTERFACE_INCLUDE_DIRECTORIES>
-    $<TARGET_PROPERTY:stringzilla::header,INTERFACE_INCLUDE_DIRECTORIES>
+    $<TARGET_PROPERTY:stringzilla::types,INTERFACE_INCLUDE_DIRECTORIES>
     $<TARGET_PROPERTY:smashtable::header,INTERFACE_INCLUDE_DIRECTORIES>
     $<TARGET_PROPERTY:forkunion::cpp,INTERFACE_INCLUDE_DIRECTORIES>
 )

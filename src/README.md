@@ -110,7 +110,7 @@ The engine running there sizes and reuses it, and the executor rewinds it once p
 A call's arena holds the outputs alone, the results that outlive the call, so neither the C layer nor an argument structure ever stages or allocates on a verb's behalf.
 
 `usearch_executor_handle_t` holds the topology a RAM or NVMe executor was spawned over, the call holding it, and one residency's executor.
-The executor is a `std::variant` of `ram_executor_t`, `nvme_executor_t` and, per GPU vendor built, `cuda_executor_t`, `hip_executor_t` or `metal_executor_t`, whose alternative is the kind tag.
+The executor is a `std::variant` of `ram_executor<fu::pool_t>`, `nvme_executor_t` and, per GPU vendor built, `cuda_executor_t`, `hip_executor_t` or `metal_executor_t`, whose alternative is the kind tag.
 A verb whose executor kind does not match the handle's residency answers `usearch_status_device_k`.
 A null executor builds one for that call alone, with no pool, thread, ring or stream: the calling thread on RAM, blocking reads on that thread on NVMe, and each device's null legacy stream on VRAM.
 

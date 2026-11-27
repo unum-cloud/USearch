@@ -17,7 +17,7 @@ usearch_setup_target(usearch_tools HOST)
 set_target_properties(usearch_tools PROPERTIES OUTPUT_NAME usearch)
 target_link_libraries(
     usearch_tools PRIVATE ${USEARCH_PUNNED_LIBRARIES} fmt::fmt forkunion::cpp yyjson smashtable::header
-                          stringzilla::header
+                          stringzilla::types
 )
 if (USEARCH_INSTALL)
     install(TARGETS usearch_tools RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT tools)
@@ -48,7 +48,7 @@ if (MPI_C_FOUND)
                 forkunion::cpp
                 yyjson
                 smashtable::header
-                stringzilla::header
+                stringzilla::types
                 MPI::MPI_C
     )
     if (USEARCH_INSTALL)

@@ -112,7 +112,7 @@
 
 #include "usearch/utilities/blocking_files.hpp" // `native_file_t`, `open_native_file`, `read_native_file`
 #include "usearch/utilities/ram_buffers.hpp"    // `growing_buffer`
-#include "usearch/utilities/ram_device.hpp"     // `ram_executor_t`, `forkunion_allocator_t`
+#include "usearch/utilities/ram_device.hpp"     // `ram_executor`, `forkunion_allocator_t`
 #include "usearch/utilities/types.hpp"          // `status_t`, `expected`, `min_of`, `max_of`
 
 /*  `<winsock2.h>` goes first to keep Winsock 1.1 out, unless a user's earlier `<windows.h>` already
@@ -3251,22 +3251,25 @@ using default_io_queue = any_io_queue<
 /**
  *  @brief The threads a storage walk advances on, each with its scratch arena and its own queue.
  *
- *  Composes @c ram_executor_t for the threads, their arenas and the one-caller hold, and builds
- *  each queue on its own thread, so a ring's single issuer is the thread that submits to it. A call
+ *  Composes @c ram_executor for the threads, their arenas and the one-caller hold, and builds each
+ *  queue on its own thread, so a ring's single issuer is the thread that submits to it. A call
  *  registers a view's media with every queue, which keeps them until a call over another list
  *  replaces them, so a warm call over the same list registers nothing and any executor serves any
  *  view. A ring's file table keeps the last list's files open in the kernel after their index
  *  closes them, until another list replaces them or the executor is freed.
+ *
+ *  @tparam threads_type_ The pool the threads come from, as @c ram_executor takes it.
  */
-template <typename queue_type_>
+template <typename queue_type_, typename threads_type_ = fu::dummy_pool_t>
 class nvme_executor {
   public:
     using queue_t = queue_type_;
     using medium_t = typename queue_t::medium_t;
     using config_t = typename queue_t::config_t;
     using allocator_t = typename queue_t::allocator_t;
-    using arena_t = ram_executor_t::arena_t;
-    using claim_t = ram_executor_t::claim_t;
+    using threads_t = ram_executor<threads_type_>;
+    using arena_t = typename threads_t::arena_t;
+    using claim_t = typename threads_t::claim_t;
 
     static_assert(an_io_queue<queue_t>, "An executor drives queues through the I/O queue concept");
 
@@ -3277,46 +3280,16 @@ class nvme_executor {
     ~nvme_executor() noexcept { close_queues_(); }
 
     /**
-     *  @brief Spawns @p threads over @p topology under the ForkUnion facilities @p allowed names,
-     *      zero threads meaning @c ram_executor_t::default_threads, on the compute domains local to
-     *      @p near_domain, or across the machine without one, each thread's scratch holding at most
-     *      @p scratch_limit bytes, zero for @c scratch_limit_default_k.
-     *
-     *  Each queue opens with @p config on its own thread, every one on the transport thread zero's
-     *  queue picked. A nonzero @p config queue depth pins every call's depth, while zero leaves
-     *  each call to derive its own from the media it reads, the queues @p opening_depth reads
-     *  deep, at least one, until a call needs more.
-     *
-     *  @par Statuses:
-     *  - @c uninitialized_k SPDK is named without a driver.
-     *  - @c unsupported_k The build has no queue for @p config's transport, or none set up.
-     *  - @c io_k The named queue's setup was refused.
-     */
-    static expected<nvme_executor> spawn(fu_topology_t topology, std::size_t threads, config_t const& config,
-                                         fu_capabilities_t allowed = fu_capabilities_all_k,
-                                         fu_memory_domain_id_t near_domain = no_memory_domain_k,
-                                         std::size_t scratch_limit = 0, std::size_t opening_depth = 0) noexcept {
-        // The caller never runs a slice, so each thread index stays one OS thread, the single
-        // issuer a ring wants; a build without OS threads runs its one thread on the caller.
-        auto [threads_executor, spawn_status] =
-            near_domain != no_memory_domain_k
-                ? ram_executor_t::spawn_near(topology, near_domain, threads, allowed, scratch_limit)
-                : ram_executor_t::spawn(topology, threads, fu::caller_exclusive_k, allowed, scratch_limit);
-        if (failed(spawn_status)) return {nvme_executor {}, spawn_status};
-        return acquire(std::move(threads_executor), config, opening_depth);
-    }
-
-    /**
      *  @brief Takes over @p threads and opens a queue with @p config on each of its threads,
-     *      @p opening_depth reads deep without a pinned depth, as @ref spawn does, so the calling
-     *      thread alone can drive one queue without an OS thread.
+     *      @p opening_depth reads deep without a pinned depth, so the calling thread alone can
+     *      drive one queue without an OS thread.
      *
      *  @par Statuses:
      *  - @c uninitialized_k SPDK is named without a driver, or @p threads hold no pool.
      *  - @c unsupported_k The build has no queue for @p config's transport, or none set up.
      *  - @c io_k The named queue's setup was refused.
      */
-    static expected<nvme_executor> acquire(ram_executor_t&& threads, config_t const& config,
+    static expected<nvme_executor> acquire(threads_t&& threads, config_t const& config,
                                            std::size_t opening_depth = 0) noexcept {
         nvme_executor executor;
         executor.threads_ = std::move(threads);
@@ -3459,7 +3432,7 @@ class nvme_executor {
     status_t wait() noexcept { return threads_.wait(); }
 
     /** The pool, its per-domain arenas and its one-caller hold. */
-    ram_executor_t& threads() noexcept { return threads_; }
+    threads_t& threads() noexcept { return threads_; }
 
     /** Bytes of cache each core of the host pool keeps to itself. */
     std::size_t cache_bytes_per_core() const noexcept { return threads_.cache_bytes_per_core(); }
@@ -3470,7 +3443,8 @@ class nvme_executor {
     /** Reads each queue keeps outstanding at most: the pinned depth, or the deepest call's. */
     std::size_t queue_depth() const noexcept { return opened_.queue_depth; }
 
-    /** The depth the spawn's config pinned for every call, zero when each call derives its own. */
+    /** The depth the config at @ref acquire pinned for every call, zero when each call derives its
+     *  own. */
     std::size_t pinned_depth() const noexcept { return pinned_depth_; }
 
   private:
@@ -3502,12 +3476,12 @@ class nvme_executor {
     }
 
     /** The pool, the per-domain arenas and the one-caller hold. */
-    ram_executor_t threads_;
+    threads_t threads_;
 
     /** The shape every queue was opened to: its transport, depth and polling. */
     config_t opened_;
 
-    /** The depth the spawn pinned, zero when calls derive theirs. */
+    /** The depth @ref acquire pinned, zero when calls derive theirs. */
     std::size_t pinned_depth_ = 0;
 
     /** What @ref reserve_buffers last cut every queue's staging region into. */

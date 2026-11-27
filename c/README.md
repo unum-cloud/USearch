@@ -7,7 +7,7 @@ It exposes all four modalities, each served by the engine in RAM, on NVMe and on
 ## Installation
 
 ```sh
-cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D USEARCH_BUILD_SHARED=1 -D USEARCH_DENSE_DTYPES=11 && cmake --build build_release --config Release
+cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D USEARCH_BUILD_LIBRARIES=1 -D USEARCH_DENSE_DTYPES=11 && cmake --build build_release --config Release
 ```
 
 That leaves both libraries in `build_release/`, holding all eleven dense storage types; precompiled ones ship on the [releases page](https://github.com/unum-cloud/USearch/releases).
@@ -20,7 +20,7 @@ It holds both stripped libraries, the C headers, the C++ wrappers in `cpp/usearc
 A top-level build installs by default; the engine headers needing NumKong, ForkUnion, StringZilla or SmashTable never install, so their users vendor USearch through `FetchContent`.
 
 ```sh
-cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D USEARCH_BUILD_SHARED=1 -D USEARCH_INSTALL=1 -D USEARCH_DENSE_DTYPES=11
+cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D USEARCH_BUILD_LIBRARIES=1 -D USEARCH_INSTALL=1 -D USEARCH_DENSE_DTYPES=11
 cmake --build build_release --config Release
 cpack --config build_release/CPackConfig.cmake # usearch-<version>-<platform>-sdk.tar.gz, a ZIP on Windows
 ```
@@ -480,7 +480,7 @@ An insertion claims every entry before its first report, so its handler only rep
 
 ### Retrieval and Streaming
 
-`usearch_dense_get` writes every vector stored under one key into an arena, shard by shard and in insertion order within each, as the [Arenas](#arenas) example shows; an absent key leaves `vectors->data` `NULL`.
+`usearch_dense_get` writes every vector stored under one key into an arena, shard by shard and in insertion order within each, as the [Arenas](#arenas) example shows; an absent key leaves `vectors->data` as a null pointer.
 A cursor walks the graph, every entry in storage order or breadth-first from `starts`, its keys and, when asked, each entry's `links` copied into an arena batch by batch:
 
 ```c
@@ -550,7 +550,7 @@ Insertions never overlap a refinement: one running refuses it with `usearch_stat
 Nothing waits, so a service schedules refinements between its insertion bursts and retries a refused call.
 
 Without a plan the index keeps nothing of a stopped round.
-Each long verb has a plan type of its own, `usearch_dense_refine_plan_t` here and `usearch_dense_reshard_plan_t` for [resharding](#resharding), and takes it with an optional `phase` output: a `NULL` `plan` runs to the end, a `NULL` pointee opens a plan that a cancel leaves live, and a live plan continues where the cancel came, or starts the next round from the same root once the last one ended.
+Each long verb has a plan type of its own, `usearch_dense_refine_plan_t` here and `usearch_dense_reshard_plan_t` for [resharding](#resharding), and takes it with an optional `phase` output: a null `plan` runs to the end, a `NULL` pointee opens a plan that a cancel leaves live, and a live plan continues where the cancel came, or starts the next round from the same root once the last one ended.
 `phase` is a `usearch_phase_progress_t`: the `usearch_phase_t` the call stopped in, or `usearch_phase_done_k` once its round ended, with that phase's ordinal and the units it completed of its total.
 `usearch_phase_name` spells a phase as the list above does, and `usearch_phase_from_name` reads the spelling back.
 `usearch_dense_refine_plan_finish` closes the round in hand, reports it and frees the plan, whatever it answers.

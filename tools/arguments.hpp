@@ -47,7 +47,7 @@
 
 #include <fmt/format.h>
 
-#include <stringzilla/stringzilla.hpp> // `sz::string_t`
+#include <stringzilla/string.hpp> // `sz::string_t`
 
 #include "usearch/usearch.h"           // `usearch_bytes_view_t`
 #include "usearch/utilities/types.hpp" // `sz`

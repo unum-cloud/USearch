@@ -55,7 +55,7 @@ jobs:
       # The whole tree builds, so the fixtures the engine suite requires, like a seeded checkpoint, build with it.
       - name: Build the Engine Suite
         run: |
-          cmake --preset debug -D CMAKE_C_COMPILER=clang-23 -D CMAKE_CXX_COMPILER=clang++-23 -D USEARCH_BUILD_SHARED=ON -D USEARCH_BUILD_TEST=ON
+          cmake --preset debug -D CMAKE_C_COMPILER=clang-23 -D CMAKE_CXX_COMPILER=clang++-23 -D USEARCH_BUILD_LIBRARIES=ON -D USEARCH_BUILD_TEST=ON
           cmake --build --preset debug
       - name: Test the Engine Suite
         run: ctest --preset debug --tests-regex '^usearch_test_cpp$' --no-tests=error --output-on-failure

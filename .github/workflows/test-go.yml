@@ -21,7 +21,7 @@ jobs:
       - name: Build the Static Library
         run: |
           sudo apt-get update && sudo apt-get install -y g++-16
-          cmake --preset relwithdebinfo -D USEARCH_BUILD_SHARED=1
+          cmake --preset relwithdebinfo -D USEARCH_BUILD_LIBRARIES=1
           cmake --build --preset relwithdebinfo --target usearch_static
       - name: Test Go
         env: { CGO_LDFLAGS: "-L${{ github.workspace }}/build_relwithdebinfo" }

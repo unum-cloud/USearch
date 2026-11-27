@@ -181,7 +181,7 @@ TypeScript callers can narrow a caught value to the exported `USearchError` type
 ## Residency
 
 An executor and an index are each built through the residency they drive, so a direct `new usearch.Executor()` or `new usearch.DenseIndex()` throws and names the factories instead.
-An index runs its verbs only on an executor of its own residency, and `arena.describe()` reports where an arena's outputs live as `{ residency, device, vendor, vendorOrdinal, hostAccess }`, with `device` and `vendorOrdinal` `null` and `vendor` `"unknown"` for host pages.
+An index runs its verbs only on an executor of its own residency, and `arena.describe()` reports where an arena's outputs live as `{ residency, device, vendor, vendorOrdinal, hostAccess }`, with `device` and `vendorOrdinal` set to null and `vendor` set to `"unknown"` for host pages.
 
 ```js
 const hostIndex = usearch.DenseIndex.initRam({ dimensions: 128 }, [0, 1]);

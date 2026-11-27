@@ -109,7 +109,7 @@ jobs:
         include:
           - arch: x64
             platform: windows-amd64
-            configure: -D CMAKE_BUILD_TYPE=Release -D USEARCH_BUILD_SHARED=1 -D USEARCH_DENSE_DTYPES=11
+            configure: -D CMAKE_BUILD_TYPE=Release -D USEARCH_BUILD_LIBRARIES=1 -D USEARCH_DENSE_DTYPES=11
           - arch: arm64
             platform: windows-arm64
             configure: --preset msvc2026_arm64

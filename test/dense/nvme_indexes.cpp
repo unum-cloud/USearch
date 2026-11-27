@@ -76,15 +76,12 @@ static case_result_t test_uring_media_keys() {
         expect_equal(medium_status, status_code_t::success_k);
         media[list] = std::move(medium);
     }
-    fu_topology_t topology = nullptr;
-    expect_true(fu_topology_new(&topology) == fu_success_k);
     io_queue_config_t config;
     config.transport = io_transport_t::linux_uring_k;
-    auto [executor, executor_status] = executor_t::spawn(topology, 1, config);
-    if (failed(executor_status)) {
-        fu_topology_delete(topology);
-        return case_result_t::skipped("linux_uring_files_queue is refused on this machine");
-    }
+    auto [threads, threads_status] = executor_t::threads_t::on_calling_thread();
+    expect_equal(threads_status, status_code_t::success_k);
+    auto [executor, executor_status] = executor_t::acquire(std::move(threads), config);
+    if (failed(executor_status)) return case_result_t::skipped("linux_uring_files_queue is refused on this machine");
 
     // The first byte of the list holding medium `list` alone, or the status its call answered.
     auto first_byte = [&](std::size_t list, media_list_key_t key, std::size_t depth) noexcept {
@@ -112,8 +109,6 @@ static case_result_t test_uring_media_keys() {
     expect_equal(second_status, status_code_t::success_k);
     expect_equal(static_cast<unsigned>(second), 2u);
     expect_equal(executor.queue_depth(), 2u);
-    executor = executor_t {}; // the pool goes before the topology it was spawned over
-    fu_topology_delete(topology);
     return {};
 }
 

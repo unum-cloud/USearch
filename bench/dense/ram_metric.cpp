@@ -37,9 +37,6 @@
 #include <fmt/chrono.h> // `std::chrono::milliseconds` through `{}`
 #include <fmt/format.h>
 
-#include <numkong/dot.hpp>
-#include <numkong/set.hpp>
-#include <numkong/spatial.hpp>
 #include <numkong/tensor.hpp>
 #include <numkong/vector.hpp>
 
@@ -232,12 +229,17 @@ bool runs_on(machine_t const& machine) noexcept {
 }
 
 /** Build a scalar from a small unsigned - sub-byte goes through @c sub_byte_ref as
- *  raw @c int8_t, float wrappers via @c from_f32, byte-or-larger ints via the integral ctor. */
+ *  raw @c int8_t, every other scalar through the serial elementwise kit's cast. */
 template <typename scalar_>
 static auto make_scalar(unsigned value) noexcept {
     if constexpr (nk::dimensions_per_value<scalar_>() > 1) return static_cast<i8_t>(value);
-    else if constexpr (requires { scalar_::from_f32(0.0f); }) return scalar_::from_f32(static_cast<float>(value));
-    else return scalar_(value);
+    else {
+        f32_t const wide = static_cast<f32_t>(value);
+        scalar_ narrow {};
+        [[maybe_unused]] nk_status_t const status = elementwise_ladder<nk_cap_serial_k>::kit_t::cast(
+            &wide, nk_f32_k, &narrow, scalar_::dtype(), 1, nullptr);
+        return narrow;
+    }
 }
 
 /** Populates @p vec with cyclic small representable values at @p rotation. */
@@ -393,6 +395,13 @@ static void measure_distances_quad(loop_t& loop, environment_t const& env, std::
     rate_distances(loop, dim, 4, 4 * row_bytes_of<scalar_>(dim));
 }
 
+/** NumKong's own @p kernel between the @p dimensions of @p dtype in @p first and @p second.
+ *  It lives in @c ram_metric_numkong.cpp, which links the C++ SDK of NumKong, as this unit
+ *  compiles NumKong header-only for the kits; the call is what is timed, so only its status
+ *  returns, and the distance stays in the unit that computed it. */
+nk::status_t numkong_distance(nk_kernel_kind_t kernel, nk_dtype_t dtype, bytes_view_t first, bytes_view_t second,
+                              std::size_t dimensions) noexcept;
+
 /** NumKong monolithic 1-to-1 baseline using the @c nk::default_capabilities() - one
  *  candidate per call, randomly picked from the same overflowed pool as the USearch rows. */
 template <nk_kernel_kind_t kernel_, typename scalar_>
@@ -402,7 +411,8 @@ static void measure_baseline(loop_t& loop, environment_t const& env, std::size_t
     fill_cyclic(query.span(), 0);
     auto [pool, pool_status] = make_candidate_pool<scalar_>(dim);
     if (nk::failed(pool_status)) return loop.skip("candidate pool allocation failed");
-    auto query_view = query.view();
+    std::size_t const row_bytes = row_bytes_of<scalar_>(dim);
+    bytes_view_t const query_bytes {reinterpret_cast<byte_t const*>(query.data()), row_bytes};
 
     std::size_t const row_index_mask = pool.matrix.extent(0) - 1;
     split_mix_generator_t random_generator {stream_key(env.settings.seed, "rows")};
@@ -410,32 +420,10 @@ static void measure_baseline(loop_t& loop, environment_t const& env, std::size_t
     for ([[maybe_unused]] std::size_t call : loop) {
         std::size_t const row = random_generator() & row_index_mask;
         adjacency.touch(random_generator());
-        auto candidate_view = pool.matrix.view().row(row).as_vector();
-        if constexpr (kernel_ == nk_kernel_dot_k) {
-            auto [result, status] = nk::dot<scalar_>(query_view, candidate_view);
-            if (nk::failed(status)) return loop.skip("dot failed");
-            do_not_optimize(result);
-        }
-        else if constexpr (kernel_ == nk_kernel_angular_k) {
-            auto [result, status] = nk::angular<scalar_>(query_view, candidate_view);
-            if (nk::failed(status)) return loop.skip("angular failed");
-            do_not_optimize(result);
-        }
-        else if constexpr (kernel_ == nk_kernel_euclidean_k) {
-            auto [result, status] = nk::euclidean<scalar_>(query_view, candidate_view);
-            if (nk::failed(status)) return loop.skip("euclidean failed");
-            do_not_optimize(result);
-        }
-        else if constexpr (kernel_ == nk_kernel_hamming_k) {
-            auto [result, status] = nk::hamming<scalar_>(query_view, candidate_view);
-            if (nk::failed(status)) return loop.skip("hamming failed");
-            do_not_optimize(result);
-        }
-        else if constexpr (kernel_ == nk_kernel_jaccard_k) {
-            auto [result, status] = nk::jaccard<scalar_>(query_view, candidate_view);
-            if (nk::failed(status)) return loop.skip("jaccard failed");
-            do_not_optimize(result);
-        }
+        bytes_view_t const candidate_bytes {
+            reinterpret_cast<byte_t const*>(pool.matrix.view().row(row).as_vector().data()), row_bytes};
+        if (nk::failed(numkong_distance(kernel_, scalar_::dtype(), query_bytes, candidate_bytes, dim)))
+            return loop.skip("the NumKong kernel failed");
     }
     rate_distances(loop, dim, 1, row_bytes_of<scalar_>(dim));
 }

@@ -14,7 +14,7 @@ The package targets `net10.0`, the long-term-support release supported through N
 Building from source compiles the C library first, then places it where the package looks for its native assets:
 
 ```sh
-cmake --preset relwithdebinfo -D USEARCH_BUILD_SHARED=1
+cmake --preset relwithdebinfo -D USEARCH_BUILD_LIBRARIES=1
 cmake --build --preset relwithdebinfo
 mkdir -p csharp/lib/runtimes/osx-arm64/native                   # Or linux-x64 with the .so
 cp build_relwithdebinfo/libusearch_shared.dylib csharp/lib/runtimes/osx-arm64/native

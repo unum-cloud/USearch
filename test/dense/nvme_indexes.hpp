@@ -46,16 +46,19 @@ namespace unum::usearch::test::dense {
  *  spells them for a CPU class. */
 template <typename key_type_, nk_dtype_t dtype_, nk_capability_t caps_,
           typename queue_type_ = default_io_queue<fu::standard_yield_t>>
-using nvme_indexes_for = nvme_indexes<
-    key_type_, typename quads_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
-    typename tiles_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t, typename elementwise_ladder<caps_>::kit_t,
-    typename rmscast_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
-    typename visits_hash_set_ladder<caps_>::kit_t, queue_type_, fu::standard_atomic_ref, fu::standard_yield_t>;
+using nvme_indexes_for =
+    nvme_indexes<key_type_, typename quads_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
+                 typename tiles_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
+                 typename elementwise_ladder<caps_>::kit_t,
+                 typename rmscast_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
+                 typename visits_hash_set_ladder<caps_>::kit_t, queue_type_, fu::pool_t, fu::standard_atomic_ref,
+                 fu::standard_yield_t>;
 
 /** Whether a sharded index reads its parts from storage: the NVMe residency. */
 template <typename indexes_type_>
-concept an_nvme_collection =
-    std::is_same_v<typename indexes_type_::executor_t, nvme_executor<typename indexes_type_::executor_t::queue_t>>;
+concept an_nvme_collection = std::is_same_v<typename indexes_type_::executor_t,
+                                            nvme_executor<typename indexes_type_::executor_t::queue_t,
+                                                          typename indexes_type_::executor_t::threads_t::threads_t>>;
 
 /** Reads every queue of an NVMe scenario keeps outstanding: small enough that a walk's flights
  *  outnumber it, so the staged reads wait for completions. */
@@ -137,9 +140,10 @@ struct nvme_reference {
     using nvme_t = nvme_type_;
     using key_t = typename nvme_t::key_t;
     using scalar_t = typename nvme_t::scalar_t;
-    using ram_t =
-        ram_indexes<key_t, typename nvme_t::quads_kit_t, typename nvme_t::tiles_kit_t,
-                    typename nvme_t::elementwise_kit_t, typename nvme_t::rmscast_kit_t, typename nvme_t::visits_kit_t>;
+    using ram_t = ram_indexes<key_t, typename nvme_t::quads_kit_t, typename nvme_t::tiles_kit_t,
+                              typename nvme_t::elementwise_kit_t, typename nvme_t::rmscast_kit_t,
+                              typename nvme_t::visits_kit_t, dummy_waiter_t, fu::standard_atomic_ref,
+                              dummy_cache_hints_t, std::hash<key_t>, ram_executor<fu::pool_t>>;
 
     /** Whether every check since the fixture was built held. */
     checks_held_t held;
@@ -952,7 +956,9 @@ void test_nvme_indexes_executors(u64_t seed) {
     foreign.queue_depth = nvme_queue_depth_k;
     foreign.transport = executor_t::queue_t::transport() == io_transport_t::blocking_k ? io_transport_t::linux_aio_k
                                                                                        : io_transport_t::blocking_k;
-    expect_equal(executor_t::spawn(first.topology, 1, foreign).status, status_code_t::unsupported_k);
+    auto [threads, threads_status] = executor_t::threads_t::on_calling_thread();
+    expect_equal(threads_status, status_code_t::success_k);
+    expect_equal(executor_t::acquire(std::move(threads), foreign).status, status_code_t::unsupported_k);
 }
 
 /** A read that comes back short of its row stops the call: a part truncated under a live view fails
@@ -2431,8 +2437,8 @@ case_result_t test_nvme_spdk_configuration(u64_t seed, std::span<std::string_vie
 /*  The residency forms specialize templates of the enclosing @c test namespace, which only a scope
  *  enclosing it may do, so they follow the namespace at file scope and qualify what they name. */
 
-/** The NVMe form: two threads over a topology of its own, each opening the queue of the index's
- *  type, its queue @p queue_depth reads deep. */
+/** The NVMe form: two threads, the caller outside them, over a topology of its own, each opening
+ *  the queue of the index's type, its queue @p queue_depth reads deep. */
 template <us::test::dense::an_nvme_collection indexes_type_>
 struct us::test::dense_indexes_executor<indexes_type_> {
     using executor_t = typename indexes_type_::executor_t;
@@ -2455,7 +2461,10 @@ struct us::test::dense_indexes_executor<indexes_type_> {
                 environment);
         }
 #endif
-        auto [spawn_executor, spawn_status] = executor_t::spawn(topology, 2, config);
+        auto [threads, threads_status] = executor_t::threads_t::spawn(topology, 2);
+        status = threads_status;
+        if (util::failed(status)) return;
+        auto [spawn_executor, spawn_status] = executor_t::acquire(std::move(threads), config);
         status = spawn_status;
         executor = std::move(spawn_executor);
     }

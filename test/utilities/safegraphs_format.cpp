@@ -238,12 +238,12 @@ static void test_keys_widen(u64_t seed, std::string_view label) {
     }
 
     // The view widens the same keys on storage: each counts once, and the walks rank alike.
-    fu_topology_t topology = nullptr;
-    expect_true(fu_topology_new(&topology) == fu_success_k);
     {
         io_queue_config_t config;
         config.queue_depth = 64;
-        auto [executor, spawn_status] = widened_view_t::executor_t::spawn(topology, 1, config);
+        auto [threads, threads_status] = ram_executor_t::on_calling_thread();
+        expect_equal(threads_status, status_code_t::success_k);
+        auto [executor, spawn_status] = widened_view_t::executor_t::acquire(std::move(threads), config);
         expect_equal(spawn_status, status_code_t::success_k);
         widened_view_t viewed {forkunion_allocator_t {}};
         expect_equal(viewed.view(path, {}, embeddings_fixture_t::metric_k, executor), status_code_t::success_k);
@@ -271,7 +271,6 @@ static void test_keys_widen(u64_t seed, std::string_view label) {
             ranked_alike(query, to_span(keys.view().row(query).as_vector()),
                          to_span(distances.view().row(query).as_vector()));
     }
-    fu_topology_delete(topology);
     expect_errors("widened distances", comparison_family_t::approximate_k, comparison_verdict_t::assert_k,
                   distance_errors, 0);
     expect_equal(ledger.live_bytes, 0);
@@ -308,12 +307,12 @@ static void test_wide_nodes_refused(u64_t seed) {
         expect_equal(safegraphs_read_index(mapping.view(), widened, embedding_codec_t {}, serial, load_config_t {}),
                      status_code_t::config_mismatch_k);
     }
-    fu_topology_t topology = nullptr;
-    expect_true(fu_topology_new(&topology) == fu_success_k);
     {
         io_queue_config_t config;
         config.queue_depth = 64;
-        auto [executor, spawn_status] = widened_view_t::executor_t::spawn(topology, 1, config);
+        auto [threads, threads_status] = ram_executor_t::on_calling_thread();
+        expect_equal(threads_status, status_code_t::success_k);
+        auto [executor, spawn_status] = widened_view_t::executor_t::acquire(std::move(threads), config);
         expect_equal(spawn_status, status_code_t::success_k);
         widened_view_t viewed {forkunion_allocator_t {}};
         expect_equal(viewed.view(path, {}, embeddings_fixture_t::metric_k, executor), status_code_t::config_mismatch_k);
@@ -327,7 +326,6 @@ static void test_wide_nodes_refused(u64_t seed) {
         expect_equal(corrupted_view.view(path, {}, embeddings_fixture_t::metric_k, executor),
                      status_code_t::malformed_k);
     }
-    fu_topology_delete(topology);
     expect_equal(ledger.live_bytes, 0);
 }
 

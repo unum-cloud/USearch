@@ -92,7 +92,8 @@ template <                                                                    //
     typename wait_type_ = dummy_waiter_t,                                     //
     template <typename> class atomic_ref_template_ = fu::standard_atomic_ref, //
     typename cache_hints_type_ = dummy_cache_hints_t,                         //
-    typename key_hash_type_ = std::hash<key_type_>                            //
+    typename key_hash_type_ = std::hash<key_type_>,                           //
+    typename executor_type_ = ram_executor_t                                  //
     >
 struct ram_indexes {
     template <typename>
@@ -134,7 +135,7 @@ struct ram_indexes {
 
     /** The threads and their scratch every bulk verb runs on; it names no index, so one executor
      *  serves every instantiation. */
-    using executor_t = ram_executor_t;
+    using executor_t = executor_type_;
     using traversal_context_t = typename index_t::traversal_context_t;
 
     /* Scalars and views */

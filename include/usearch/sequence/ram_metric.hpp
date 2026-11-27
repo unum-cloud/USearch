@@ -75,7 +75,7 @@
 #include <numkong/set.h>     // `nk_hamming_u8_*` - the distance between two hash sketches
 #include <numkong/spatial.h> // `nk_sqeuclidean_i8_*` - the distance between two smooth sketches
 
-#include <stringzilla/stringzilla.hpp>     // `sz::string_view_t`
+#include <stringzilla/string.hpp>          // `sz::string_view_t`
 #include <stringzilla/utf8_uncased_fold.h> // `sz_utf8_uncased_fold_*` - the fold a containment stores under
 #include <stringzilla/ngrams.h>            // `sz_ngrams_*` - n-gram overlaps, MinHash sketches and residues
 
@@ -212,7 +212,7 @@ inline constexpr sz_size_t containment_window_widths_k[] = {5, 8};
 struct utf8_serial_containment_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_serial_k;
     static constexpr auto canonical_engine_init = sz_ngrams_engine_init_serial;
-    static constexpr auto canonical_overlaps = sz_ngrams_overlaps_serial;
+    static constexpr auto canonical_overlaps = sz_ngrams_overlap_counts_serial_;
 
     /** Folds the case of a text before it is stored or scored. */
     static constexpr auto canonical_fold = sz_utf8_uncased_fold_serial;
@@ -248,7 +248,7 @@ struct utf8_serial_containment_kit_t {
 struct utf8_haswell_containment_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_haswell_k;
     static constexpr auto canonical_engine_init = sz_ngrams_engine_init_haswell;
-    static constexpr auto canonical_overlaps = sz_ngrams_overlaps_haswell;
+    static constexpr auto canonical_overlaps = sz_ngrams_overlap_counts_haswell_;
 
     /** Folds the case of a text before it is stored or scored. */
     static constexpr auto canonical_fold = sz_utf8_uncased_fold_haswell;
@@ -294,7 +294,7 @@ struct utf8_haswell_containment_kit_t {
 struct utf8_skylake_containment_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_skylake_k;
     static constexpr auto canonical_engine_init = sz_ngrams_engine_init_skylake;
-    static constexpr auto canonical_overlaps = sz_ngrams_overlaps_skylake;
+    static constexpr auto canonical_overlaps = sz_ngrams_overlap_counts_skylake_;
 
     /** Folds the case of a text before it is stored or scored. */
     static constexpr auto canonical_fold = sz_utf8_uncased_fold_haswell;
@@ -339,7 +339,7 @@ struct utf8_skylake_containment_kit_t {
 struct utf8_icelake_containment_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_icelake_k;
     static constexpr auto canonical_engine_init = sz_ngrams_engine_init_skylake;
-    static constexpr auto canonical_overlaps = sz_ngrams_overlaps_skylake;
+    static constexpr auto canonical_overlaps = sz_ngrams_overlap_counts_skylake_;
 
     /** Folds the case of a text before it is stored or scored. */
     static constexpr auto canonical_fold = sz_utf8_uncased_fold_icelake;
@@ -384,7 +384,7 @@ struct utf8_icelake_containment_kit_t {
 struct utf8_neon_containment_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_neon_k;
     static constexpr auto canonical_engine_init = sz_ngrams_engine_init_neon;
-    static constexpr auto canonical_overlaps = sz_ngrams_overlaps_neon;
+    static constexpr auto canonical_overlaps = sz_ngrams_overlap_counts_neon_;
 
     /** Folds the case of a text before it is stored or scored. */
     static constexpr auto canonical_fold = sz_utf8_uncased_fold_neon;
@@ -429,7 +429,7 @@ struct utf8_neon_containment_kit_t {
 struct utf8_powervsx_containment_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_powervsx_k;
     static constexpr auto canonical_engine_init = sz_ngrams_engine_init_powervsx;
-    static constexpr auto canonical_overlaps = sz_ngrams_overlaps_powervsx;
+    static constexpr auto canonical_overlaps = sz_ngrams_overlap_counts_powervsx_;
 
     /** Folds the case of a text before it is stored or scored. */
     static constexpr auto canonical_fold = sz_utf8_uncased_fold_powervsx;
@@ -690,8 +690,9 @@ class containment_metric {
         sz_strings_view_t candidates;
         sz_strings_from_string_views(staged_.data(), count, &candidates);
         bool const scored = succeeded(last_status_) && distances.size() == engine_.count * count &&
-                            kit_t::canonical_overlaps(&engine_, &candidates, share, matches_.data(), count * widths,
-                                                      widths, nullptr) == sz_success_k;
+                            kit_t::canonical_overlaps(&engine_, &candidates, share, matches_.data(),
+                                                      count * widths * sizeof(sz_u32_t),
+                                                      widths * sizeof(sz_u32_t)) == sz_success_k;
         if (!scored && succeeded(last_status_)) last_status_ = status_code_t::out_of_memory_k;
         for (std::size_t slot = 0; slot != distances.size(); ++slot)
             distances[slot] = scored ? distance_(slot / count, matches_.data() + slot * widths,

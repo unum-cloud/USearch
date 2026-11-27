@@ -166,7 +166,7 @@ DenseViewRam["index.safegraphs"]                                   (* read-only,
 DenseViewNvme["index.safegraphs", "Executor"->drives, "Paths"->{"/dev/nvme0n1"}, "KeyTableDomains"->{0}]
 ```
 
-`DenseInitRam[dimensions]` makes an `angular` `bf16` index.
+`DenseInitRam[dimensions]` makes an angular index of bf16 vectors.
 A viewed index is read-only, and every mutating verb on it fails as `read-only`.
 `"KeyTableDomains"` holds a key table in RAM beside an NVMe view; without one, `DenseCount`, `DenseGet`, `DenseMaxsim` and hinted searches fail as `unsupported`.
 `DenseLoadNvme[path]` takes the options of `DenseViewNvme` and opens a manifest writable, so `DenseRefine` and `DenseReshard` rewrite its parts one at a time, while a lone monolith fails as `unsupported`.

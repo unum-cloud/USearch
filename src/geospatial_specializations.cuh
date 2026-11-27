@@ -134,7 +134,7 @@ struct geospatial_terrain {
 
     /** One line-of-sight scratch per thread of @p executor, each over that thread's arena. */
     static util::status_t prepare_sights(util::growing_buffer<line_of_sight_buffers_t, thread_allocator_t>& sights,
-                                         util::ram_executor_t& executor) noexcept;
+                                         util::ram_executor<fu::pool_t>& executor) noexcept;
 
     /** Asks the relation about stored @p entries against @p query into @p admissions: the relation
      *  and time, then the terrain. */
@@ -157,7 +157,7 @@ struct geospatial_terrain {
  *  the terrain its lines of sight run over. */
 template <cpu_class_t cpu_class_>
 struct geospatial_ram_variant {
-    using executor_t = util::ram_executor_t;
+    using executor_t = util::ram_executor<fu::pool_t>;
     template <typename word_type_>
     using atomic_ref = typename atomic_ref_for_cpu_class<cpu_class_>::template type<word_type_>;
     using kit_t = typename us::geospatial::geospatial_ladder<numkong_capabilities_of(cpu_class_)>::kit_t;
@@ -349,7 +349,7 @@ util::status_t geospatial_terrain<cpu_class_>::adopt_terrain(us::geospatial::ter
 template <cpu_class_t cpu_class_>
 util::status_t geospatial_terrain<cpu_class_>::prepare_sights(
     util::growing_buffer<line_of_sight_buffers_t, thread_allocator_t>& sights,
-    util::ram_executor_t& executor) noexcept {
+    util::ram_executor<fu::pool_t>& executor) noexcept {
     if (failed(sights.reserve_exactly(executor.size()))) return util::status_code_t::out_of_memory_k;
     for (std::size_t thread = 0; thread != executor.size(); ++thread)
         sights.push_back_reserved(line_of_sight_buffers_t {thread_allocator_t {executor.arena(thread)}});
@@ -941,7 +941,7 @@ struct geospatial_nvme_variant {
     template <typename word_type_>
     using atomic_ref = typename atomic_ref_for_cpu_class<cpu_class_>::template type<word_type_>;
     using index_t = basic::nvme_indexes<us::geospatial::earth_observation_codec_t, util::uuid128_t, util::u32_t,
-                                        nk_u64_t, default_io_queue_t, row_kit_of<cpu_class_>,
+                                        nk_u64_t, default_io_queue_t, fu::pool_t, row_kit_of<cpu_class_>,
                                         atomic_ref_for_cpu_class<cpu_class_>::template type, waiter_of<cpu_class_>>;
     using value_t = us::geospatial::earth_observation_t;
     using relation_t = us::geospatial::relation_t;

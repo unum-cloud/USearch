@@ -31,7 +31,7 @@
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the default reference
 
-#include <numkong/shapes.hpp> // `nk::shapes_packed`
+#include <numkong/packed.hpp> // `nk::shapes_packed`
 #include <numkong/tensor.hpp> // `nk::matrix_view` - the points of a stored entry
 
 #include "usearch/utilities/types.hpp"

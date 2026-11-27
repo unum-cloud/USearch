@@ -32,7 +32,7 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y build-essential g++-16 lld libjemalloc-dev libomp-dev
-          cmake --preset relwithdebinfo -D CMAKE_C_COMPILER=gcc-16 -D CMAKE_CXX_COMPILER=g++-16 -D USEARCH_BUILD_SHARED=1 -D USEARCH_WITH_JEMALLOC=1
+          cmake --preset relwithdebinfo -D CMAKE_C_COMPILER=gcc-16 -D CMAKE_CXX_COMPILER=g++-16 -D USEARCH_BUILD_LIBRARIES=1 -D USEARCH_WITH_JEMALLOC=1
           cmake --build --preset relwithdebinfo
       - name: Test C and C++
         run: ctest --preset relwithdebinfo --exclude-regex '^usearch_test_cpp(_stub)?$'
@@ -109,7 +109,7 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
           sudo apt update
           sudo apt install -y build-essential clang-23 lld libjemalloc-dev
-          cmake --preset relwithdebinfo -D CMAKE_C_COMPILER=clang-23 -D CMAKE_CXX_COMPILER=clang++-23 -D USEARCH_BUILD_SHARED=1 -D USEARCH_WITH_JEMALLOC=1
+          cmake --preset relwithdebinfo -D CMAKE_C_COMPILER=clang-23 -D CMAKE_CXX_COMPILER=clang++-23 -D USEARCH_BUILD_LIBRARIES=1 -D USEARCH_WITH_JEMALLOC=1
           cmake --build --preset relwithdebinfo
       - name: Test C and C++
         run: ctest --preset relwithdebinfo --exclude-regex '^usearch_test_cpp(_stub)?$'
@@ -129,7 +129,7 @@ jobs:
           git submodule update --init --recursive
       - name: Build C Library
         run: |
-          cmake -B build_old_headers -D USEARCH_BUILD_SHARED=1 -D USEARCH_BUILD_TEST=1 -D CMAKE_BUILD_TYPE=Release
+          cmake -B build_old_headers -D USEARCH_BUILD_LIBRARIES=1 -D USEARCH_BUILD_TEST=1 -D CMAKE_BUILD_TYPE=Release
           cmake --build build_old_headers --parallel 4 --target usearch_test_c
       - name: Test C Library
         run: build_old_headers/usearch_test_c
@@ -146,7 +146,7 @@ jobs:
       - name: Build C/C++
         run: |
           # Apple's linker is fast already; the preset's `lld` stands in for GNU `ld` on Linux
-          cmake --preset relwithdebinfo -D USEARCH_BUILD_SHARED=1 -D CMAKE_EXE_LINKER_FLAGS= -D CMAKE_SHARED_LINKER_FLAGS=
+          cmake --preset relwithdebinfo -D USEARCH_BUILD_LIBRARIES=1 -D CMAKE_EXE_LINKER_FLAGS= -D CMAKE_SHARED_LINKER_FLAGS=
           cmake --build --preset relwithdebinfo
       - name: Test C and C++
         run: ctest --preset relwithdebinfo --exclude-regex '^usearch_test_cpp(_stub)?$'

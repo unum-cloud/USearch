@@ -103,9 +103,9 @@ Ubuntu's own package predates the former, so [Kitware's repository](https://apt.
 The CMakeLists.txt file has a number of options you can pass:
 
 - What to build:
-  - `USEARCH_BUILD_TEST` - build the C++ test suite, and the C one alongside `USEARCH_BUILD_SHARED`
+  - `USEARCH_BUILD_TEST` - build the C++ test suite, and the C one alongside `USEARCH_BUILD_LIBRARIES`
   - `USEARCH_BUILD_BENCH` - build the C++ benchmark suite
-  - `USEARCH_BUILD_SHARED` - build and install the shared and static C libraries by default; without it they build only for a target that links them
+  - `USEARCH_BUILD_LIBRARIES` - build and install the shared and static C libraries by default; without it they build only for a target that links them
   - `USEARCH_BUILD_STUB` - a brute-force stand-in answering the same verbs over the standard library alone, for isolating a binding from the engine while bisecting one.
     It holds the same library names in a `stub/` subdirectory, so pointing a binding at it is a search path rather than a different link line.
   - `USEARCH_CUDA_ARCH`, `USEARCH_ROCM_ARCH`, `USEARCH_METAL_ARCH` - build the NVIDIA, AMD or Apple variants and suites for the codes they name below, each empty and off unless a preset or `-D` names one
@@ -141,7 +141,7 @@ The language bindings take their headers from the `numkong`, `forkunion`, and `s
 Putting all of this together, compiling all targets on most platforms should work with the following snippet:
 
 ```sh
-cmake -D CMAKE_BUILD_TYPE=Release -D USEARCH_WITH_JEMALLOC=1 -D USEARCH_BUILD_TEST=1 -D USEARCH_BUILD_BENCH=1 -D USEARCH_BUILD_SHARED=1 -B build_release
+cmake -D CMAKE_BUILD_TYPE=Release -D USEARCH_WITH_JEMALLOC=1 -D USEARCH_BUILD_TEST=1 -D USEARCH_BUILD_BENCH=1 -D USEARCH_BUILD_LIBRARIES=1 -B build_release
 
 cmake --build build_release --config Release
 build_release/usearch_test
@@ -159,7 +159,7 @@ cmake \
     -D USEARCH_WITH_JEMALLOC=1 \
     -D USEARCH_BUILD_TEST=1 \
     -D USEARCH_BUILD_BENCH=1 \
-    -D USEARCH_BUILD_SHARED=1 \
+    -D USEARCH_BUILD_LIBRARIES=1 \
     -B build_release
 
 cmake --build build_release --config Release
@@ -255,7 +255,7 @@ Every score, distance and accumulator type comes from NumKong's per-input result
 The dense tier stores `bf16`, `u1`, `i8`, `e4m3`, `f16`, `u8`, `e5m2`, `i4`, `u4`, `e3m2` and `e2m3`, whose inner products answer in `f32`, `i32` or `u32` through `dot_result_t`.
 A sum over many of those products follows NumKong's reductions through `reduce_moments_sum_t`: `f32` for the floating formats, saturating `i64` and `u64` for the integers.
 No dense computation needs `f64`, and widening to the largest type to be safe moves twice the bytes through every hot buffer.
-The C interface's `double` `usearch_distance_t` is where scores land, never what they are computed in.
+The C interface's double-precision `usearch_distance_t` is where scores land, never what they are computed in.
 
 ### Hot Entries
 
@@ -269,9 +269,11 @@ An executor is its threads and their queues, one arena per thread, and its resid
 A `NULL` executor runs the call on the calling thread.
 It creates no pool, thread, ring, SPDK queue pair or stream and probes no topology; its scratch and blocking queues live for that call only.
 Name an executor for calls that allocate nothing once warm.
-Such a call runs on `ram_executor_t::on_calling_thread()`, whose threads are an empty `fu::pool_t` and whose one arena serves that call alone; NVMe reads go through blocking queues over the files the index already holds, and VRAM work goes on each device's null legacy stream.
+Such a call runs on `ram_executor<fu::pool_t>::on_calling_thread()`, whose threads are an empty `fu::pool_t` and whose one arena serves that call alone; NVMe reads go through blocking queues over the files the index already holds, and VRAM work goes on each device's null legacy stream.
 A VRAM executor owns one non-blocking stream per device, opened or adopted at creation; caller streams are checked against their devices before any is adopted, so a refused creation leaves them the caller's.
-Tools and benchmarks open one executor and pass it to every call, and nothing outside `include/usearch/utilities/ram_device.hpp` dispatches on a raw `fu_pool_t`.
+`ram_executor` templates on its threads type, ForkUnion's serial `fu::dummy_pool_t` by default, and its static `spawn` fills ForkUnion's compiled `fu::pool_t` through a dependent call, so `include/` names only `<forkunion/types.hpp>` and the factory instantiates only in units that include ForkUnion's SDK.
+The library adds only its default thread counts and placement policy in `src/ram_spawn.hpp`.
+Tests and benchmarks spawn their executor in one row, `auto [threads, status] = util::ram_executor<fu::pool_t>::spawn(topology, count);`, and pass it to every call, and nothing outside `include/usearch/utilities/ram_device.hpp` dispatches on a raw `fu_pool_t`.
 Every executor creates its own threads and pins them to the first cores the creating thread may run on, so a caller sharing a machine between executors narrows its affinity mask before creating each.
 An NVMe executor serves RAM-resident handles through its threads too, so one executor drives a RAM index beside the views it reads.
 GPU-scheduling types, the runtime, the vendor stream and event owners, `stream_t`, the vendor executors and their concepts, live in the `Shared VRAM` regions of `include/usearch/utilities/vram_device.hpp`, its vendor headers and `src/lib.hpp`, the same text in USearch, UForm and UStore apart from the project prefix, which `.githooks/selftest --siblings` compares.
@@ -517,6 +519,11 @@ A try-only claim is an atomic bit or `fu::spin_mutex_t`, anything that waits is 
   Tools use the C ABI and never include an engine header.
 - In every U* library, a file never includes both a library's SDK umbrella `<X/X.hpp>` and its native umbrella `<X.hpp>`, and nothing under `include/` includes a header that resolves under `cpp/`.
   C headers are the ABI every SDK sits on, so they are free everywhere.
+- Each library keeps its containers in `include/<lib>/*.hpp` behind its `::types` target, which links only the C ABI, carries no define, includes no kernel and calls nothing the library exports.
+  ForkUnion and SmashTable define nothing for header-only builds, so their `::header` is also their container layer.
+- Every operation one of a library's kernels backs is a verb under `cpp/`, which links the library, calls only `_best` exports and includes only C and `::types` headers.
+- No relative header path sits in two of `c/`, `include/` and `cpp/`.
+- A product's `include/` takes a sibling's `::types` and C headers, never its `cpp/` verbs, and no binding calls a `_serial` kernel.
 
 ### CPU Classes
 
@@ -723,7 +730,7 @@ cmake -B build_artifacts \
   -D CMAKE_C_FLAGS="--target=armv7-linux-gnueabihf -march=armv7-a" \
   -D CMAKE_CXX_FLAGS="--target=armv7-linux-gnueabihf -march=armv7-a" \
   -D CMAKE_BUILD_TYPE=RelWithDebInfo \
-  -D USEARCH_BUILD_SHARED=1
+  -D USEARCH_BUILD_LIBRARIES=1
 
 cmake --build build_artifacts --config RelWithDebInfo
 file build_artifacts/libusearch_shared.so # Verify the output
@@ -762,6 +769,7 @@ These rules are shared by every sibling library, and the pre-commit hook enforce
 Tests reach the library through its public surface: the C interface in `c/usearch/*.h`, the headers under `include/usearch/`, and each binding's own API.
 The few private includes are listed under [Private Surface Waivers](#private-surface-waivers), each with what the public surface lacks.
 A kernel is never its own oracle: results are held to NumKong's kernels in the index's own metric, to exhaustive scans, or to known answers, and inputs are never drawn through the code under test.
+Tests never read a library's internal layouts, and each family's oracle is the `<verb>_reference` beside it, never a serial kernel or a helper named `_oracle`, `_naive` or `_golden`.
 Oracles never compile out, so a test checks with `expect_true` and its siblings, never `assert`, and every C and C++ test unit opens with `#undef NDEBUG // ! A test's oracle must stay live in every build`.
 Harnesses hold one mutable global, `test_run`, the run in progress.
 Checks fire on worker threads and inside helpers as well as in a case's own body, so the run counts failed checks in one place and `run_test_case` diffs that count around each case, rather than threading a tally through every call.
@@ -911,6 +919,7 @@ These test files include a header from `src/`, which no public header declares, 
 - `test/placement.cpp` includes `src/classes.hpp` for `resolve_placement`, `gpu_placement_t` and `gpu_class_bit`, the placement rules the C interface applies but does not export.
 - `test/dense/vram_nvidia.hpp`, `test/shapes/vram_index.cpp` and `test/sequence/vram_index.cpp` include `src/classes.hpp` and their modality's `src/<modality>_kits.hpp` for the class each vendor's cells run and the kit and device code the library declares for it.
 - `test/dense/ram_indexes.hpp` includes `src/dense_specializations.cuh` for `quads_kit_of` and its kin, the kits a CPU class runs a dtype on.
+- `bench/dense/ram_metric.cpp` and `bench/dense/ram_metric_numkong.cpp` include `src/dense_kits.hpp` for `dense_dtypes_t`, the storage dtypes the library compiles.
 
 ## Bindings
 
@@ -1053,7 +1062,7 @@ There is no WebAssembly target of its own — the C library is what crosses, and
 - `cmake/toolchain-wasm32-wasi.cmake` builds `wasm32_v128_k` against the WASI SDK, for Wasmtime, Wasmer and the Rust crate.
 
 ```sh
-emcmake cmake -B build_wasm32_emscripten -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-emscripten.cmake -DUSEARCH_BUILD_SHARED=1 -DUSEARCH_BUILD_TEST=1
+emcmake cmake -B build_wasm32_emscripten -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-emscripten.cmake -DUSEARCH_BUILD_LIBRARIES=1 -DUSEARCH_BUILD_TEST=1
 cmake --build build_wasm32_emscripten --target usearch_static usearch_test_c
 ctest --test-dir build_wasm32_emscripten -R '^usearch_test_c$'
 ```
@@ -1175,7 +1184,7 @@ The Go module sits at the repository root, so cgo reads the headers straight fro
 Compile the C library first, point cgo at it, and run everything from the root.
 
 ```sh
-cmake -B build_release -D USEARCH_BUILD_SHARED=1 -D USEARCH_DENSE_DTYPES=11
+cmake -B build_release -D USEARCH_BUILD_LIBRARIES=1 -D USEARCH_DENSE_DTYPES=11
 cmake --build build_release --config Release --target usearch_static -j
 
 export CGO_LDFLAGS="-L$PWD/build_release" # the archive `golang/types.go` links, NumKong and ForkUnion included
@@ -1237,7 +1246,7 @@ USearch provides CSharp bindings on .NET 10, reaching the C interface through so
 The project drives no CMake of its own, so the shared library is built first and dropped where the runtime probes for it.
 
 ```sh
-cmake -B build_artifacts -D USEARCH_BUILD_SHARED=1
+cmake -B build_artifacts -D USEARCH_BUILD_LIBRARIES=1
 cmake --build build_artifacts --config Release -j
 ```
 
@@ -1298,7 +1307,7 @@ Unpack a [WASI SDK release](https://github.com/WebAssembly/wasi-sdk/releases) an
 
 ```sh
 export WASI_SDK_PATH=/opt/wasi-sdk-34.0-x86_64-linux
-cmake -B build_wasm32_wasi -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi.cmake -DUSEARCH_BUILD_SHARED=1 -DUSEARCH_BUILD_TEST=1
+cmake -B build_wasm32_wasi -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi.cmake -DUSEARCH_BUILD_LIBRARIES=1 -DUSEARCH_BUILD_TEST=1
 cmake --build build_wasm32_wasi --target usearch_static usearch_test_c
 ctest --test-dir build_wasm32_wasi -R '^usearch_test_c$'
 ```
@@ -1310,6 +1319,7 @@ The Rust crate hands CMake the same toolchain file on its own, so `cargo build -
 
 unum.cloud renders the reference from a symbol bundle that every release holds as `usearch_docs_<version>.tar.gz`.
 A function's `@par Statuses:` block lists only its contract statuses, the conditions the caller controls or can observe, since the status enum documents once which categories any allocating, device-binding, file-touching or cancellable verb may also return.
+Markdown and Rust doc comments never set two code spans side by side; name one in prose and keep one span, as `.githooks/pre-commit` checks.
 The bundle holds each binding's own tool output: Doxygen XML for C, C++, Java and C#, griffe for Python, rustdoc JSON, a Swift symbol graph and `mojo doc`, plus the sources of the rest:
 
 ```sh

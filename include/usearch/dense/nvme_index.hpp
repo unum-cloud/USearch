@@ -120,13 +120,15 @@ template <                                                                    //
     typename quads_kit_type_ = bf16_serial_quads_kit_t,                       //
     typename visits_kit_type_ = serial_visits_hash_set_kit_t,                 //
     typename queue_type_ = default_io_queue<dummy_waiter_t>,                  //
+    typename threads_type_ = fu::dummy_pool_t,                                //
     template <typename> class atomic_ref_template_ = fu::standard_atomic_ref, //
     typename wait_type_ = dummy_waiter_t                                      //
     >
 struct nvme_index {
 
     // The sharded index walks every part of a row on one thread, through the walk machinery below.
-    template <typename, typename, typename, typename, typename, typename, typename, template <typename> class, typename>
+    template <typename, typename, typename, typename, typename, typename, typename, typename,
+              template <typename> class indexes_atomic_ref_template_, typename>
     friend struct nvme_indexes;
     template <typename, typename, typename>
     friend class util::query_walker;
@@ -137,7 +139,7 @@ struct nvme_index {
     inline static constexpr nk_dtype_t vector_dtype_k = scalar_t::dtype();
 
     using queue_t = queue_type_;
-    using executor_t = nvme_executor<queue_t>;
+    using executor_t = nvme_executor<queue_t, threads_type_>;
     using medium_t = typename queue_t::medium_t;
     using arena_t = typename executor_t::arena_t;
 

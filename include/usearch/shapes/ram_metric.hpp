@@ -40,7 +40,8 @@
 #include <span>   // `std::span`
 
 #include <numkong/cast.h>     // `nk_cast_serial` & kin - the kits' scalar casts
-#include <numkong/shapes.hpp> // `nk::shapes_packed`, and the per-backend kernels
+#include <numkong/shapes.h>   // `nk_shapes_pack_f16_neon` & kin - the per-backend kernels
+#include <numkong/packed.hpp> // `nk::shapes_packed`
 #include <numkong/tensor.hpp> // `nk::matrix_view` - the staged clouds a round packs
 
 #include "usearch/utilities/types.hpp"

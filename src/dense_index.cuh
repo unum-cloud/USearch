@@ -1927,7 +1927,7 @@ USEARCH_EXPORT void usearch_executor_drain(usearch_executor_drain_t* arguments) 
     // Held through the park and the device drain, so no submitter joins or dispatches meanwhile.
     take_idle_claim(executor);
     // Threads spin after every dispatch already, so only parking needs a word to them.
-    if (util::ram_executor_t* const threads = threads_of(executor);
+    if (util::ram_executor<fu::pool_t>* const threads = threads_of(executor);
         threads && arguments->mood != usearch_mood_spinning_k)
         threads->park();
     util::status_t const drained = visit_executor(executor, [](auto& typed) noexcept { return typed.wait(); });

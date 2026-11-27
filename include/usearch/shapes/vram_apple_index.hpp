@@ -20,7 +20,7 @@
 #include <type_traits> // `std::is_same_v` - the one scalar Apple GPUs score
 
 #include <numkong/capabilities.h> // `nk_kernel_chamfers_packed_k` & kin - the metric the kit scores under
-#include <numkong/shapes.hpp>     // `nk::a_shapes_dtype` - the scalars a kit stores
+#include <numkong/packed.hpp>     // `nk::a_shapes_dtype` - the scalars a kit stores
 #include <numkong/shapes/metal.h> // `nk_shapes_source_metal_` - the simdgroup bodies the kit calls
 
 #include "usearch/utilities/types.hpp"

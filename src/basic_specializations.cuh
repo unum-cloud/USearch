@@ -155,7 +155,8 @@ using row_kit_of = typename row_kit_for_cpu_class<cpu_class_>::type;
 /** Runs @p per_task over @p tasks taken in ascending order by the executor's threads, answering the
  *  fan-out's refusal rather than running them on one thread, which would hide a held executor. */
 template <template <typename> class atomic_ref_template_, typename per_task_type_>
-util::status_t drain_in_order(util::ram_executor_t& executor, std::size_t tasks, per_task_type_&& per_task) noexcept {
+util::status_t drain_in_order(util::ram_executor<fu::pool_t>& executor, std::size_t tasks,
+                              per_task_type_&& per_task) noexcept {
     if (!tasks) return util::status_code_t::success_k;
     // Every task bumps it, so it takes its own line, away from the locals every thread reads.
     alignas(util::default_alignment_k) std::size_t cursor = 0;
@@ -185,14 +186,14 @@ struct thread_scratch {
 
     /** Places the per-thread objects in the first arena of @p executor, which @ref prepare
      *  rewinds before it builds them. */
-    explicit thread_scratch(util::ram_executor_t& executor) noexcept
+    explicit thread_scratch(util::ram_executor<fu::pool_t>& executor) noexcept
         : traversals(thread_allocator_t {executor.arena(0)}), metrics(thread_allocator_t {executor.arena(0)}) {}
 
     /** Rewinds every arena, keeping the high-water mark of earlier calls, and builds one context
      *  sized for @p connectivity and @p expansion plus one metric from @p make_metric for each
      *  of the first @p threads threads. */
     template <typename make_metric_type_>
-    util::status_t prepare(util::ram_executor_t& executor, std::size_t threads, std::size_t connectivity,
+    util::status_t prepare(util::ram_executor<fu::pool_t>& executor, std::size_t threads, std::size_t connectivity,
                            std::size_t expansion, util::u64_t seed, make_metric_type_&& make_metric) noexcept {
         if (util::status_t const rewound = executor.reserve(0); failed(rewound)) return rewound;
         if (failed(traversals.reserve_exactly(threads)) || failed(metrics.reserve_exactly(threads)))
@@ -228,13 +229,13 @@ struct seeding_scratch {
 
     util::growing_buffer<seeding_metric_type_, thread_allocator_t> metrics;
 
-    explicit seeding_scratch(util::ram_executor_t& executor) noexcept
+    explicit seeding_scratch(util::ram_executor<fu::pool_t>& executor) noexcept
         : metrics(thread_allocator_t {executor.arena(0)}) {}
 
     /** Builds one metric from @p make_seeding for each of the first @p threads threads, staging
      *  rounds of @p round_capacity, in the arenas the call's one rewind left. */
     template <typename make_seeding_type_>
-    util::status_t prepare(util::ram_executor_t& executor, std::size_t threads, std::size_t round_capacity,
+    util::status_t prepare(util::ram_executor<fu::pool_t>& executor, std::size_t threads, std::size_t round_capacity,
                            make_seeding_type_&& make_seeding) noexcept {
         if (failed(metrics.reserve_exactly(threads))) return util::status_code_t::out_of_memory_k;
         for (std::size_t thread = 0; thread != threads; ++thread) {
@@ -259,10 +260,10 @@ struct seeding_scratch {
 /** No seeding metrics: every search walks once. */
 template <>
 struct seeding_scratch<util::unseeded_t> {
-    explicit seeding_scratch(util::ram_executor_t&) noexcept {}
+    explicit seeding_scratch(util::ram_executor<fu::pool_t>&) noexcept {}
 
     template <typename make_seeding_type_>
-    util::status_t prepare(util::ram_executor_t&, std::size_t, std::size_t, make_seeding_type_&&) noexcept {
+    util::status_t prepare(util::ram_executor<fu::pool_t>&, std::size_t, std::size_t, make_seeding_type_&&) noexcept {
         return util::status_code_t::success_k;
     }
 
@@ -289,7 +290,8 @@ template <typename indexes_type_, typename make_metric_type_, typename build_typ
 util::expected<traversal_stats_t> insert_entries(indexes_type_& index, usearch_keys_view_t keys, caller_tape_t tape,
                                                  std::size_t connectivity, std::size_t expansion,
                                                  make_metric_type_&& make_metric, build_type_&& build,
-                                                 progress_ticks_t& ticks, util::ram_executor_t& executor) noexcept {
+                                                 progress_ticks_t& ticks,
+                                                 util::ram_executor<fu::pool_t>& executor) noexcept {
     using shard_t = typename indexes_type_::index_t;
     using value_t = typename indexes_type_::value_t;
     using key_t = typename indexes_type_::key_t;
@@ -346,7 +348,7 @@ util::expected<traversal_stats_t> insert_entries(indexes_type_& index, usearch_k
 template <typename shard_type_, typename plan_type_, typename make_metric_type_>
 util::expected<thread_scratch<shard_type_, made_metric<make_metric_type_>>> prepare_refinement(
     plan_type_ const& plan, std::size_t widest_list, make_metric_type_&& make_metric,
-    util::ram_executor_t& executor) noexcept {
+    util::ram_executor<fu::pool_t>& executor) noexcept {
     thread_scratch<shard_type_, made_metric<make_metric_type_>> scratch {executor};
     std::size_t const connectivity = util::max_of(widest_list, plan.connectivity());
     util::status_t prepared = scratch.prepare(executor, executor.size(), connectivity,
@@ -371,7 +373,7 @@ util::expected<thread_scratch<shard_type_, made_metric<make_metric_type_>>> prep
 template <typename plan_type_, typename shard_type_, typename metric_type_, typename selector_type_>
 util::status_t drive_refinement(plan_type_& plan, thread_scratch<shard_type_, metric_type_>& scratch,
                                 selector_type_ const& selector, progress_ticks_t& ticks,
-                                util::ram_executor_t& executor) noexcept {
+                                util::ram_executor<fu::pool_t>& executor) noexcept {
     using count_ref_t = typename shard_type_::template atomic_ref<std::size_t>;
     // Every task bumps it, so it takes its own line, away from the locals every thread reads.
     alignas(util::default_alignment_k) std::size_t taken = plan.taken;
@@ -410,7 +412,7 @@ inline constexpr usearch_distance_t distance_unit = 1;
  *  @p round_capacity candidates gathered beside @p payload_type_. */
 template <typename payload_type_, typename body_type_>
 util::status_t with_key_predicates(predicate_t const& predicate, std::size_t round_capacity,
-                                   util::ram_executor_t& executor, body_type_&& body) noexcept {
+                                   util::ram_executor<fu::pool_t>& executor, body_type_&& body) noexcept {
     if (std::holds_alternative<no_predicate_t>(predicate)) {
         body([](std::size_t) noexcept { return util::dummy_predicate_t {}; });
         return util::status_code_t::success_k;
@@ -462,7 +464,7 @@ template <typename indexes_type_, typename make_metric_type_, typename query_of_
 util::expected<traversal_stats_t> search_entries(indexes_type_& indexes, std::size_t count, std::size_t connectivity,
                                                  make_metric_type_&& make_metric, query_of_type_&& query_of,
                                                  matches_outputs_t& outputs, search_config_t search,
-                                                 predicate_t const& predicate, util::ram_executor_t& executor,
+                                                 predicate_t const& predicate, util::ram_executor<fu::pool_t>& executor,
                                                  progress_ticks_t& ticks, usearch_matches_view_t const* hints = nullptr,
                                                  make_seeding_type_&& make_seeding = {}) noexcept {
     using shard_t = typename indexes_type_::index_t;
@@ -719,7 +721,7 @@ template <typename indexes_type_, typename make_metric_type_, typename coordinat
 util::expected<util::sample_result_t> sample_entries(indexes_type_& indexes, std::size_t connectivity,
                                                      make_metric_type_&& make_metric, basic_sample_inputs_t inputs,
                                                      basic_sample_outputs_t outputs, util::sample_config_t config,
-                                                     util::ram_executor_t& executor,
+                                                     util::ram_executor<fu::pool_t>& executor,
                                                      coordinates_type_ const& coordinates_of = {},
                                                      make_seeding_type_&& make_seeding = {}) noexcept {
     using shard_t = typename indexes_type_::index_t;
@@ -802,7 +804,7 @@ void tally_entry(variant_type_ const& variant, stats_type_& stats, value_type_ c
 template <typename traits_type_, typename variant_type_, typename stats_type_>
     requires is_ram_index<variant_type_>
 util::status_t count_entries(variant_type_& variant, usearch_key_t key, stats_type_& stats,
-                             util::ram_executor_t&) noexcept {
+                             util::ram_executor<fu::pool_t>&) noexcept {
     using shard_t = typename variant_type_::shard_t;
     variant.index.find_each(uuid_of(key), [&](shard_t const& shard, typename shard_t::node_id_t node) noexcept {
         ++stats.entries;
@@ -843,7 +845,7 @@ template <typename traits_type_, typename variant_type_>
 util::expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t key,
                                         typename traits_type_::get_outputs_t outputs,
                                         util::growing_arena<util::forkunion_allocator_t>& memory,
-                                        util::ram_executor_t& executor) noexcept {
+                                        util::ram_executor<fu::pool_t>& executor) noexcept {
     if (util::status_t const rewound = executor.reserve(0); failed(rewound)) return {0, rewound};
     using shard_t = typename variant_type_::shard_t;
     thread_allocator_t const allocator {executor.arena(0)};

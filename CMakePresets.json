@@ -81,7 +81,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "USEARCH_BUILD_TEST": "ON",
-        "USEARCH_BUILD_SHARED": "ON",
+        "USEARCH_BUILD_LIBRARIES": "ON",
         "USEARCH_DENSE_DTYPES": "11"
       }
     },
@@ -96,7 +96,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "USEARCH_BUILD_TEST": "ON",
-        "USEARCH_BUILD_SHARED": "ON"
+        "USEARCH_BUILD_LIBRARIES": "ON"
       }
     },
     {
@@ -114,7 +114,7 @@
         "CMAKE_CUDA_FLAGS_RELWITHDEBINFO": "-O0 -Xcicc -O1 -Xptxas -O0 -DNDEBUG",
         "USEARCH_BUILD_TEST": "ON",
         "USEARCH_BUILD_BENCH": "ON",
-        "USEARCH_BUILD_SHARED": "ON",
+        "USEARCH_BUILD_LIBRARIES": "ON",
         "USEARCH_WERROR": "ON"
       }
     },
@@ -155,7 +155,7 @@
         "CMAKE_CXX_FLAGS": "-ffile-prefix-map=${sourceDir}=.",
         "USEARCH_BUILD_TEST": "ON",
         "USEARCH_BUILD_BENCH": "ON",
-        "USEARCH_BUILD_SHARED": "ON"
+        "USEARCH_BUILD_LIBRARIES": "ON"
       }
     },
     {
@@ -171,7 +171,7 @@
         "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O3 -g -DNDEBUG",
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O3 -g -DNDEBUG",
         "USEARCH_BUILD_BENCH": "ON",
-        "USEARCH_BUILD_SHARED": "ON"
+        "USEARCH_BUILD_LIBRARIES": "ON"
       }
     },
     {
@@ -215,7 +215,7 @@
         "CMAKE_CUDA_HOST_COMPILER": "clang++",
         "USEARCH_BUILD_TEST": "ON",
         "USEARCH_BUILD_BENCH": "ON",
-        "USEARCH_BUILD_SHARED": "ON",
+        "USEARCH_BUILD_LIBRARIES": "ON",
         "USEARCH_CUDA_ARCH": "native"
       }
     },
@@ -255,7 +255,7 @@
         "CMAKE_CUDA_HOST_COMPILER": "clang++",
         "USEARCH_BUILD_TEST": "OFF",
         "USEARCH_BUILD_BENCH": "OFF",
-        "USEARCH_BUILD_SHARED": "ON",
+        "USEARCH_BUILD_LIBRARIES": "ON",
         "USEARCH_MULTIVERSIONED": "OFF"
       }
     },
@@ -283,11 +283,11 @@
         "STRINGZILLA_TARGET_HASWELL": "1",
         "STRINGZILLA_TARGET_SKYLAKE": "1",
         "STRINGZILLA_TARGET_ICELAKE": "1",
-        "FORKUNION_TARGET_X86_PAUSE": "1",
-        "FORKUNION_TARGET_X86_TPAUSE": "1",
-        "FORKUNION_TARGET_X86_CLDEMOTE": "1",
-        "FORKUNION_TARGET_X86_CMPCCXADD": "0",
-        "FORKUNION_TARGET_X86_RAOINT": "0"
+        "FORKUNION_TARGET_X8664_PAUSE": "1",
+        "FORKUNION_TARGET_X8664_TPAUSE": "1",
+        "FORKUNION_TARGET_X8664_CLDEMOTE": "1",
+        "FORKUNION_TARGET_X8664_CMPCCXADD": "0",
+        "FORKUNION_TARGET_X8664_RAOINT": "0"
       }
     },
     {
@@ -314,11 +314,11 @@
         "STRINGZILLA_TARGET_HASWELL": "1",
         "STRINGZILLA_TARGET_SKYLAKE": "1",
         "STRINGZILLA_TARGET_ICELAKE": "1",
-        "FORKUNION_TARGET_X86_PAUSE": "1",
-        "FORKUNION_TARGET_X86_TPAUSE": "1",
-        "FORKUNION_TARGET_X86_CLDEMOTE": "1",
-        "FORKUNION_TARGET_X86_CMPCCXADD": "0",
-        "FORKUNION_TARGET_X86_RAOINT": "0"
+        "FORKUNION_TARGET_X8664_PAUSE": "1",
+        "FORKUNION_TARGET_X8664_TPAUSE": "1",
+        "FORKUNION_TARGET_X8664_CLDEMOTE": "1",
+        "FORKUNION_TARGET_X8664_CMPCCXADD": "0",
+        "FORKUNION_TARGET_X8664_RAOINT": "0"
       }
     },
     {
@@ -418,11 +418,11 @@
         "STRINGZILLA_TARGET_HASWELL": "1",
         "STRINGZILLA_TARGET_SKYLAKE": "1",
         "STRINGZILLA_TARGET_ICELAKE": "1",
-        "FORKUNION_TARGET_X86_PAUSE": "1",
-        "FORKUNION_TARGET_X86_TPAUSE": "0",
-        "FORKUNION_TARGET_X86_CLDEMOTE": "1",
-        "FORKUNION_TARGET_X86_CMPCCXADD": "0",
-        "FORKUNION_TARGET_X86_RAOINT": "0"
+        "FORKUNION_TARGET_X8664_PAUSE": "1",
+        "FORKUNION_TARGET_X8664_TPAUSE": "0",
+        "FORKUNION_TARGET_X8664_CLDEMOTE": "1",
+        "FORKUNION_TARGET_X8664_CMPCCXADD": "0",
+        "FORKUNION_TARGET_X8664_RAOINT": "0"
       }
     },
     {
@@ -437,7 +437,7 @@
         "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O2 -gline-tables-only -DNDEBUG",
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O2 -gline-tables-only -DNDEBUG",
         "USEARCH_BUILD_TEST": "ON",
-        "USEARCH_BUILD_SHARED": "ON",
+        "USEARCH_BUILD_LIBRARIES": "ON",
         "USEARCH_ROCM_ARCH": "gfx942"
       }
     },
@@ -480,7 +480,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "USEARCH_BUILD_TEST": "ON",
-        "USEARCH_BUILD_SHARED": "ON",
+        "USEARCH_BUILD_LIBRARIES": "ON",
         "USEARCH_METAL_ARCH": "all"
       }
     },
@@ -491,7 +491,7 @@
       "description": "The C 99 library alone - what the language bindings and packages consume.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "USEARCH_BUILD_SHARED": "ON",
+        "USEARCH_BUILD_LIBRARIES": "ON",
         "USEARCH_DENSE_DTYPES": "11"
       }
     },
@@ -520,7 +520,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "USEARCH_BUILD_TEST": "ON",
-        "USEARCH_BUILD_SHARED": "ON"
+        "USEARCH_BUILD_LIBRARIES": "ON"
       }
     },
     {
@@ -606,7 +606,7 @@
       "architecture": "x64",
       "cacheVariables": {
         "USEARCH_BUILD_TEST": "ON",
-        "USEARCH_BUILD_SHARED": "ON",
+        "USEARCH_BUILD_LIBRARIES": "ON",
         "USEARCH_DENSE_DTYPES": "11"
       }
     },
@@ -620,7 +620,7 @@
       "architecture": "ARM64",
       "cacheVariables": {
         "USEARCH_BUILD_TEST": "ON",
-        "USEARCH_BUILD_SHARED": "ON",
+        "USEARCH_BUILD_LIBRARIES": "ON",
         "USEARCH_DENSE_DTYPES": "11"
       }
     }

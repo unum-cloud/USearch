@@ -31,9 +31,9 @@ option(USEARCH_INSTALL "Install the C ABI, the C++ SDK, both libraries and the d
 
 option(USEARCH_WITH_JEMALLOC "Use JeMalloc for faster memory allocations" OFF)
 
-option(USEARCH_BUILD_TEST "Compile test/, and c/test.c alongside USEARCH_BUILD_SHARED" OFF)
+option(USEARCH_BUILD_TEST "Compile test/, and c/test.c alongside USEARCH_BUILD_LIBRARIES" OFF)
 option(USEARCH_BUILD_BENCH "Compile the benchmarks in bench/" OFF)
-option(USEARCH_BUILD_SHARED "Build and install the shared and static C 99 libraries by default" OFF)
+option(USEARCH_BUILD_LIBRARIES "Build and install the shared and static C 99 libraries by default" OFF)
 option(USEARCH_BUILD_STUB "Compile a brute-force stand-in for the C 99 interface" OFF)
 option(USEARCH_BUILD_WOLFRAM "Compile a native library for the Wolfram Language bindings" OFF)
 option(USEARCH_BUILD_PYTHON "Compile the CPython extension; `scikit-build-core` switches it on" OFF)
@@ -217,9 +217,10 @@ include(cmake/usearch_gpu.cmake)
 # `CMAKE_<LANG>_FLAGS_<CONFIG>`, where a preset or a command-line switch can move them. Only what the code actually
 # depends on - fast math, the diagnostics, the sanitizers - is pinned here, and only for the host languages, so a unit
 # the CUDA driver compiles is not handed flags it rejects. `HOST` tunes for the machine at hand and takes no probe
-# verdict, since the compiler's own feature macros then say exactly what the host has.
+# verdict, since the compiler's own feature macros then say exactly what the host has. `SDK` links NumKong's C++ SDK over
+# its library in place of the inlined kernels, for a unit that calls NumKong's verbs and instantiates no kit.
 function (usearch_setup_target target_)
-    cmake_parse_arguments(PARSE_ARGV 1 arg "HOST" "" "")
+    cmake_parse_arguments(PARSE_ARGV 1 arg "HOST;SDK" "" "")
     # Compiler-specific options List of all possible compiler IDs:
     # https://cmake.org/cmake/help/latest/variable/CMAKE_LANG_COMPILER_ID.html
     if (CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
@@ -265,7 +266,11 @@ function (usearch_setup_target target_)
 
     # Header-only NumKong: each unit inlines the kernels its CPU class runs, and USearch dispatches by CPU class, so no
     # artifact needs NumKong's library or its dispatch points.
-    target_link_libraries(${target_} PRIVATE $<BUILD_INTERFACE:numkong::header>)
+    if (arg_SDK)
+        target_link_libraries(${target_} PRIVATE $<BUILD_INTERFACE:numkong::cpp>)
+    else ()
+        target_link_libraries(${target_} PRIVATE $<BUILD_INTERFACE:numkong::header>)
+    endif ()
 
     # SPDK's transports, socket layers and DPDK drivers register from static constructors, so their archives link whole.
     if (USEARCH_WITH_LINUX_SPDK)
@@ -369,8 +374,8 @@ endif ()
 # dependency-free RAM tier `usearch::header`. Only USearch's own targets export: the siblings are inside the archives,
 # and the engine headers needing them are vendored through `FetchContent`. The SDK links the archive, so it installs
 # only beside the libraries.
-if (USEARCH_BUILD_SHARED)
-    set(usearch_install_sdk_targets_ usearch_abi usearch_cpp usearch_header usearch_static usearch_shared)
+if (USEARCH_BUILD_LIBRARIES)
+    set(usearch_install_sdk_targets_ usearch_abi usearch_cpp usearch_header ${usearch_libraries_})
 else ()
     set(usearch_install_sdk_targets_ usearch_abi usearch_header)
 endif ()

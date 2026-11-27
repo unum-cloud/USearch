@@ -3,20 +3,18 @@
  *  @author Ash Vardanian
  *  @date April 21, 2026
  *  @brief Smoke tests for the 1-to-1, 1-to-4, and tiled kernels of @c dense/ram_metric.hpp against
- *      NumKong's monolithic 1-to-1 reference.
+ *      @c distance_reference, summed in @c f64.
  *
- *  The reference is @c nk::dot / @c nk::angular / @c nk::sqeuclidean, and every scalar the library
- *  stores runs at the serial floor and at every rung a CPU class ships. USearch's @c distance and
- *  @c distances entry points route a kit (per scalar + capability) through a single trampoline, the
- *  metric a runtime argument of its epilogue. The test:
+ *  Every scalar the library stores runs at the serial floor and at every rung a CPU class ships.
+ *  USearch's @c distance and @c distances entry points route a kit (per scalar + capability)
+ *  through a single trampoline, the metric a runtime argument of its epilogue. The test:
  *
  *  1. Walks every stored scalar in shrinking dynamic range and every @c (kernel,scalar,capability)
  *     tuple inside @c test_ram_metric. The concept @c dense::a_quads_supported_kernel gates each
  *     call, so combinations not yet adapted compile to no-ops and new kits light up their cells.
- *  2. For each supported tuple and three dimensions, computes a baseline distance with NumKong's
- *     monolithic API - @c nk::dot returns the raw inner product, wrapped to <tt>1 - dot</tt> for the dot
- *     kernel; @c nk::sqeuclidean is compared to USearch's squared euclidean), then calls
- *     @c distance (1-to-1) and @c distances (1-to-4) and compares with a relative tolerance.
+ *  2. For each supported tuple and three dimensions, computes @c distance_reference from the
+ *     values the vectors hold, then calls @c distance (1-to-1) and @c distances (1-to-4) and
+ *     compares with a relative tolerance.
  *  3. For tuples with a matrix engine, @c check_tiles packs one tile of queries plus a ragged tail,
  *     streams stored rows against the pack, finalizes the raw dots through the quads kit, and
  *     compares every cell against @c distance, skipping where the machine lacks the engine.
@@ -39,9 +37,6 @@
 
 #include <fmt/format.h>
 
-#include <numkong/dot.hpp>
-#include <numkong/set.hpp>
-#include <numkong/spatial.hpp>
 #include <numkong/vector.hpp>
 
 #include "usearch/dense/ram_metric.hpp"
@@ -78,37 +73,29 @@ constexpr comparison_family_t dense_comparison_family() noexcept {
     return kernel_ == nk_kernel_hamming_k ? comparison_family_t::exact_k : comparison_family_t::approximate_k;
 }
 
-/** Computes the reference distance via NumKong's monolithic 1-to-1 API, adjusted so the value
- *  matches USearch's convention - dot returns (1-inner), angular returns (1-cos_sim) clamped to
- *  [0,2], euclidean is sqrt'd via @c nk::euclidean. */
+/** The distance USearch reports between two vectors, summed in @c f64 from the values they hold:
+ *  dot as <tt>1 - inner</tt>, angular as <tt>1 - cos</tt> floored at 0, euclidean rooted, hamming as
+ *  the differing bits, and jaccard as one minus the shared share of the set bits. */
 template <nk_kernel_kind_t kernel_, typename scalar_>
-static f32_t reference_distance(nk::vector_view<scalar_> first_vector,
+static f32_t distance_reference(nk::vector_view<scalar_> first_vector,
                                 nk::vector_view<scalar_> second_vector) noexcept {
-    if constexpr (kernel_ == nk_kernel_dot_k) {
-        auto const [inner_product, status] = nk::dot<scalar_>(first_vector, second_vector);
-        if (nk::failed(status)) return (std::numeric_limits<f32_t>::max)();
-        return f32_t(1) - static_cast<f32_t>(inner_product);
+    f64_t inner = 0, first_sumsq = 0, second_sumsq = 0, squared_gap = 0, differing = 0, shared = 0, either = 0;
+    for (std::size_t dimension = 0; dimension != first_vector.size(); ++dimension) {
+        f64_t const first = widened_value<scalar_>(first_vector[dimension]);
+        f64_t const second = widened_value<scalar_>(second_vector[dimension]);
+        inner += first * second, first_sumsq += first * first, second_sumsq += second * second;
+        squared_gap += (first - second) * (first - second), differing += first != second;
+        shared += first != 0 && second != 0, either += first != 0 || second != 0;
     }
+    if constexpr (kernel_ == nk_kernel_dot_k) return static_cast<f32_t>(1 - inner);
     else if constexpr (kernel_ == nk_kernel_angular_k) {
-        auto const [angular_value, status] = nk::angular<scalar_>(first_vector, second_vector);
-        if (nk::failed(status)) return (std::numeric_limits<f32_t>::max)();
-        return static_cast<f32_t>(angular_value);
+        if (first_sumsq == 0 && second_sumsq == 0) return 0;
+        if (inner == 0) return 1;
+        return static_cast<f32_t>(max_of<f64_t>(0, 1 - inner / std::sqrt(first_sumsq * second_sumsq)));
     }
-    else if constexpr (kernel_ == nk_kernel_euclidean_k) {
-        auto const [euclidean_value, status] = nk::euclidean<scalar_>(first_vector, second_vector);
-        if (nk::failed(status)) return (std::numeric_limits<f32_t>::max)();
-        return static_cast<f32_t>(euclidean_value);
-    }
-    else if constexpr (kernel_ == nk_kernel_hamming_k) {
-        auto const [hamming_value, status] = nk::hamming<scalar_>(first_vector, second_vector);
-        if (nk::failed(status)) return (std::numeric_limits<f32_t>::max)();
-        return static_cast<f32_t>(hamming_value);
-    }
-    else if constexpr (kernel_ == nk_kernel_jaccard_k) {
-        auto const [jaccard_value, status] = nk::jaccard<scalar_>(first_vector, second_vector);
-        if (nk::failed(status)) return (std::numeric_limits<f32_t>::max)();
-        return static_cast<f32_t>(jaccard_value);
-    }
+    else if constexpr (kernel_ == nk_kernel_euclidean_k) return static_cast<f32_t>(std::sqrt(squared_gap));
+    else if constexpr (kernel_ == nk_kernel_hamming_k) return static_cast<f32_t>(differing);
+    else if constexpr (kernel_ == nk_kernel_jaccard_k) return either != 0 ? static_cast<f32_t>(1 - shared / either) : 0;
 }
 
 /** No-op overload picked when the (kernel, scalar, caps) tuple isn't wired up - lets the caller
@@ -152,10 +139,10 @@ static void check_quads(std::size_t dim) noexcept {
     auto third_candidate_norms = norms<quads_kit_t>(third_candidate_view);
     auto fourth_candidate_norms = norms<quads_kit_t>(fourth_candidate_view);
 
-    f32_t const first_reference = reference_distance<kernel_>(query_view, first_candidate_view);
-    f32_t const second_reference = reference_distance<kernel_>(query_view, second_candidate_view);
-    f32_t const third_reference = reference_distance<kernel_>(query_view, third_candidate_view);
-    f32_t const fourth_reference = reference_distance<kernel_>(query_view, fourth_candidate_view);
+    f32_t const first_reference = distance_reference<kernel_>(query_view, first_candidate_view);
+    f32_t const second_reference = distance_reference<kernel_>(query_view, second_candidate_view);
+    f32_t const third_reference = distance_reference<kernel_>(query_view, third_candidate_view);
+    f32_t const fourth_reference = distance_reference<kernel_>(query_view, fourth_candidate_view);
 
     f32_t const first_measured = distance<quads_kit_t>(kernel_, query_view, query_norms,
                                                        first_candidate_view, //
@@ -280,7 +267,7 @@ static void check_kernel() noexcept {
     check_tiles<kernel_, scalar_, nk_cap_sme_k>();
 }
 
-/** Every kernel of the stored @p scalar_ at every rung, against NumKong's reference. */
+/** Every kernel of the stored @p scalar_ at every rung, against @c distance_reference. */
 template <typename scalar_>
 static void test_ram_metric() noexcept {
     check_kernel<nk_kernel_dot_k, scalar_>();

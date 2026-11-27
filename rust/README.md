@@ -115,7 +115,7 @@ let matches = std::thread::scope(|scope| {
 })?;
 ```
 
-The library reads a deferred call's inputs after the verb returns, so a deferred receiver takes owned inputs: keys in a `Vec` or an array, rows in a NumKong `Matrix` or a `'static` `MatrixView`, a `PathBuf`, `String` or `'static` path, and `'static` configs, handlers and value lookups.
+The library reads a deferred call's inputs after the verb returns, so a deferred receiver takes owned inputs: keys in a `Vec` or an array, rows in a NumKong `Matrix` or a `MatrixView` with a static lifetime, a `PathBuf`, `String` or `'static` path, and `'static` configs, handlers and value lookups.
 Passing `&[Key]` or `&MatrixView` fails to compile with "a deferred receiver needs owned inputs", and a config or view referencing a local fails as "does not live long enough".
 A `Deferred` keeps its outcome, arguments, inputs and output slots inline, pinned where it is first polled or waited on, so a deferred call allocates nothing, and `Box::pin` happens only if you choose it.
 

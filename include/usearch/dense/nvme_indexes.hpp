@@ -69,6 +69,7 @@ template <                                                                    //
     typename rmscast_kit_type_ = no_rmscast_kit_t,                            //
     typename visits_kit_type_ = serial_visits_hash_set_kit_t,                 //
     typename queue_type_ = default_io_queue<dummy_waiter_t>,                  //
+    typename threads_type_ = fu::dummy_pool_t,                                //
     template <typename> class atomic_ref_template_ = fu::standard_atomic_ref, //
     typename wait_type_ = dummy_waiter_t                                      //
     >
@@ -83,7 +84,8 @@ struct nvme_indexes {
     using key_t = key_type_;
 
     /** The one-part index, whose walks every verb drives over all parts at once. */
-    using index_t = nvme_index<quads_kit_type_, visits_kit_type_, queue_type_, atomic_ref_template_, wait_type_>;
+    using index_t =
+        nvme_index<quads_kit_type_, visits_kit_type_, queue_type_, threads_type_, atomic_ref_template_, wait_type_>;
 
     /** The CPU class's reference over the words one call's threads share, and its waiter. */
     template <typename word_type_>

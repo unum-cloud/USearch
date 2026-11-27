@@ -207,9 +207,9 @@ static void test_shapes_vram_collection(u64_t seed, cell_vendor_t::executor_t& e
     generate_clouds(kind, seed, clouds.span(), to_writable_span(points));
     for (std::size_t entry = 0; entry != clouds_count; ++entry) {
         for (std::size_t coordinate = 0; coordinate != points[entry] * 3; ++coordinate)
-            stored(entry, coordinate) = scalar_type_(clouds(entry, coordinate));
-        auto const [pack_bytes, pack_size_status] = nk::shapes_pack_size<scalar_type_>(points[entry], 0);
-        if (!expect_true(succeeded(pack_size_status))) return;
+            stored(entry, coordinate) = narrowed_value<scalar_type_>(clouds(entry, coordinate));
+        nk_size_t pack_bytes = 0;
+        if (!expect_true(serial_kit_t::pack_size(points[entry], &pack_bytes) == nk_success_k)) return;
         offsets.push_back(offsets.back() + pack_bytes);
     }
     auto stored_cloud = [&](std::size_t entry) noexcept {
@@ -217,9 +217,9 @@ static void test_shapes_vram_collection(u64_t seed, cell_vendor_t::executor_t& e
     };
     std::vector<byte_t, nk::aligned_allocator<byte_t>> tape(offsets.back());
     for (std::size_t entry = 0; entry != clouds_count; ++entry)
-        expect_true(!nk::failed(nk::shapes_pack<scalar_type_>(
-            reinterpret_cast<typename scalar_type_::raw_t const*>(stored_cloud(entry).data()), points[entry],
-            tape.data() + offsets[entry], 0)));
+        expect_true(
+            serial_kit_t::pack(reinterpret_cast<typename scalar_type_::raw_t const*>(stored_cloud(entry).data()),
+                               points[entry], tape.data() + offsets[entry], nullptr) == nk_success_k);
 
     // The serial distances of every query to every stored cloud, over the packs the GPU stores, and
     // the `wanted_k`-th of each query's, which bounds a match.
@@ -251,7 +251,7 @@ static void test_shapes_vram_collection(u64_t seed, cell_vendor_t::executor_t& e
     expect_true(bool(ram_index.reserve(count)));
     for (std::size_t entry = 0; entry != count; ++entry) {
         std::array const cloud {stored_cloud(entry)};
-        auto [value, pack_status] = value_t::make(cloud, value_allocator, 0);
+        auto [value, pack_status] = value_t::make(cloud, value_allocator, serial_kit_t::pack_size, serial_kit_t::pack);
         if (!expect_true(succeeded(pack_status))) return;
         util::uuid128_t const key = uuid_of(entry);
         expect_equal(ram_index
@@ -264,7 +264,8 @@ static void test_shapes_vram_collection(u64_t seed, cell_vendor_t::executor_t& e
     nk::vector<f64_t> found = make_vector<f64_t>(wanted_k);
     for (std::size_t query = 0; query != recall_samples_k; ++query) {
         std::array const cloud {stored_cloud(count + query)};
-        auto const [value, pack_status] = value_t::make(cloud, value_allocator, 0);
+        auto const [value, pack_status] = value_t::make(cloud, value_allocator, serial_kit_t::pack_size,
+                                                        serial_kit_t::pack);
         if (!expect_true(succeeded(pack_status))) return;
         expect_equal(ram_index.search(value, {expansion_k}, metric, ram_context).status, status_code_t::success_k);
         std::size_t const found_count = min_of(wanted_k, ram_context.results.size());

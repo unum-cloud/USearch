@@ -807,7 +807,7 @@ def test_search_rejects_an_overflowing_request(executor, seed: int):
 
 @pytest.mark.parametrize("ndim", [97, 256])
 @pytest.mark.parametrize("metric", SPATIAL_METRICS)
-def test_recall_against_the_oracle(executor, ndim: int, metric: DenseMetric, seed: int):
+def test_recall_against_the_reference(executor, ndim: int, metric: DenseMetric, seed: int):
     """The index must return most of what a brute-force scan would, in every metric."""
     index, vectors = build_index(512, ndim, executor, metric=metric, seed=seed)
     stored = bf16_rounded(vectors)
@@ -824,7 +824,7 @@ def test_recall_survives_quantization(executor, quantization: Scalar, seed: int)
 
 
 @pytest.mark.parametrize("quantization", [Scalar.BF16, Scalar.F16, Scalar.I8])
-def test_distances_agree_with_the_oracle(executor, quantization: Scalar, seed: int):
+def test_distances_agree_with_the_reference(executor, quantization: Scalar, seed: int):
     """A reported distance matches what NumKong computes for the same pair, within tolerance."""
     index, vectors = build_index(128, 64, executor, quantization=quantization, seed=seed)
     queries = vectors[:8]

@@ -20,7 +20,7 @@
 #include <utility>     // `std::swap`, `std::move`
 
 #include <forkunion/forkunion.h>    // `fu_local_memory_of`, `fu_memory_domain_id_at_index`
-#include <forkunion/forkunion.hpp>  // `fu::pool_t`, `fu::default_threads_count` - the threads
+#include <forkunion/types.hpp>      // `fu::dummy_pool_t`, `fu::dispatched_status` - the threads
 #include <forkunion/allocators.hpp> // `fu::domain_allocator_t`, `fu::page_size_1g_k` - the payload pages
 #include <forkunion/locks.hpp>      // `fu::spin_mutex_t` - the hold
 
@@ -187,9 +187,17 @@ inline std::size_t smallest_cache_bytes_per_core(fu_topology_t topology) noexcep
 /** Bytes of scratch each thread of an executor holds at most when its caller names no limit. */
 inline constexpr std::size_t scratch_limit_default_k = std::size_t {1} << 30;
 
-/** The threads a bulk verb advances on and the scratch they walk with - one arena per
- *  thread, so a fan-out never references or waits. Admits one caller at a time. */
-struct ram_executor_t {
+/**
+ *  @brief The threads a bulk verb advances on and the scratch they walk with - one arena per
+ *      thread, so a fan-out never references or waits. Admits one caller at a time.
+ *  @tparam threads_type_ The pool the threads come from: ForkUnion's serial @c fu::dummy_pool_t, or
+ *      ForkUnion's compiled @c fu::pool_t, which @ref spawn fills.
+ */
+template <typename threads_type_ = fu::dummy_pool_t>
+struct ram_executor {
+
+    /** The pool every fan-out dispatches on. */
+    using threads_t = threads_type_;
 
     /** One thread's scratch on its own memory domain: chunks that double and never move,
      *  rewound between calls. */
@@ -201,13 +209,13 @@ struct ram_executor_t {
     /** The label the pool's threads hold in the OS. */
     inline static constexpr char const executor_name_k[] = "usearch";
 
-    ram_executor_t() = default;
-    ram_executor_t(ram_executor_t&& other) noexcept { swap(other); }
-    ram_executor_t& operator=(ram_executor_t&& other) noexcept { return swap(other), *this; }
-    ram_executor_t(ram_executor_t const&) = delete;
-    ram_executor_t& operator=(ram_executor_t const&) = delete;
+    ram_executor() = default;
+    ram_executor(ram_executor&& other) noexcept { swap(other); }
+    ram_executor& operator=(ram_executor&& other) noexcept { return swap(other), *this; }
+    ram_executor(ram_executor const&) = delete;
+    ram_executor& operator=(ram_executor const&) = delete;
 
-    void swap(ram_executor_t& other) noexcept {
+    void swap(ram_executor& other) noexcept {
         std::swap(arenas_per_thread_, other.arenas_per_thread_);
         std::swap(threads_, other.threads_);
         std::swap(cache_bytes_per_core_, other.cache_bytes_per_core_);
@@ -220,83 +228,13 @@ struct ram_executor_t {
      *  @par Statuses:
      *  - @c out_of_memory_k The arena's slot could not be allocated.
      */
-    static expected<ram_executor_t> on_calling_thread(std::size_t scratch_limit = 0) noexcept {
-        ram_executor_t executor;
+    static expected<ram_executor> on_calling_thread(std::size_t scratch_limit = 0) noexcept {
+        ram_executor executor;
         if (failed(executor.arenas_per_thread_.reserve_exactly(1)))
             return {std::move(executor), {status_code_t::out_of_memory_k, "No room for the call's arena"}};
         executor.arenas_per_thread_.push_back_reserved(
             arena_t {forkunion_allocator_t {no_memory_domain_k}, limit_of_(scratch_limit)});
         return {std::move(executor), status_code_t::success_k};
-    }
-
-    /** The thread count a zero ask means: ForkUnion's @c fu::default_threads_count over the cores
-     *  of @p topology, or the caller alone in a build without OS threads. */
-    static expected<std::size_t> default_threads(fu_topology_t topology) noexcept {
-        if (!(fu_comptime_capabilities() & fu_capability_os_threads_k)) return {1, status_code_t::success_k};
-        std::size_t cores = 0;
-        if (fu_logical_cores_count(topology, &cores) != fu_success_k) return {0, status_code_t::uninitialized_k};
-        return {fu::default_threads_count(cores), status_code_t::success_k};
-    }
-
-    /** Spawns @p threads over @p topology and takes the pool, each thread's scratch holding at most
-     *  @p scratch_limit bytes; zero threads means @ref default_threads. One thread is the caller
-     *  itself, and a build without OS threads refuses more. */
-    static expected<ram_executor_t> spawn(fu_topology_t topology, std::size_t threads,
-                                          fu_capabilities_t allowed = fu_capabilities_all_k,
-                                          std::size_t scratch_limit = 0) noexcept {
-        if (!threads) {
-            auto const [count, status] = default_threads(topology);
-            if (failed(status)) return {{}, status};
-            threads = count;
-        }
-        return spawn(topology, threads, threads != 1 ? fu::caller_exclusive_k : fu::caller_inclusive_k, allowed,
-                     scratch_limit);
-    }
-
-    /** Spawns @p threads over @p topology with the caller inside the pool or outside it, as
-     *  @p exclusivity says, using only the ForkUnion facilities @p allowed names, each thread's
-     *  scratch holding at most @p scratch_limit bytes; zero threads means @ref default_threads. */
-    static expected<ram_executor_t> spawn(fu_topology_t topology, std::size_t threads,
-                                          fu::caller_exclusivity_t exclusivity, fu_capabilities_t allowed,
-                                          std::size_t scratch_limit = 0) noexcept {
-        if (!threads) {
-            auto const [count, status] = default_threads(topology);
-            if (failed(status)) return {{}, status};
-            threads = count;
-        }
-        // A flat pool, unlike a distributed one, never pins the caller's own thread.
-        if (exclusivity == fu::caller_inclusive_k)
-            allowed = static_cast<fu_capabilities_t>(allowed & ~fu_capability_place_memory_on_domain_k);
-        fu::pool_t created;
-        status_t const spawned = dispatch_status_(
-            created.spawn(topology, threads, exclusivity, allowed, executor_name_k));
-        if (failed(spawned)) return {{}, spawned};
-        return acquire_(topology, std::move(created), scratch_limit);
-    }
-
-    /**
-     *  @brief Spawns @p threads over the compute domains local to @p memory_domain, the caller
-     *      outside the pool, using only the ForkUnion facilities @p allowed names, each thread's
-     *      scratch holding at most @p scratch_limit bytes; zero threads means @ref default_threads.
-     *
-     *  @par Statuses:
-     *  - @c unsupported_k More than one thread in a build without OS threads, or placement masked
-     *    off on a machine of several memory domains.
-     *  - @c invalid_argument_k No compute domain is local to @p memory_domain.
-     */
-    static expected<ram_executor_t> spawn_near(fu_topology_t topology, fu_memory_domain_id_t memory_domain,
-                                               std::size_t threads, fu_capabilities_t allowed,
-                                               std::size_t scratch_limit = 0) noexcept {
-        if (!threads) {
-            auto const [count, status] = default_threads(topology);
-            if (failed(status)) return {{}, status};
-            threads = count;
-        }
-        fu::pool_t created;
-        status_t const spawned = dispatch_status_(
-            created.spawn_near(topology, memory_domain, threads, fu::caller_exclusive_k, allowed, executor_name_k));
-        if (failed(spawned)) return {{}, spawned};
-        return acquire_(topology, std::move(created), scratch_limit);
     }
 
     /**
@@ -356,7 +294,7 @@ struct ram_executor_t {
     status_t unsafe_for_threads(fu_for_threads_t callback, void* context) noexcept {
         // Thread 0 may end the call before this returns, so no other caller may read the token.
         fu_generation_t generation = 0;
-        return dispatch_status_(threads_.unsafe_for_threads(callback, context, generation));
+        return dispatch_status(threads_.unsafe_for_threads(callback, context, generation));
     }
 
     /** Waits until the dispatch in flight, if any, is over; only the claim holder waits. */
@@ -384,8 +322,10 @@ struct ram_executor_t {
      */
     template <typename callback_type_>
     status_t for_threads(callback_type_&& callback) noexcept {
-        return dispatch_status_(threads_.for_threads(
-            [&](fu::thread_in_domain_t pinned) noexcept { callback(pinned.thread, pinned.compute_domain); }));
+        return dispatch_status(fu::dispatched_status(
+            threads_.for_threads([&](typename threads_t::thread_in_domain_t thread_in_domain) noexcept {
+                callback(thread_in_domain.thread, thread_in_domain.compute_domain);
+            })));
     }
 
     /**
@@ -400,13 +340,11 @@ struct ram_executor_t {
     template <typename callback_type_>
     status_t for_tasks(std::size_t tasks, callback_type_&& callback) noexcept {
         if (!tasks) return status_code_t::success_k;
-        return dispatch_status_(
-            threads_.for_n_dynamic(tasks, [&](std::size_t task, fu::thread_in_domain_t pinned) noexcept {
-                callback(task, pinned.thread, pinned.compute_domain);
-            }));
+        return dispatch_status(fu::dispatched_status(threads_.for_n_dynamic(
+            tasks, [&](std::size_t task, typename threads_t::thread_in_domain_t thread_in_domain) noexcept {
+                callback(task, thread_in_domain.thread, thread_in_domain.compute_domain);
+            })));
     }
-
-  private:
 
     /**
      *  @brief Takes over @p taken, owned and deleted here from now on - even on failure. Colocates
@@ -416,9 +354,9 @@ struct ram_executor_t {
      *  @par Statuses:
      *  - @c uninitialized_k The pool has no workers.
      */
-    static expected<ram_executor_t> acquire_(fu_topology_t topology, fu::pool_t&& taken,
-                                             std::size_t scratch_limit) noexcept {
-        ram_executor_t executor;
+    static expected<ram_executor> acquire(fu_topology_t topology, threads_t&& taken,
+                                          std::size_t scratch_limit = 0) noexcept {
+        ram_executor executor;
         executor.threads_ = std::move(taken);
         std::size_t const threads = executor.threads_.threads_count();
         if (!threads) return {std::move(executor), status_code_t::uninitialized_k};
@@ -444,14 +382,39 @@ struct ram_executor_t {
         return {std::move(executor), status_code_t::success_k};
     }
 
-    /** The bytes an arena holds at most under a @p scratch_limit, zero taking the default. */
-    static std::size_t limit_of_(std::size_t scratch_limit) noexcept {
-        return scratch_limit ? scratch_limit : scratch_limit_default_k;
+    /**
+     *  @brief Spawns @p threads of a new pool over @p topology, a @c fu_topology_t or ForkUnion's
+     *      @c fu::topology_t, and takes it as @ref acquire does; only on the compute domains local
+     *      to @p memory_domain unless it is @ref no_memory_domain_k. Instantiates only where
+     *      ForkUnion's SDK declares @c threads_type_.
+     *
+     *  @par Statuses:
+     *  - @c unsupported_k More than one thread in a build without OS threads.
+     *  - @c invalid_argument_k No compute domain is local to @p memory_domain.
+     */
+    template <typename topology_type_>
+    static expected<ram_executor> spawn(topology_type_ const& topology, std::size_t threads,
+                                        fu::caller_exclusivity_t exclusivity = fu::caller_exclusive_k,
+                                        fu_capabilities_t allowed = fu_capabilities_all_k,
+                                        fu_memory_domain_id_t memory_domain = no_memory_domain_k,
+                                        std::size_t scratch_limit = 0) noexcept {
+        static_assert(!std::is_same_v<threads_type_, fu::dummy_pool_t>,
+                      "The serial pool spawns no threads: take `on_calling_thread` instead");
+        fu_topology_t handle = nullptr;
+        if constexpr (std::is_same_v<topology_type_, fu_topology_t>) handle = topology;
+        else handle = topology.get();
+        threads_t created;
+        status_t const spawned = dispatch_status(
+            memory_domain == no_memory_domain_k
+                ? created.spawn(handle, threads, exclusivity, allowed, executor_name_k)
+                : created.spawn_near(handle, memory_domain, threads, exclusivity, allowed, executor_name_k));
+        if (failed(spawned)) return {{}, spawned};
+        return acquire(handle, std::move(created), scratch_limit);
     }
 
     /** What a fan-out or spawn answers for ForkUnion's @p status: a nested or concurrent dispatch
      *  is @c contended_k, a pool without workers @c uninitialized_k. */
-    static status_t dispatch_status_(fu::status_t status) noexcept {
+    static status_t dispatch_status(fu::status_t status) noexcept {
         switch (static_cast<fu_status_t>(status)) {
         case fu_success_k: return status_code_t::success_k;
         case fu_bad_alloc_k: return status_code_t::out_of_memory_k;
@@ -464,20 +427,30 @@ struct ram_executor_t {
         }
     }
 
-    /** One arena per thread, colocated with it once at @ref acquire_; contexts point into it,
+  private:
+
+    /** The bytes an arena holds at most under a @p scratch_limit, zero taking the default. */
+    static std::size_t limit_of_(std::size_t scratch_limit) noexcept {
+        return scratch_limit ? scratch_limit : scratch_limit_default_k;
+    }
+
+    /** One arena per thread, colocated with it once at @ref acquire; contexts point into it,
      *  so its chunks never move. */
     growing_buffer<arena_t> arenas_per_thread_ {global_allocator};
 
     /** Held by the one caller driving the threads; never swapped. */
     fu::spin_mutex_t held_;
 
-    /** The pool every fan-out dispatches on, or none, so the calling thread runs every fan-out
-     *  alone, which a moved-from executor also does. */
-    fu::pool_t threads_;
+    /** The pool every fan-out dispatches on; an empty or moved-from one runs every fan-out on the
+     *  calling thread alone. */
+    threads_t threads_;
 
-    /** Bytes of cache each core of the pool keeps to itself, read once at @ref acquire_. */
+    /** Bytes of cache each core of the pool keeps to itself, read once at @ref acquire. */
     std::size_t cache_bytes_per_core_ = 0;
 };
+
+/** The executor over ForkUnion's serial pool, which every call names unless it spawns threads. */
+using ram_executor_t = ram_executor<>;
 
 #pragma endregion Executor
 

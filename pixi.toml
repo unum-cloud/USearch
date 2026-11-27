@@ -56,7 +56,7 @@ backend = { name = "pixi-build-cmake", version = "0.*" }
 compilers = ["c", "cxx"]
 extra-args = [
   "-DBUILD_SHARED_LIBS=OFF",
-  "-DUSEARCH_BUILD_SHARED=1",
+  "-DUSEARCH_BUILD_LIBRARIES=1",
   "-DUSEARCH_DENSE_DTYPES=11",
 ]
 

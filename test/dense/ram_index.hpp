@@ -19,7 +19,7 @@
 
 #include <fmt/format.h>
 
-#include <numkong/numkong.hpp>
+#include <numkong/tensor.hpp>
 
 #include "usearch/dense/ram_index.hpp"
 

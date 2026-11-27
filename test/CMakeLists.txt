@@ -5,10 +5,10 @@ add_executable(
     usearch_test_header_only header_only.cpp utilities/ram_buffers.cpp utilities/ram_tables.cpp basic/sentences.cpp
                              basic/bioinformatics.cpp basic/meshes.cpp
 )
-usearch_setup_target(usearch_test_header_only HOST)
+usearch_setup_target(usearch_test_header_only HOST SDK)
 target_include_directories(usearch_test_header_only PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tools)
 target_link_libraries(
-    usearch_test_header_only PRIVATE fmt::fmt yyjson forkunion::cpp forkunion::header numkong::header stringzilla::header
+    usearch_test_header_only PRIVATE fmt::fmt yyjson forkunion::cpp forkunion::header numkong::cpp stringzilla::types
 )
 add_test(NAME usearch_test_header_only COMMAND usearch_test_header_only)
 
@@ -196,7 +196,7 @@ usearch_setup_target(usearch_test_placement HOST)
 target_include_directories(
     usearch_test_placement PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tools ${PROJECT_SOURCE_DIR}/src
 )
-target_link_libraries(usearch_test_placement PRIVATE fmt::fmt yyjson forkunion::cpp stringzilla::header)
+target_link_libraries(usearch_test_placement PRIVATE fmt::fmt yyjson forkunion::cpp stringzilla::types)
 add_test(NAME usearch_test_placement COMMAND usearch_test_placement)
 
 # The command-line tools' suite: the Arrow export and import behind `usearch export` and `usearch import`,
@@ -206,6 +206,6 @@ add_executable(usearch_test_tools tools.cpp)
 usearch_setup_target(usearch_test_tools HOST)
 target_include_directories(usearch_test_tools PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tools)
 target_link_libraries(
-    usearch_test_tools PRIVATE fmt::fmt yyjson forkunion::cpp stringzilla::header ${USEARCH_PUNNED_LIBRARIES}
+    usearch_test_tools PRIVATE fmt::fmt yyjson forkunion::cpp stringzilla::types ${USEARCH_PUNNED_LIBRARIES}
 )
 add_test(NAME usearch_test_tools COMMAND usearch_test_tools)

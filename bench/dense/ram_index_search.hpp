@@ -94,7 +94,7 @@ struct bench_context {
 /** Builds the index on the chosen memory domain, reserves it for the viewed rows, and sizes every
  *  thread's state off the executor - everything fallible, before any clock starts. */
 template <typename streamed_dataset_type_>
-bool prepare(streamed_dataset_type_& streamed, ram_executor_t& executor) {
+bool prepare(streamed_dataset_type_& streamed, ram_executor<fu::pool_t>& executor) {
     using bench_t = typename streamed_dataset_type_::bench_t;
     using index_t = typename bench_t::index_t;
     using allocator_t = typename bench_t::allocator_t;
@@ -168,7 +168,7 @@ bool prepare(streamed_dataset_type_& streamed, ram_executor_t& executor) {
 /** Inserts the rows past the loaded base, one vector per task: viewed in place when the scalars
  *  match, or cast through the thread's staging area, then inserted into the one index. */
 template <typename streamed_dataset_type_>
-bool run_insertion(streamed_dataset_type_& streamed, ram_executor_t& executor) {
+bool run_insertion(streamed_dataset_type_& streamed, ram_executor<fu::pool_t>& executor) {
     using scalar_t = typename streamed_dataset_type_::scalar_t;
     using bench_t = typename streamed_dataset_type_::bench_t;
     using candidates_count_t = typename bench_t::candidates_count_t;
@@ -254,7 +254,7 @@ bool run_insertion(streamed_dataset_type_& streamed, ram_executor_t& executor) {
 /** Refines every node, round after round, each one healing, gathering and re-stitching the graph,
  *  and stops at the first round that re-wires nothing. */
 template <typename streamed_dataset_type_>
-bool run_refinement(streamed_dataset_type_& streamed, ram_executor_t& executor) {
+bool run_refinement(streamed_dataset_type_& streamed, ram_executor<fu::pool_t>& executor) {
     using bench_t = typename streamed_dataset_type_::bench_t;
     using index_t = typename bench_t::index_t;
     using candidates_count_t = typename bench_t::candidates_count_t;
@@ -351,7 +351,7 @@ bool save_index(streamed_dataset_type_& streamed) {
 /** Every query is one task: cast through the thread's staging area if needed - before the clock - then searched,
  *  ranked by its heads under an indexer, and translated through the ID → row map into the judged hits. */
 template <typename streamed_dataset_type_>
-bool run_search(streamed_dataset_type_& streamed, ram_executor_t& executor) {
+bool run_search(streamed_dataset_type_& streamed, ram_executor<fu::pool_t>& executor) {
     using bench_t = typename streamed_dataset_type_::bench_t;
     using index_t = typename bench_t::index_t;
     using candidates_count_t = typename bench_t::candidates_count_t;
@@ -431,7 +431,7 @@ struct search_workload_t {
     static constexpr bool dot_only_k = false;
 
     template <typename streamed_dataset_type_>
-    bool run(streamed_dataset_type_& streamed, ram_executor_t& executor) const {
+    bool run(streamed_dataset_type_& streamed, ram_executor<fu::pool_t>& executor) const {
         return run_search(streamed, executor);
     }
 };

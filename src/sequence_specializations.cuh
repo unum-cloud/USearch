@@ -88,7 +88,7 @@ std::size_t fold_text_into(std::string_view text, char* folded) noexcept {
 template <typename kit_type_>
 util::expected<counted_tape_t> fold_texts_with(counted_tape_t texts,
                                                util::growing_arena<util::forkunion_allocator_t>& memory,
-                                               util::ram_executor_t* threads) noexcept {
+                                               util::ram_executor<fu::pool_t>* threads) noexcept {
     std::size_t const count = texts.count(), first = texts.offsets[0];
     std::size_t const source_bytes = texts.offsets[count] - first;
     std::size_t* const offsets = carve<std::size_t>(memory, count + 1);
@@ -119,7 +119,7 @@ util::expected<counted_tape_t> fold_texts_with(counted_tape_t texts,
 inline util::expected<counted_tape_t> folded_tape_in(usearch_sequence_metric_t metric, fold_texts_t fold,
                                                      counted_tape_t texts,
                                                      util::growing_arena<util::forkunion_allocator_t>& memory,
-                                                     util::ram_executor_t* threads) noexcept {
+                                                     util::ram_executor<fu::pool_t>* threads) noexcept {
     if (metric != usearch_sequence_metric_utf8_containment_k) return {texts, util::status_code_t::success_k};
     if (!fold) return {{}, util::status_code_t::unsupported_k};
     return fold(texts, memory, threads);
@@ -130,7 +130,7 @@ inline util::expected<counted_tape_t> folded_tape_in(usearch_sequence_metric_t m
 inline util::expected<caller_tape_t> folded_caller_tape_in(usearch_sequence_metric_t metric, fold_texts_t fold,
                                                            caller_tape_t texts,
                                                            util::growing_arena<util::forkunion_allocator_t>& memory,
-                                                           util::ram_executor_t* threads) noexcept {
+                                                           util::ram_executor<fu::pool_t>* threads) noexcept {
     if (metric != usearch_sequence_metric_utf8_containment_k) return {texts, util::status_code_t::success_k};
     auto const [lowered, lower_status] = counted_tape_of(texts.tape, texts.count, memory);
     if (failed(lower_status)) return {{}, lower_status};
@@ -319,7 +319,7 @@ auto with_seeded_sequence_metric(sequence_geometry_t const& geometry, us::sequen
  *  the dispatch unit. Checkpoints and refinements serve an index of one shard. */
 template <cpu_class_t cpu_class_>
 struct sequence_ram_variant {
-    using executor_t = util::ram_executor_t;
+    using executor_t = util::ram_executor<fu::pool_t>;
     using cache_hints_t = typename cache_hints_for_cpu_class<cpu_class_>::type;
     using shard_t = us::sequence::ram_index<util::uuid128_t, util::u32_t, waiter_of<cpu_class_>,
                                             atomic_ref_for_cpu_class<cpu_class_>::template type,
@@ -590,7 +590,7 @@ template <cpu_class_t cpu_class_>
 struct sequence_nvme_variant {
     using executor_t = nvme_executor_t;
     using index_t = basic::nvme_indexes<us::sequence::codec_t, util::uuid128_t, util::u32_t, sz_size_t,
-                                        default_io_queue_t, row_kit_of<cpu_class_>,
+                                        default_io_queue_t, fu::pool_t, row_kit_of<cpu_class_>,
                                         atomic_ref_for_cpu_class<cpu_class_>::template type, waiter_of<cpu_class_>>;
     using cache_hints_t = typename cache_hints_for_cpu_class<cpu_class_>::type;
     static constexpr cpu_class_t cpu_class_k = cpu_class_;

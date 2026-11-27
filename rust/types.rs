@@ -1270,7 +1270,7 @@ impl<'arena> Matches<'arena> {
         Ok(ArrowExport { arena: PhantomData, schema, array })
     }
 
-    /// Exports every query's padded distances as one Arrow `FixedSizeList` of `columns` `f64` per
+    /// Exports every query's padded distances as one Arrow `FixedSizeList` of `columns` doubles per
     /// query in place, pointing into the arena as [`Matches::keys_to_arrow`] does.
     pub fn distances_to_arrow(&self) -> Result<ArrowExport<'arena>> {
         let columns = self.view.columns;

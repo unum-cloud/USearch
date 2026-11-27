@@ -437,8 +437,8 @@ struct positions_nvme_fixture_t {
     using shard_index_t =
         geospatial::ram_index<util::uuid128_t, flaky_waiter_t, fu::standard_atomic_ref, forkunion_allocator_t>;
     template <typename engine_type_, typename node_id_type_ = u32_t>
-    using nvme_t =
-        us::basic::nvme_indexes<earth_observation_codec_t, util::uuid128_t, node_id_type_, nk_u64_t, engine_type_>;
+    using nvme_t = us::basic::nvme_indexes<earth_observation_codec_t, util::uuid128_t, node_id_type_, nk_u64_t,
+                                           engine_type_, fu::pool_t>;
     using scratch_metric_t = chord_metric<i32_serial_geospatial_kit_t, basic_nvme_scratch_t>;
     using query_t = earth_observation_t;
     static constexpr std::string_view metric_token_k = "chord";
@@ -544,12 +544,12 @@ static void test_positions_nvme_within(u64_t seed) {
                      status_code_t::success_k);
     }
 
-    fu_topology_t topology = nullptr;
-    expect_true(fu_topology_new(&topology) == fu_success_k);
     {
         io_queue_config_t config;
         config.queue_depth = 64;
-        auto [executor, spawn_status] = nvme_indexes_t::executor_t::spawn(topology, 1, config);
+        auto [threads, threads_status] = ram_executor_t::on_calling_thread();
+        expect_equal(threads_status, status_code_t::success_k);
+        auto [executor, spawn_status] = nvme_indexes_t::executor_t::acquire(std::move(threads), config);
         expect_equal(spawn_status, status_code_t::success_k);
         nvme_indexes_t viewed {forkunion_allocator_t {}};
         expect_equal(viewed.view(path, {}, "chord", executor), status_code_t::success_k);
@@ -585,7 +585,6 @@ static void test_positions_nvme_within(u64_t seed) {
             }
         }
     }
-    fu_topology_delete(topology);
 }
 
 void run_geospatial_cases() {

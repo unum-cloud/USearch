@@ -142,7 +142,7 @@ jobs:
       - name: Build Library with MinGW
         if: matrix.arch != 'arm64'
         run: |
-          cmake -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_SHARED=1 -DUSEARCH_DENSE_DTYPES=11 -B ./build_release
+          cmake -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIBRARIES=1 -DUSEARCH_DENSE_DTYPES=11 -B ./build_release
           cmake --build ./build_release --config Release
           mkdir pkg
           copy .\build_release\libusearch_shared.dll pkg\

@@ -13,7 +13,6 @@
  */
 #pragma once
 
-#include <cmath>   // `std::abs` for the rescale amplitude
 #include <cstdio>  // `stdout` for the TTY probe
 #include <cstdlib> // `std::exit`
 #include <cstring> // `std::memcpy` - the checkpoint runs
@@ -33,16 +32,17 @@
 #include <fmt/ranges.h> // `fmt::join`
 
 #include <forkunion/forkunion.h>
+#include <forkunion/forkunion.hpp>    // `fu::pool_t` - the threads every phase fans out on
 #include <forkunion/capabilities.hpp> // `fu::preferred_cache_hints_t` - the engines' line hints
 #include <forkunion/topology.hpp>     // `fu::cache_line_bytes` - the line they step by
 #include <numkong/numkong.h>
-#include <numkong/numkong.hpp>
-#include <stringzilla/stringzilla.hpp>
+#include <numkong/tensor.hpp> // `nk::matrix_view`, `nk::tensor_span` - the source rows and the staging
+#include <stringzilla/string.hpp>
 
 #include "usearch/utilities/safegraphs_format.hpp"
 #include "usearch/dense/types.hpp"             // `dense::dtype_of` - the checkpoint columns
 #include "usearch/dense/shard_checkpoints.hpp" // `dense::norms_column_of`, `dense::monolith_header` - the norms column
-#include "usearch/utilities/ram_device.hpp"    // `ram_executor_t` - the executor every phase fans out on
+#include "usearch/utilities/ram_device.hpp"    // `ram_executor` - the executor every phase fans out on
 
 #if !USEARCH_OS_WINDOWS_
 #include <unistd.h> // `isatty`
@@ -840,18 +840,20 @@ std::vector<scalar_type_> stage_rows(nk::matrix_view<dataset_scalar_type_> rows,
     return stage_widened<scalar_type_>(std::move(widened), scale);
 }
 
-/** NumKong's @c component_max of @p scalar_type_ - the largest magnitude one stored dimension
- *  holds - extended to the plain scalars, each its own component, whose largest magnitude is their
- *  @c finite_max value. */
-template <typename scalar_type_>
-constexpr float component_max() noexcept {
-    if constexpr (requires { scalar_type_::component_max(); }) return float(scalar_type_::component_max());
-    else return float(scalar_type_::finite_max());
-}
+/** The factor spreading @p payload over the range of @p to_type_ before a downcast, or one for
+ *  a payload of zeros. It and @ref stage_row live in @c dense_streaming.cpp, which links the
+ *  C++ SDK of NumKong, as the units including this header compile NumKong header-only. */
+template <typename from_type_, typename to_type_>
+nk::expected<float> downcast_scale(nk::vector_view<from_type_> payload) noexcept;
+
+/** @p source cast into @p staged, first widened into a non-empty @p rescaled and scaled. */
+template <typename from_type_, typename to_type_>
+nk::status_t stage_row(nk::vector_view<from_type_> source, float scale, nk::vector_span<nk::f32_t> rescaled,
+                       nk::vector_span<to_type_> staged) noexcept;
 
 /**
  *  @brief The data-side of a run: typed views over the source rows and the bounded staging
- *      matrix the streaming @c nk::cast trampolines through, one vector at a time.
+ *      matrix the streaming @ref stage_row trampolines through, one vector at a time.
  *
  *  The staging matrix holds one batched call's rows, or a row per thread for one-row calls, never a
  *  whole-dataset copy; each thread rotates through its own contiguous area, so concurrent tasks
@@ -905,16 +907,12 @@ struct streamed_dataset {
         if constexpr (scaled_k) {
             // `as_vector` answers only rank-1 views, so the contiguous payload is flattened by hand.
             nk::vector_view<dataset_scalar_type_> const payload {vectors.data(), vectors.extent(0) * vectors.extent(1)};
-            auto const [extremes, status] = nk::reduce_minmax<dataset_scalar_type_>(payload);
+            auto const [factor, status] = downcast_scale<dataset_scalar_type_, scalar_t>(payload);
             if (nk::failed(status)) {
                 fmt::println("Rescaling skipped: {}", nk::status_name(status));
                 return;
             }
-            float const max_amplitude = util::max_of(std::abs(float(extremes.min_value)),
-                                                     std::abs(float(extremes.max_value)));
-            // The stored dtype's largest magnitude; not a constant expression for nvcc's byte floats.
-            float const target_amplitude = component_max<scalar_t>();
-            if (max_amplitude > 0) scale = target_amplitude / max_amplitude;
+            scale = factor;
             fmt::println("Rescaling {} → {} by ×{:.4f} before the downcast", dataset_scalar_type_::dtype_name(),
                          scalar_t::dtype_name(), scale);
         }
@@ -925,18 +923,10 @@ struct streamed_dataset {
     vector_view_t stage(nk::vector_view<dataset_scalar_type_> source, std::size_t thread, std::size_t task) noexcept {
         std::size_t const dimensions = vectors.extent(1);
         std::size_t const rotation = task % staging.extent(1);
-        auto staged = staging.row(thread).row(rotation).as_vector();
-        nk::status_t status = nk::status_t::success_k;
-        if constexpr (scaled_k) {
-            // An f32 source feeds @c nk::scale straight from the mapping, skipping the widening cast.
-            auto rescaled = rescaling.row(thread).row(rotation).as_vector();
-            if constexpr (std::is_same_v<dataset_scalar_type_, nk::f32_t>)
-                status = nk::scale<nk::f32_t>(source, scale, 0.0f, rescaled);
-            else if (nk::succeeded(status = nk::cast<dataset_scalar_type_, nk::f32_t>(source, rescaled)))
-                status = nk::scale<nk::f32_t>(rescaled, scale, 0.0f, rescaled);
-            if (nk::succeeded(status)) status = nk::cast<nk::f32_t, scalar_t>(rescaled, staged);
-        }
-        else { status = nk::cast<dataset_scalar_type_, scalar_t>(source, staged); }
+        nk::vector_span<scalar_t> const staged = staging.row(thread).row(rotation).as_vector();
+        nk::vector_span<nk::f32_t> rescaled;
+        if constexpr (scaled_k) rescaled = rescaling.row(thread).row(rotation).as_vector();
+        nk::status_t const status = stage_row<dataset_scalar_type_, scalar_t>(source, scale, rescaled, staged);
         // A failed conversion stages an empty row, which the index refuses rather than storing garbage.
         return nk::succeeded(status) ? vector_view_t {staged.data(), dimensions} : vector_view_t {};
     }
@@ -1074,7 +1064,7 @@ struct bench_launch {
     machine_t const& machine;
 
     /** The executor every phase fans out on, as the library's RAM executors do. */
-    util::ram_executor_t& executor;
+    util::ram_executor<fu::pool_t>& executor;
 };
 
 /** Opens the RetriEval matrix @p path, or the parts its glob pattern names, in the scalar its
@@ -1150,11 +1140,10 @@ int run_cpu_bench(int argc, char const* const* argv, char const* binary_name, on
     }
     else if (!settings.threads.value)
         settings.threads.value = util::max_of<std::size_t>(1, machine.logical_cores * 7 / 8);
-    auto [executor, spawn_status] =
-        settings.memory_domains.size() == 1
-            ? util::ram_executor_t::spawn_near(machine.topology, settings.memory_domains.front(),
-                                               settings.threads.value, settings.max_schedule)
-            : util::ram_executor_t::spawn(machine.topology, settings.threads.value, settings.max_schedule);
+    fu_memory_domain_id_t const near_domain = settings.memory_domains.size() == 1 ? settings.memory_domains.front()
+                                                                                  : util::no_memory_domain_k;
+    auto [executor, spawn_status] = util::ram_executor<fu::pool_t>::spawn(
+        machine.topology, settings.threads.value, fu::caller_exclusive_k, settings.max_schedule, near_domain);
     if (failed(spawn_status)) {
         fmt::println("Failed to spawn {} threads", settings.threads.value);
         return 1;

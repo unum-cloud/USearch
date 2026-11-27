@@ -208,11 +208,11 @@ expected<nvme_refine_plan<indexes_type_>> plan_refine(indexes_type_& index, refi
  *  - @c contended_k A refine or reshard holds the writer.
  *  - Any status opening the rewrite answers, as @ref plan_reshard lists them.
  */
-template <typename indexes_type_, typename queue_type_>
-    requires std::is_same_v<nvme_executor<queue_type_>, typename indexes_type_::executor_t>
+template <typename indexes_type_, typename queue_type_, typename threads_type_>
+    requires std::is_same_v<nvme_executor<queue_type_, threads_type_>, typename indexes_type_::executor_t>
 expected<nvme_reshard_plan<indexes_type_>> plan_reshard(std::span<indexes_type_* const> sources,
                                                         std::span<indexes_type_* const> targets,
-                                                        nvme_executor<queue_type_>& executor,
+                                                        nvme_executor<queue_type_, threads_type_>& executor,
                                                         reshard_config_t config = {}) noexcept;
 
 /** Gives a loaded index's writer back as the plan that held it ends. */
@@ -517,11 +517,11 @@ struct [[nodiscard]] nvme_reshard_plan {
     friend expected<nvme_reshard_plan<other_type_>> plan_build(std::span<std::string_view const>, std::string_view,
                                                                bytes_span_t, reshard_config_t const&,
                                                                save_config_t const&) noexcept;
-    template <typename other_type_, typename queue_type_>
-        requires std::is_same_v<nvme_executor<queue_type_>, typename other_type_::executor_t>
+    template <typename other_type_, typename queue_type_, typename threads_type_>
+        requires std::is_same_v<nvme_executor<queue_type_, threads_type_>, typename other_type_::executor_t>
     friend expected<nvme_reshard_plan<other_type_>> plan_reshard(std::span<other_type_* const>,
                                                                  std::span<other_type_* const>,
-                                                                 nvme_executor<queue_type_>&,
+                                                                 nvme_executor<queue_type_, threads_type_>&,
                                                                  reshard_config_t) noexcept;
 
     /** Opens a freestanding reshard of @p sources into the manifest @p target, as @ref plan_reshard
@@ -3316,11 +3316,11 @@ expected<refine_report_t> refine(indexes_type_& index, refine_config_t config,
     return plan.finish(executor);
 }
 
-template <typename indexes_type_, typename queue_type_>
-    requires std::is_same_v<nvme_executor<queue_type_>, typename indexes_type_::executor_t>
+template <typename indexes_type_, typename queue_type_, typename threads_type_>
+    requires std::is_same_v<nvme_executor<queue_type_, threads_type_>, typename indexes_type_::executor_t>
 expected<nvme_reshard_plan<indexes_type_>> plan_reshard(std::span<indexes_type_* const> sources,
                                                         std::span<indexes_type_* const> targets,
-                                                        nvme_executor<queue_type_>& executor,
+                                                        nvme_executor<queue_type_, threads_type_>& executor,
                                                         reshard_config_t config) noexcept {
     nvme_reshard_plan<indexes_type_> plan;
     if (sources.empty() || targets.empty()) return {std::move(plan), status_code_t::invalid_argument_k};
@@ -3341,10 +3341,11 @@ expected<nvme_reshard_plan<indexes_type_>> plan_reshard(std::span<indexes_type_*
  *  - @c cancelled_k @p progress stopped the rewrite.
  *  - Any status @ref plan_reshard, its tasks or its finish answers.
  */
-template <typename indexes_type_, typename queue_type_, typename progress_type_ = dummy_progress_t>
-    requires std::is_same_v<nvme_executor<queue_type_>, typename indexes_type_::executor_t>
+template <typename indexes_type_, typename queue_type_, typename threads_type_,
+          typename progress_type_ = dummy_progress_t>
+    requires std::is_same_v<nvme_executor<queue_type_, threads_type_>, typename indexes_type_::executor_t>
 expected<reshard_report_t> reshard(std::span<indexes_type_* const> sources, std::span<indexes_type_* const> targets,
-                                   nvme_executor<queue_type_>& executor, reshard_config_t config = {},
+                                   nvme_executor<queue_type_, threads_type_>& executor, reshard_config_t config = {},
                                    progress_type_&& progress = {}) noexcept {
     auto [plan, status] = plan_reshard(sources, targets, executor, config);
     if (failed(status)) return {{}, status};

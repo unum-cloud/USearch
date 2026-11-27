@@ -82,8 +82,8 @@ static void expect_gets(handle<geospatial_verbs_t>& index, std::size_t count) {
  *  entry of the exact scan's top ten inside that radius, where the residency serves a scan. */
 static void expect_within(handle<geospatial_verbs_t>& index, geospatial_queries_t queries) {
     copied_matches_t oracle;
-    usearch_outcome_t const scanned = scan_oracle(index, queries, recall_samples_k, cell_wanted_k, cell_batch_k,
-                                                  oracle);
+    usearch_outcome_t const scanned = scan_reference(index, queries, recall_samples_k, cell_wanted_k, cell_batch_k,
+                                                     oracle);
     if (scanned.status == usearch_status_unsupported_k) return;
     if (!expect_success(scanned)) return;
     st::vector<std::size_t> const offsets = match_offsets(oracle);

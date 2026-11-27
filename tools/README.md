@@ -154,15 +154,15 @@ aws s3 cp s3://bucket/index.safegraphs - | usearch metadata -
 usearch dense get --index index.safegraphs --input wanted.arrows --keys-column id --outputs-dtype f32 --output vectors.arrow
 ```
 
-| Flag                      | Verbs                   | Meaning                                                                           |
-| :------------------------ | :---------------------- | :-------------------------------------------------------------------------------- |
-| `--input <path\|->`       | `insert` `search` `get` | An Arrow file or stream, or standard input                                        |
-| `--vectors-column <name>` | `insert` `search`       | The rows, by default the only `fixed_size_list` or `numkong.u1x8` column          |
-| `--keys-column <name>`    | `insert` `search` `get` | A `fixed_size_binary(16)`, `uint64` or `int64` column, by default the row numbers |
-| `--index <address\|->`    | `search` `get`          | The checkpoint, or standard input                                                 |
-| `--save -`                | `insert`                | Writes the checkpoint to standard output                                          |
-| `--output <path\|->`      | `search` `get`          | Arrow to standard output for `-`                                                  |
-| `--outputs-dtype <name>`  | `get`                   | The scalar the vectors convert to, by default the stored one                      |
+| Flag                      | Verbs                     | Meaning                                                                           |
+| :------------------------ | :------------------------ | :-------------------------------------------------------------------------------- |
+| `--input <path\|->`       | `insert`, `search`, `get` | An Arrow file or stream, or standard input                                        |
+| `--vectors-column <name>` | `insert`, `search`        | The rows, by default the only `fixed_size_list` or `numkong.u1x8` column          |
+| `--keys-column <name>`    | `insert`, `search`, `get` | A `fixed_size_binary(16)`, `uint64` or `int64` column, by default the row numbers |
+| `--index <address\|->`    | `search`, `get`           | The checkpoint, or standard input                                                 |
+| `--save -`                | `insert`                  | Writes the checkpoint to standard output                                          |
+| `--output <path\|->`      | `search`, `get`           | Arrow to standard output for `-`                                                  |
+| `--outputs-dtype <name>`  | `get`                     | The scalar the vectors convert to, by default the stored one                      |
 
 Readers go by the first bytes rather than the extension: `ARROW1` opens a file and the stream continuation word a stream, either of them on a path or a pipe, and an input missing its end is refused instead of reading as a shorter one.
 Parquet is refused by name, as the tools have no Parquet reader.
@@ -285,9 +285,9 @@ Beyond those, the other verbs take only what they move:
 
 The other modalities' `insert` takes the flags `dense insert` does but `--stored-dtype` and `--metric`, keys every entry by its number in the file unless `--keys` names a `.u64bin` or `.u128bin` of one key per entry, refused when its rows are not the file's entries, and reads its entries as the modality's benchmark does:
 
-- `sequence insert <texts>` reads one entry per line, a carriage return before a newline dropped, under the required `--metric` `protein-alignment`, `dna-overlap` or `utf8-containment`; each scores by its own costs unless `--costs` names a file of 65,537 bytes, 256x256 int8 similarities between bytes then an int8 gap cost, which the library folds into classes, bytes sharing their rows and columns sharing one, and which `utf8-containment` refuses; the checkpoint records the folded costs and classes, so `sequence search` takes `--query-texts` alone, and `sequence reshard --parts` takes the `--costs` the index was built with and opens its parts under them.
-- `shapes insert <points> --counts <path>` reads every cloud's points end to end, an `.fbin` or `.f16bin` of 3 columns, and the points per cloud, an `.ibin` of 1 column, under `--metric` `chamfer`, `hausdorff`, `gromov-wasserstein` or `wasserstein-procrustes`; `shapes search` takes `--query-points` and `--query-counts`.
-- `geospatial insert <observations>` reads an `.f64bin` of eleven columns per observation, and builds without a terrain; `geospatial search` takes `--query-observations`, `--relation` `near`, `sees` or `seen`, and `--radius` in metres.
+- `sequence insert <texts>` reads one entry per line, a carriage return before a newline dropped, under the required `--metric` set to `protein-alignment`, `dna-overlap` or `utf8-containment`; each scores by its own costs unless `--costs` names a file of 65,537 bytes, 256x256 int8 similarities between bytes then an int8 gap cost, which the library folds into classes, bytes sharing their rows and columns sharing one, and which `utf8-containment` refuses; the checkpoint records the folded costs and classes, so `sequence search` takes `--query-texts` alone, and `sequence reshard --parts` takes the `--costs` the index was built with and opens its parts under them.
+- `shapes insert <points> --counts <path>` reads every cloud's points end to end, an `.fbin` or `.f16bin` of 3 columns, and the points per cloud, an `.ibin` of 1 column, under `--metric` set to `chamfer`, `hausdorff`, `gromov-wasserstein` or `wasserstein-procrustes`; `shapes search` takes `--query-points` and `--query-counts`.
+- `geospatial insert <observations>` reads an `.f64bin` of eleven columns per observation, and builds without a terrain; `geospatial search` takes `--query-observations`, `--relation` set to `near`, `sees` or `seen`, and `--radius` in metres.
 
 Every flag also reads its default from a `RETRIEVAL_` variable named after it, as the benchmarks do, so `--entries` defaults to `RETRIEVAL_ENTRIES`.
 Byte counts take `K`, `M`, `G` or `T` and an optional `B`, so `24G` and RetriEval's `24GB` read alike.

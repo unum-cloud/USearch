@@ -4448,7 +4448,9 @@ struct basic_nvme_reference {
                      status_code_t::success_k);
 
         expect_true(fu_topology_new(&topology) == fu_success_k);
-        auto [spawned, spawn_status] = executor_t::spawn(topology, 2, io_queue_config_t {});
+        auto [threads, threads_status] = executor_t::threads_t::spawn(topology, 2);
+        expect_equal(threads_status, status_code_t::success_k);
+        auto [spawned, spawn_status] = executor_t::acquire(std::move(threads), io_queue_config_t {});
         expect_equal(spawn_status, status_code_t::success_k);
         executor = std::move(spawned);
     }
@@ -5065,10 +5067,10 @@ void test_basic_nvme_widened_keys(fixture_type_ const& fixture, u64_t seed) {
                      status_code_t::success_k);
     }
 
-    fu_topology_t topology = nullptr;
-    expect_true(fu_topology_new(&topology) == fu_success_k);
     {
-        auto [executor, spawn_status] = executor_t::spawn(topology, 1, io_queue_config_t {});
+        auto [threads, threads_status] = executor_t::threads_t::on_calling_thread();
+        expect_equal(threads_status, status_code_t::success_k);
+        auto [executor, spawn_status] = executor_t::acquire(std::move(threads), io_queue_config_t {});
         expect_equal(spawn_status, status_code_t::success_k);
         nvme_t viewed {forkunion_allocator_t {}};
         expect_equal(viewed.view(path, {}, fixture_type_::metric_token_k, executor), status_code_t::success_k);
@@ -5103,7 +5105,6 @@ void test_basic_nvme_widened_keys(fixture_type_ const& fixture, u64_t seed) {
                      status_code_t::config_mismatch_k);
         expect_equal(mismatched.size(), 0u);
     }
-    fu_topology_delete(topology);
     expect_equal(ledger.live_bytes, 0);
 }
 
@@ -5113,11 +5114,10 @@ template <typename queue_type_, typename fixture_type_>
 case_result_t test_basic_nvme_configuration(fixture_type_ const& fixture, u64_t seed, char const* refused) {
     using executor_t = typename fixture_type_::template nvme_t<queue_type_>::executor_t;
     {
-        fu_topology_t topology = nullptr;
-        if (!expect_true(fu_topology_new(&topology) == fu_success_k)) return {};
-        status_t const spawned = executor_t::spawn(topology, 1, io_queue_config_t {}).status;
-        fu_topology_delete(topology);
-        if (failed(spawned)) return case_result_t::skipped(refused);
+        auto [threads, threads_status] = executor_t::threads_t::on_calling_thread();
+        if (!expect_equal(threads_status, status_code_t::success_k)) return {};
+        if (failed(executor_t::acquire(std::move(threads), io_queue_config_t {}).status))
+            return case_result_t::skipped(refused);
     }
     test_basic_nvme_search<queue_type_>(fixture, seed);
     test_basic_nvme_parts<queue_type_>(fixture, seed);

@@ -52,7 +52,7 @@ ownership_words_refused="lent lend lends lending lender borrow borrowed borrows 
 member_names_refused="bits current state data flags tmp scratch bitset buffer"
 # Names the word lists above let pass: spellings of the languages and libraries called, qualified as `fu::pool_t`
 # or ending in `*` for a prefix.
-identifier_words_exempt="fu_pool_* fu::pool_t dummy_pool_t seen_k borrow borrow_mut borrow_raw Borrow BorrowMut Borrowed BorrowedFd BorrowedHandle"
+identifier_words_exempt="fu_pool_* fu::pool_t fu::dummy_pool_t seen_k borrow borrow_mut borrow_raw Borrow BorrowMut Borrowed BorrowedFd BorrowedHandle"
 # Name prefixes of third-party APIs the code calls, whose abbreviations are not this project's to spell out.
 third_party_identifier_prefixes='vec_'
 # The static objects that predate the hardening rules: the GPU driver tables each process loads once.
@@ -90,10 +90,12 @@ project_namespace_alias="us"
 stdout_harness_paths="test/harness.hpp test/main.cpp test/dense_vram.cpp test/dense/vram_nvidia.cpp test/dense/vram_amd.hip test/dense/vram_apple.cpp"
 # The directories whose C and C++ sources the three gates and the nesting limit judge.
 gated_source_directories="include src src_stub"
+# The `::types` container headers, as shell patterns, which link nothing but the C ABI; empty without containers.
+types_header_paths=""
 # Test and bench units waived to include a private header or source, each explained under CONTRIBUTING's
 # "Private Surface Waivers"; adding one is a decision for review, so it lands with the include it waives.
-private_surface_tests="bench/dense/ram_metric.cpp test/dense/ram_indexes.hpp test/dense/vram_nvidia.hpp test/placement.cpp \
-    test/sequence/vram_index.cpp test/shapes/vram_index.cpp"
+private_surface_tests="bench/dense/ram_metric.cpp bench/dense/ram_metric_numkong.cpp test/dense/ram_indexes.hpp \
+    test/dense/vram_nvidia.hpp test/placement.cpp test/sequence/vram_index.cpp test/shapes/vram_index.cpp"
 # The Python test files that are scaffolding, the only ones that may skip from inside a function.
 python_test_scaffolding_paths="test/conftest.py test/base.py"
 # The GPU vendors whose `<PREFIX>_ARCH_<VENDOR>_` switches one unit may carry together, empty without GPU code.
@@ -558,6 +560,29 @@ check_markdown_tex_not_in_code_spans() {
         }')
     [ -z "$spans" ] || reject_with_reason "$spans" \
         "$staged_path puts TeX inside a Markdown code span, which renders it literally; write it between \$ signs:"
+}
+
+# Rejects two code spans side by side, like "a `[rows, columns]` `TensorSpan`", in Markdown and in Rust `///` and
+# `//!` docs, because the pair reads as one garbled token; name one in prose and keep the other in code.
+check_markdown_code_spans_apart() {
+    local adjacent
+    adjacent=$(export spans_marker=""
+        case "$staged_path" in *.rs) spans_marker='^[[:space:]]*//[/!]' ;; esac
+        scan_staged_file_marking_added_lines '
+        BEGIN { marker = ENVIRON["spans_marker"] }
+        {
+            line = $0
+            if (marker != "") { if (line !~ marker) { fenced = 0; next } sub(marker, "", line) }
+            if (line ~ /^[[:space:]]*(```|~~~)/) { fenced = !fenced; next }
+            if (fenced || !(FNR in added)) next
+            spans = 0
+            while (match(line, /`[^`]+`/)) {
+                if (spans++ && substr(line, 1, RSTART - 1) ~ /^[[:space:]]+$/) { printf "line %d: %s\n", FNR, $0; break }
+                line = substr(line, RSTART + RLENGTH)
+            }
+        }' "$staged_text_path")
+    [ -z "$adjacent" ] || reject_with_reason "$adjacent" \
+        "$staged_path puts two code spans side by side; name one in prose and keep one span:"
 }
 
 # Rejects a `/**` with no empty line above it, because a docblock reads as the start of something only with
@@ -4022,6 +4047,36 @@ check_mojo_skips_through_helper() {
         "$staged_path prints a skip by hand; call _skipped(reason) from the Shared Testing region:"
 }
 
+# Rejects a test or benchmark line that includes a serial header, names an `nk_*_serial` or `sz_*_serial` kernel or
+# helper, or names an `_oracle`, `_naive` or `_golden` helper, because a serial kernel serving as its own oracle hides
+# its bugs: each family's `<verb>_reference` is the oracle, and setup goes through the public dispatched exports. A
+# statement whose label names a serial kernel registers it, and may pass the serial kernels it puts under test, and
+# a unit `private_surface_tests` waives may reach the private entries its waiver names.
+check_tests_avoid_serial_references() {
+    local waived serial_uses
+    for waived in $private_surface_tests; do
+        [ "$staged_path" != "$waived" ] || return 0
+    done
+    serial_uses=$(scan_staged_file_marking_added_lines '
+            { lines[++count] = FNR; texts[count] = $0; statement = statement $0 "\n" }
+            /[;{}][[:space:]]*$/ || /^[[:space:]]*#/ {
+                subject = statement ~ /"[^"\n]*_serial[^A-Za-z0-9_]/
+                for (position = 1; position <= count; ++position) {
+                    if (!(lines[position] in added)) continue
+                    text = texts[position]
+                    if (text ~ /^[[:space:]]*#[[:space:]]*include[[:space:]]*[<"](numkong|stringzilla)\/[a-z0-9_]+\/serial\.h[>"]/ ||
+                        (!subject && text ~ /(^|[^A-Za-z0-9_])(nk|sz)_[a-z0-9_]+_serial_?([^A-Za-z0-9_]|$)/) ||
+                        text ~ /[A-Za-z0-9]_(oracle|naive|golden)([^A-Za-z0-9]|$)/)
+                        printf "line %d: %s\n", lines[position], text
+                }
+                statement = ""; count = 0
+            }' "$staged_code_path")
+    [ -z "$serial_uses" ] || reject_with_reason "$serial_uses" \
+        "$staged_path includes a serial header, names a serial kernel outside its own registration, or names an" \
+        "            _oracle, _naive or _golden helper; compare against the family's <verb>_reference and set up" \
+        "            through the public dispatched exports:"
+}
+
 # Routes one staged file through the rules of this region its path calls for.
 run_harness_checks() {
     case "$staged_path" in
@@ -4053,6 +4108,7 @@ run_harness_checks() {
     test/*.c | test/*.h | test/*.cpp | test/*.hpp | test/*.cu | test/*.cuh | test/*.hip | bench/*.c | bench/*.h | bench/*.cpp | \
         bench/*.hpp | bench/*.cu | bench/*.cuh | bench/*.hip)
         check_test_includes_public
+        check_tests_avoid_serial_references
         ;;
     esac
     case "$staged_path" in
@@ -4340,15 +4396,22 @@ check_aliases_below_includes() {
         "$staged_path declares an alias above its last #include; move it below the includes, so no header reads it:"
 }
 
+# The `::types` container headers of each sibling, the only sibling `.hpp` headers a file under `include/` includes.
+sibling_include_headers='numkong/(types|memory|vector|tensor|matrix|packed)|stringzilla/(types|string|strings|sets)|forkunion/(types|allocators|atomics|capabilities|distributed|flat|locks|logging|topology)|smashtable/[a-z_]+'
+
 # Rejects a file that includes a library's SDK umbrella `<X/X.hpp>` beside its native umbrella `<X.hpp>`, for this
-# project and every sibling, and a file under `include/` that includes a header resolving under `cpp/`, because
-# the SDK sits on the C ABI over the native engine and one file reads one of those layers; a `.h` header is
-# that ABI, so it is free everywhere.
+# project and every sibling, and a file under `include/` that includes a header resolving under `cpp/` or a sibling
+# `.hpp` header outside `sibling_include_headers`, because the SDK sits on the C ABI over the native engine and one
+# file reads one of those layers; a `.h` header is that ABI, so it is free everywhere.
 check_umbrella_mix_absent() {
     local mixed
-    mixed=$(export umbrella_libraries="^($project_include_prefix|$sibling_projects)\$" umbrella_file="$staged_path"
+    mixed=$(export umbrella_libraries="^($project_include_prefix|$sibling_projects)\$" umbrella_file="$staged_path" \
+        umbrella_siblings="^($sibling_projects)\$" umbrella_containers="^($sibling_include_headers)\\.hpp\$"
         scan_staged_file_marking_added_lines '
-        BEGIN { libraries = ENVIRON["umbrella_libraries"]; file = ENVIRON["umbrella_file"] }
+        BEGIN {
+            libraries = ENVIRON["umbrella_libraries"]; file = ENVIRON["umbrella_file"]
+            siblings = ENVIRON["umbrella_siblings"]; containers = ENVIRON["umbrella_containers"]
+        }
         /^[[:space:]]*#[[:space:]]*include[[:space:]]*[<"]/ {
             header = $0; quoted = ($0 ~ /include[[:space:]]*"/)
             sub(/^[^<"]*[<"]/, "", header); sub(/[>"].*$/, "", header)
@@ -4359,6 +4422,8 @@ check_umbrella_mix_absent() {
                 sdk[parts[1]] = FNR; sdk_text[parts[1]] = $0
             }
             if (file !~ /^include\// || !(FNR in added)) next
+            owner = header; sub(/\/.*$/, "", owner)
+            if (owner != header && owner ~ siblings) { if (header !~ containers) printf "line %d: %s\n", FNR, $0; next }
             beside = file; sub(/[^\/]*$/, "", beside); beside = beside header
             while (sub(/[^\/.][^\/]*\/\.\.\//, "", beside)) {}
             if (quoted && !system("git cat-file -e \":" beside "\" 2> /dev/null")) { if (beside ~ /^cpp\//) printf "line %d: %s\n", FNR, $0 }
@@ -4371,12 +4436,104 @@ check_umbrella_mix_absent() {
                     printf "line %d: %s\nline %d: %s\n", native[library], native_text[library], sdk[library], sdk_text[library]
         }' "$staged_code_path")
     [ -z "$mixed" ] || reject_with_reason "$mixed" \
-        "$staged_path mixes a library's SDK umbrella with its native one, or reaches from include/ into cpp/;" \
-        "            include either <X/X.hpp> or <X.hpp>, and keep include/ on include/ and the C headers:"
+        "$staged_path mixes a library's SDK umbrella with its native one, or reaches from include/ into cpp/" \
+        "            or past a sibling's ::types headers; include either <X/X.hpp> or <X.hpp>, and keep include/ on" \
+        "            include/, the C headers and sibling_include_headers:"
 }
 
-# Routes one staged file through the gates when it sits in a gated directory, and every C and C++ source
-# through the pointer-reference, alias-placement and umbrella checks.
+# The headers that declare CPU intrinsics.
+intrinsics_include_pattern='#[[:space:]]*include[[:space:]]*<([a-z]*mmintrin|x86intrin|intrin|arm_[a-z0-9]+|riscv_vector|wasm_simd128|altivec)\.h>'
+
+# Prints each added `#include` of a kernel header: one of this project's `.h`, `.cuh` or `.metal` headers absent
+# from `c/` and from `types_header_paths`, like `<stringzilla/metal.h>`, or any library's header a directory
+# deeper, like `<numkong/dot/serial.h>`.
+added_kernel_includes() {
+    export kernel_libraries="^($project_include_prefix|$sibling_projects)\$" kernel_owner="$project_include_prefix" \
+        kernel_types="${types_header_paths:-}"
+    scan_staged_file_marking_added_lines '
+        BEGIN {
+            libraries = ENVIRON["kernel_libraries"]; owner = ENVIRON["kernel_owner"]; types = ENVIRON["kernel_types"]
+            gsub(/\./, "\\.", types); gsub(/\*/, "[^/]*", types); gsub(/ +/, "|", types); types = "^(" types ")$"
+        }
+        (FNR in added) && /^[[:space:]]*#[[:space:]]*include[[:space:]]*[<"]/ {
+            header = $0; sub(/^[^<"]*[<"]/, "", header); sub(/[>"].*$/, "", header)
+            depth = split(header, parts, "/")
+            if (header !~ /\.(h|cuh|metal)$/ || depth < 2 || parts[1] !~ libraries) next
+            if (depth > 2 || (parts[1] == owner && (types == "^()$" || ("include/" header) !~ types) &&
+                              system("git cat-file -e \":c/" header "\" 2> /dev/null")))
+                printf "line %d: %s\n", FNR, $0
+        }' "$staged_code_path"
+}
+
+# Prints the functions this project's `c/` headers export, those declared with `<P>_API` or `<P>_EXPORT`, so the
+# inline helpers and macros the same headers carry, like `sz_assert_`, never count as exports.
+exported_function_names() {
+    git grep --cached -h -E '^[[:space:]]*[A-Z][A-Z0-9_]*_(API|EXPORT)[[:space:]]' -- 'c/*.h' |
+        sed -nE 's/^[^(]*[^A-Za-z0-9_]([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*\(.*/\1/p'
+}
+
+# Whether the staged path is one of the `::types` container headers that `types_header_paths` names.
+in_types_headers() {
+    local pattern
+    while read -r pattern; do
+        [ -z "$pattern" ] || [[ $staged_path != $pattern ]] || return 0
+    done < <(tr ' ' '\n' <<< "${types_header_paths:-}")
+    return 1
+}
+
+# Rejects a `::types` header that names an exported C function, includes a kernel or intrinsics header, or tests
+# `HEADER_ONLY`, because containers link nothing but the C ABI and read the same in every deployment: an operation a
+# kernel backs is a `cpp/` verb.
+check_types_headers_lean() {
+    local leaks
+    leaks=$({
+        added_kernel_includes
+        grep -E "$intrinsics_include_pattern|HEADER_ONLY" "$staged_added_code_path"
+        exported_function_names | "$fastest_awk" 'NR == FNR { exported[$0]; next }
+            { for (rest = $0; match(rest, /[A-Za-z_][A-Za-z0-9_]*/); rest = substr(rest, RSTART + RLENGTH))
+                  if (substr(rest, RSTART, RLENGTH) in exported) { print; next } }' - "$staged_added_code_path"
+    } || true)
+    [ -z "$leaks" ] || reject_with_reason "$leaks" \
+        "$staged_path is a ::types header calling an exported function, including a kernel or intrinsics header," \
+        "            or testing HEADER_ONLY; keep containers on the C ABI and move the operation into a cpp/ verb:"
+}
+
+# Rejects a `cpp/` SDK header that names a `_serial` kernel or tier, includes a kernel header, or tests `HEADER_ONLY`
+# beyond the `#error` refusing the header-only deployment, because every SDK verb links the library and calls `_best`;
+# a capability constant like `sz_cap_serial_k` names no kernel.
+check_sdk_verbs_dispatch_only() {
+    local leaks
+    leaks=$({
+        added_kernel_includes
+        scan_staged_file_marking_added_lines '
+            held != "" { if ($0 !~ /^[[:space:]]*#[[:space:]]*error/) print held; held = "" }
+            !(FNR in added) { next }
+            { line = $0; gsub(/[a-z0-9]+_cap_[a-z0-9_]+_k([^A-Za-z0-9_]|$)/, " ", line) }
+            line ~ /(^|[^A-Za-z0-9_])[A-Za-z0-9_]*_serial([^A-Za-z0-9]|$)/ { printf "line %d: %s\n", FNR, $0; next }
+            /HEADER_ONLY/ { if ($0 ~ /^[[:space:]]*#[[:space:]]*if/) held = sprintf("line %d: %s", FNR, $0); else printf "line %d: %s\n", FNR, $0 }
+            END { if (held != "") print held }' "$staged_code_path"
+    } || true)
+    [ -z "$leaks" ] || reject_with_reason "$leaks" \
+        "$staged_path is a cpp/ SDK header naming a serial kernel, including a kernel header, or testing HEADER_ONLY" \
+        "            beyond its #error; call the _best export and include only c/ and ::types headers:"
+}
+
+# Rejects a `_serial` name in a binding, because a binding calls the dispatched `_best` exports, and the serial
+# kernels serve only the library's own tests.
+check_bindings_avoid_serial() {
+    local serial_names
+    if speaks_c_comments "$staged_path"; then
+        serial_names=$(grep -E '(^|[^A-Za-z0-9_])[A-Za-z0-9_]*_serial_?([^A-Za-z0-9_]|$)' "$staged_added_code_path" || true)
+    else
+        serial_names=$(grep -vE '^\+[[:space:]]*(#|//|/\*|\*)' "$staged_added_unquoted_path" |
+            grep -E '(^|[^A-Za-z0-9_])[A-Za-z0-9_]*_serial_?([^A-Za-z0-9_]|$)' || true)
+    fi
+    [ -z "$serial_names" ] || reject_with_reason "$serial_names" \
+        "$staged_path names a serial kernel in a binding; call the dispatched _best export:"
+}
+
+# Routes one staged file through the gates when it sits in a gated directory, every C and C++ source through the
+# pointer-reference, alias-placement and umbrella checks, and the `::types`, SDK and binding sources through theirs.
 run_gate_checks() {
     case "$staged_path" in
     *.h | *.hpp | *.c | *.cpp | *.cc | *.cu | *.cuh | *.hip | *.metal)
@@ -4385,6 +4542,12 @@ run_gate_checks() {
         check_umbrella_mix_absent
         ;;
     esac
+    case "$staged_path" in
+    cpp/*/*.h | cpp/*/*.hpp) check_sdk_verbs_dispatch_only ;;
+    *.md | *.txt | *.toml | *.json | *.yml | *.yaml) ;;
+    python/* | rust/* | javascript/* | swift/* | golang/* | java/* | csharp/* | mojo/* | zig/* | wolfram/*) check_bindings_avoid_serial ;;
+    esac
+    if in_types_headers; then check_types_headers_lean; fi
     in_gated_sources || return 0
     check_constexpr_conditions_named
     check_constexpr_branches_flat
@@ -4404,6 +4567,18 @@ speaks_c_comments() {
     esac
     return 1
 }
+
+# Rejects a header whose path below its root also sits under another of `c/`, `include/` and `cpp/`, because one
+# include line then resolves to whichever root the search path lists first.
+check_header_paths_in_one_root() {
+    local relative=${staged_path#*/} root twins=""
+    for root in c include cpp; do
+        [ "$root" = "${staged_path%%/*}" ] || ! git cat-file -e ":$root/$relative" 2> /dev/null || twins="$twins $root/$relative"
+    done
+    [ -z "$twins" ] || reject_with_reason "$staged_path$twins" \
+        "$staged_path shares its path below the root with another of c/, include/ and cpp/; keep each header path in one root:"
+}
+
 run_shared_checks() {
     case "$staged_path" in
     CMakeLists.txt | */CMakeLists.txt | *.cmake)
@@ -4554,6 +4729,12 @@ run_shared_checks() {
     run_gate_checks
     case "$staged_path" in
     *.md) check_markdown_tex_not_in_code_spans ;;
+    esac
+    case "$staged_path" in
+    *.md | *.rs) check_markdown_code_spans_apart ;;
+    esac
+    case "$staged_path" in
+    c/*.h | c/*.hpp | include/*.h | include/*.hpp | include/*.cuh | cpp/*.h | cpp/*.hpp) check_header_paths_in_one_root ;;
     esac
     case "$staged_path" in
     test/*.hpp | test/*.cuh | test/*.h | bench/*.hpp | bench/*.cuh | bench/*.h) check_harness_namespace_matches_directory ;;

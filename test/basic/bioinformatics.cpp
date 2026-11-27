@@ -229,10 +229,10 @@ static u64_t exhaustive_alignment_distance(std::string_view first, std::string_v
 
 /** The independent-oracle audit: sampled read prefixes short enough for the
  *  exhaustive search, plus the handmade triple at full length. */
-static void test_bioinformatics_independent_oracle(u64_t seed) {
+static void test_bioinformatics_independent_reference(u64_t seed) {
     std::vector<u64_t> previous_row, current_row;
     allocation_ledger_t ledger;
-    auto values = bioinformatics_fixture_t::make_values(16, stream_key(seed, "independent_oracle"),
+    auto values = bioinformatics_fixture_t::make_values(16, stream_key(seed, "independent_reference"),
                                                         counting_allocator_t {ledger});
     for (std::size_t pair = 0; pair + 1 < values.size(); pair += 2) {
         std::string_view const first = std::string_view {values[pair]}.substr(0, 6);
@@ -254,7 +254,7 @@ void test::basic::run_bioinformatics_cases() {
     run_test_case("test_basic_scenarios<bioinformatics_fixture<flaky_waiter_t>>",
                   test_basic_scenarios<bioinformatics_fixture<flaky_waiter_t>>, seed);
     run_test_case("test_bioinformatics_codec", test_bioinformatics_codec);
-    run_test_case("test_bioinformatics_independent_oracle", test_bioinformatics_independent_oracle, seed);
+    run_test_case("test_bioinformatics_independent_reference", test_bioinformatics_independent_reference, seed);
     // The uuid key column.
     run_test_case("test_basic_safegraphs_round_trip<bioinformatics_fixture_t>",
                   test_basic_safegraphs_round_trip<bioinformatics_fixture_t>, seed, "uuid", "needleman-wunsch");

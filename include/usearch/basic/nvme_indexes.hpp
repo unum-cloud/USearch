@@ -45,7 +45,7 @@ namespace unum::usearch::basic {
  */
 template <typename codec_type_, typename key_type_ = uuid128_t, typename node_id_type_ = u32_t,
           typename distance_type_ = f64_t, typename queue_type_ = default_io_queue<dummy_waiter_t>,
-          typename row_kit_type_ = st::serial_row_kit_t,
+          typename threads_type_ = fu::dummy_pool_t, typename row_kit_type_ = st::serial_row_kit_t,
           template <typename> class atomic_ref_template_ = fu::standard_atomic_ref,
           typename wait_type_ = dummy_waiter_t>
     requires std::same_as<node_id_type_, u32_t> || std::same_as<node_id_type_, u64_t>
@@ -57,7 +57,7 @@ class nvme_indexes {
 
     /** The walks every call runs over every part. */
     using catalog_t = nvme_parts_catalog<codec_type_, key_type_, node_id_type_, distance_type_, queue_type_,
-                                         row_kit_type_, atomic_ref_template_, wait_type_>;
+                                         threads_type_, row_kit_type_, atomic_ref_template_, wait_type_>;
     template <typename word_type_>
     using atomic_ref = typename catalog_t::template atomic_ref<word_type_>;
 
